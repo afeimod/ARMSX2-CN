@@ -1074,6 +1074,7 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	const int64_t f_sCycle     = (int64_t)offsetof(fmacPipe, sCycle);
 	const int64_t f_Cycle      = (int64_t)offsetof(fmacPipe, Cycle);
 	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
+	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
 
 	// x7 = &VU->fmac[wpos]. We bake fmac_off into x7 so all fmacPipe field
 	// offsets (0..47) land inside Stp/Ldp's signed-7-bit×4 imm range, which
@@ -1121,14 +1122,28 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	// sCycle (u64) = VU->cycle — from the pinned VU1_CYCLE_REG (x21).
 	armAsm->Str(VU1_CYCLE_REG, MemOperand(x7, f_sCycle));
 
-	// Cycle(const 4) + macflag(from pinned w19) → one Stp.
+	// Cycle(const 4) + macflag(from pinned w19) → one Stp. macflag is
+	// always committed unconditionally by _vuFMACflush (VUops.cpp) so the
+	// slot must carry a valid macflag regardless of VIwrite bits.
 	armAsm->Mov(w5, 4);
 	armAsm->Stp(w5, VU1_MACFLAG_REG, MemOperand(x7, f_Cycle));
 
-	// statusflag + clipflag: both from pinned regs (w20, w28) → one Stp.
-	// Phase-7 eliminated the prior Add + Ldp pattern: the flags are live
-	// in pinned regs for the whole block.
-	armAsm->Stp(VU1_STATUSFLAG_REG, VU1_CLIPFLAG_REG, MemOperand(x7, f_statusflag));
+	// statusflag / clipflag: commit only when this op's flagreg has the
+	// corresponding bit set. _vuFMACflush gates its VI[REG_STATUS_FLAG] /
+	// VI[REG_CLIP_FLAG] stores on the same flagreg bits, so an unset slot
+	// field is never read — skipping the store for plain FMAC arith
+	// (ADD/SUB/MUL/MADD/MSUB/MAX/MINI/ABS: VIwrite==0 → flagregBoth==0)
+	// drops a whole Stp in the common case. CLIP and FSSET are the only
+	// ops that actually set these bits.
+	const bool need_status = (flagregBoth & (1u << REG_STATUS_FLAG)) != 0u;
+	const bool need_clip   = (flagregBoth & (1u << REG_CLIP_FLAG))   != 0u;
+	if (need_status && need_clip)
+		armAsm->Stp(VU1_STATUSFLAG_REG, VU1_CLIPFLAG_REG, MemOperand(x7, f_statusflag));
+	else if (need_status)
+		armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(x7, f_statusflag));
+	else if (need_clip)
+		armAsm->Str(VU1_CLIPFLAG_REG,   MemOperand(x7, f_clipflag));
+	// else (typical): both skipped — _vuFMACflush won't read them.
 
 	// fmaccount++
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmaccount_off));
