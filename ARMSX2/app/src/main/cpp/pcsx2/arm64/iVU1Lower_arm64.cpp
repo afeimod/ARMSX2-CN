@@ -47,8 +47,9 @@ static constexpr int64_t vfOff(u32 reg)
 	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
 }
 
-// Non-inline VI backup wrapper — callable from JIT-emitted code.
-// Mirrors _vuBackupVI() in VUops.cpp (which is __fi and can't be linked).
+// Non-inline VI backup wrapper — retained for the vu1_*-prefixed C wrappers
+// below (used by the REC_VU1_LOWER_CALL interp path when the per-op ISTUB is
+// enabled for LQD/LQI/SQD/SQI). Mirrors _vuBackupVI() in VUops.cpp.
 static void vu1BackupVI(VURegs* VU, u32 reg)
 {
 	if (VU->VIBackupCycles && reg == VU->VIRegNumber)
@@ -61,13 +62,46 @@ static void vu1BackupVI(VURegs* VU, u32 reg)
 	VU->VIOldValue = VU->VI[reg].US[0];
 }
 
-// Emit a BL to vu1BackupVI(VU, reg).
-// Must be emitted before any VI register write.
+// Inline VI backup emitter. Same semantics as vu1BackupVI above, but emitted
+// directly into the JIT buffer instead of a BL. Observation: VIBackupCycles
+// is set to 2 unconditionally in both branches, so we do that first, then
+// conditionally skip the regnum/oldvalue update when the prior state said
+// "same reg, backup still live".
+//
+// reg is a compile-time constant (VI index 0-15).
+// Must be emitted before any VI write (so VIOldValue captures pre-write state).
+// Scratch: w4, w5 (caller-saved; all emitBackupVI call sites avoid these).
 static void emitBackupVI(u32 reg)
 {
-	armAsm->Mov(x0, VU1_BASE_REG);
-	armAsm->Mov(w1, reg);
-	armEmitCall(reinterpret_cast<const void*>(vu1BackupVI));
+	const int64_t vibackup_off = static_cast<int64_t>(offsetof(VURegs, VIBackupCycles));
+	const int64_t viregnum_off = static_cast<int64_t>(offsetof(VURegs, VIRegNumber));
+	const int64_t violdval_off = static_cast<int64_t>(offsetof(VURegs, VIOldValue));
+
+	a64::Label do_update, done;
+
+	// w4 = prior VIBackupCycles (u8, zero-extended).
+	armAsm->Ldrb(w4, MemOperand(VU1_BASE_REG, vibackup_off));
+	// Set VIBackupCycles = 2 unconditionally.
+	armAsm->Mov(w5, 2);
+	armAsm->Strb(w5, MemOperand(VU1_BASE_REG, vibackup_off));
+
+	// Fast-skip regnum/oldvalue update when prior backup was live AND the
+	// tracked reg matches: the existing oldvalue still reflects the correct
+	// pre-write state (the interpreter's _vuBackupVI does the same skip).
+	armAsm->Cbz(w4, &do_update);
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, viregnum_off));
+	armAsm->Cmp(w4, reg);
+	armAsm->B(&done, a64::eq);
+
+	armAsm->Bind(&do_update);
+	armAsm->Mov(w4, reg);
+	armAsm->Str(w4, MemOperand(VU1_BASE_REG, viregnum_off));
+	// VIOldValue is u32 but holds the u16 in its low halfword (matches
+	// `VIOldValue = VI[reg].US[0]` in the interpreter: u16→u32 zero-extend).
+	armAsm->Ldrh(w4, MemOperand(VU1_BASE_REG, viOff(reg)));
+	armAsm->Str(w4, MemOperand(VU1_BASE_REG, violdval_off));
+
+	armAsm->Bind(&done);
 }
 
 // ============================================================================
