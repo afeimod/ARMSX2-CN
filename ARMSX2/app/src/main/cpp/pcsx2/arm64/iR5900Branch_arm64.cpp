@@ -52,7 +52,7 @@ using namespace R5900;
 #define ISTUB_BGEZALL  0
 #define ISTUB_BLTZALL  0
 #define ISTUB_J        0
-#define ISTUB_JAL      0
+#define ISTUB_JAL      1
 #define ISTUB_JR       0
 #define ISTUB_JALR     0
 #define ISTUB_SYSCALL  0
