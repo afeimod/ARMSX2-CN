@@ -1367,60 +1367,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		}
 	}
 
-	// --- Step 2 (TPC write) gating ---
-	// Step 2 writes `VI[REG_TPC].UL = pc_of(i+1)` every pair (2 insns).
-	// Runtime TPC is read by exactly two paths:
-	//   (1) vu1Exec on a VF/CLIP hazard fallback pair — its _vu1Exec reads
-	//       VI[REG_TPC] to locate the instruction.
-	//   (2) Block-exit selector on conditional (IBxx, num_exits==2) or
-	//       indirect (JR/JALR) terminators — reads TPC to pick a successor.
-	// Every other per-pair emit path uses compile-time PC (g_vu1CurrentPC)
-	// or doesn't touch TPC at all (native branch emitters resolve targets
-	// at emit time from g_vu1CurrentPC; step 12 branch-fire, vu1CheckDTBits,
-	// vu1EbitDone, vu1HandleDelayBranch, vu1_TestPipes, vu1_XGKICK_* all
-	// ignore TPC). So step 2 is only required in two cases.
-	//
-	// Precompute link_info here so we can reuse it both to decide whether
-	// the last pair needs TPC and to emit the selector below.
-	const BlockLinkExits link_info         = computeBlockLinkExits(startPC, numPairs);
-	const bool           tpc_read_at_exit  = (link_info.num_exits == 2) || link_info.indirect;
-
-	bool pair_is_hazard[VU1_MAX_BLOCK_PAIRS] = {};
-	bool pair_needs_tpc[VU1_MAX_BLOCK_PAIRS] = {};
-	{
-		// First pass: detect vf/vi-hazard pairs (same predicate as the
-		// hazard fallback at the top of the per-pair loop below).
-		for (u32 i = 0; i < numPairs; i++)
-		{
-			const _VURegsNum& uregs = uregs_data[i];
-			const _VURegsNum& lregs = lregs_data[i];
-			// I-bit pairs can't be hazards (lregs is zero, lower isn't an op).
-			// We recover the I-bit from the raw upper so we don't need a
-			// per-pair ibit[] array.
-			const u32  pc_i = (startPC + i * 8u) & VU1_PROGMASK;
-			const u32  upper_i = *reinterpret_cast<const u32*>(VU1.Micro + pc_i + 4);
-			const bool ibit    = (upper_i >> 31) & 1;
-			const bool vf_hz = !ibit && uregs.VFwrite != 0 &&
-				(lregs.VFwrite == uregs.VFwrite ||
-				 lregs.VFread0 == uregs.VFwrite ||
-				 lregs.VFread1 == uregs.VFwrite);
-			const bool vi_hz = !ibit &&
-				(uregs.VIwrite & (1u << REG_CLIP_FLAG)) &&
-				((lregs.VIwrite & (1u << REG_CLIP_FLAG)) ||
-				 (lregs.VIread  & (1u << REG_CLIP_FLAG)));
-			pair_is_hazard[i] = vf_hz || vi_hz;
-		}
-
-		// Second pass: pair i writes TPC = pc_of(i+1). That value is
-		// consumed if (a) pair i+1 is a hazard fallback, or (b) pair i is
-		// the last pair AND the block's exit selector reads TPC.
-		for (u32 i = 0; i < numPairs; i++)
-		{
-			const bool next_is_hazard = (i + 1 < numPairs) && pair_is_hazard[i + 1];
-			const bool is_last_pair   = (i + 1 == numPairs);
-			pair_needs_tpc[i] = next_is_hazard || (is_last_pair && tpc_read_at_exit);
-		}
-	}
+	// Precompute link_info here for the exit-selector emit below. An earlier
+	// version also used this to gate step 2 (TPC write) per pair, but the
+	// gating caused missing geometry (BIOS menu pillars / memcard icons)
+	// that couldn't be root-caused to a specific reader within the audit
+	// window. Step 2 now emits unconditionally. link_info's computation and
+	// placement here are kept because the exit selector still needs it.
+	const BlockLinkExits link_info = computeBlockLinkExits(startPC, numPairs);
 
 	// --- Compile-time pipeline state tracking (Stages A+B) ---
 	// Pre-walk the block to decide which stall-check / TestPipes BLs can be
@@ -2010,14 +1963,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		armAsm->Add(VU1_CYCLE_REG, VU1_CYCLE_REG, 1);
 
 		// 2. Advance TPC to next pair (compile-time constant).
-		// Gated by pair_needs_tpc[i] — computed above. Only runtime readers
-		// of VI[REG_TPC] are (a) vu1Exec on hazard pairs (so pair-before-
-		// hazard must write it) and (b) the exit selector on conditional/
-		// indirect terminators (so the last pair must write it). Native
-		// branch emitters resolve their targets from g_vu1CurrentPC at emit
-		// time — they don't read runtime TPC. See the gating pre-walk above
-		// for the full soundness argument.
-		if (pair_needs_tpc[i])
+		// Emitted every pair. An earlier optimization attempted to gate
+		// this on "pair_needs_tpc[i]" (next pair is hazard / last pair of
+		// conditional-or-indirect block / max-size block) but caused
+		// missing geometry in BIOS menu rendering that couldn't be
+		// root-caused to a specific TPC reader within the audit window.
+		// The 2 insns/pair cost is small, so revert to unconditional
+		// emission until a repro pins down the missed reader.
 		{
 			const u32 new_tpc = (pc + 8) & VU1_PROGMASK;
 			armAsm->Mov(w4, new_tpc);
