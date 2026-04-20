@@ -39,6 +39,20 @@ extern void _vuXGKICKTransfer(s32 cycles, bool flush);
 // Called one pair after an XGKICK to match microVU's 1-pair delay semantics.
 extern void vu1_XGKICK_fire_deferred(VURegs* VU);
 
+// Hazard-fallback XGKICK bridge — defined in iVU1Lower_arm64.cpp.
+// Emitted after vu1Exec for an XGKICK pair that took the vi_hazard
+// fallback path below. Translates the interp's VU1.xgkick* state into the
+// JIT's s_vu1_pending_xgkick_addr scratch and clears VU1.xgkickenable so
+// a later hazard fallback's _vuTestPipes doesn't trip the broken
+// _vuXGKICKTransfer loop.
+extern void vu1_XGKICK_capture_from_interp(VURegs* VU);
+
+// CHECK_XGKICKHACK sync tick — defined in iVU1Lower_arm64.cpp. Advances
+// the paced XGKICK transfer by `cycles` cycles without flushing. Emitted
+// at memwrite pairs under hack mode to mirror microVU's mVU_XGKICK_SYNC
+// (microVU_Compile.inl:895).
+extern void vu1_XGKICK_hack_sync(VURegs* VU, u32 cycles);
+
 // Recognize XGKICK by raw lower opcode word. Dispatch path is
 //   recVU1_LowerTable[0x40] -> recVU1_LowerOP_Table[0x3C] (T3_00)
 //     -> recVU1_LowerOP_T3_00_Table[0x1B] = recVU1_XGKICK
@@ -49,6 +63,33 @@ static inline bool isXgkickOp(u32 lower)
 	return ((lower >> 25) == 0x40u) &&
 	       ((lower & 0x3fu) == 0x3Cu) &&
 	       (((lower >> 6) & 0x1fu) == 0x1Bu);
+}
+
+// Recognize lower opcodes that write to VU1.Mem. Under CHECK_XGKICKHACK,
+// CompileBlock's pre-walk accumulates xgkick cycles between memwrite
+// boundaries and emits a vu1_XGKICK_hack_sync tick at each memwrite pair
+// — mirrors mVUlow.isMemWrite set by upstream microVU's analyze pass
+// (microVU_Analyze.inl:332 for SQ family, microVU_Lower.inl:1230/1273
+// for ISW/ISWR). Opcode encodings cross-referenced against
+// recVU1_LowerTable (iVU1Lower_arm64.cpp:2515) and the T3 sub-tables.
+//
+//   SQ   : top7 = 0x01
+//   ISW  : top7 = 0x05
+//   SQI  : top7 = 0x40, sub = 0x3D (T3_01), idx = 0x0D
+//   SQD  : top7 = 0x40, sub = 0x3F (T3_11), idx = 0x0D
+//   ISWR : top7 = 0x40, sub = 0x3F (T3_11), idx = 0x0F
+static inline bool isMemWriteOp(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	if (top7 == 0x01u) return true; // SQ
+	if (top7 == 0x05u) return true; // ISW
+	if (top7 != 0x40u) return false;
+	const u32 sub = lower & 0x3fu;
+	const u32 idx = (lower >> 6) & 0x1fu;
+	if (sub == 0x3Du && idx == 0x0Du) return true; // SQI
+	if (sub == 0x3Fu && idx == 0x0Du) return true; // SQD
+	if (sub == 0x3Fu && idx == 0x0Fu) return true; // ISWR
+	return false;
 }
 
 // ============================================================================
@@ -1212,6 +1253,64 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	// epilogue) writes both back in a single Str pair.
 	emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
 
+	// CHECK_XGKICKHACK (C-1): read once at block compile and bake into the
+	// emitted code. recArmVU1::Reset() flushes s_blocks on gamefix toggle
+	// (via VMManager::ApplySettings), so a block's hackmode binding is
+	// stable for the block's cached lifetime.
+	//
+	// Under hackmode the scratch-based pending_xgkick_fire mechanism is
+	// disabled entirely — both JIT and interp agree on VU1.xgkick* state
+	// management (see the C-1 comment block in iVU1Lower_arm64.cpp), so
+	// the step 8a / step 15 / block-end / hazard-capture-from-interp
+	// paths below are all guarded with `!xgkickhack`.
+	const bool xgkickhack = CHECK_XGKICKHACK;
+
+	// Hackmode pre-walk: compute per-pair kickcycles (cycles to sync into
+	// the paced XGKICK transfer at this pair's memwrite boundary).
+	// Accumulates 1 per pair post-XGKICK, commits + resets on memwrite
+	// pairs. Mirrors mVUregs.xgkickcycles / mVUlow.kickcycles accumulation
+	// at microVU_Compile.inl:779-786.
+	//
+	// Note: we count 1 cycle per pair rather than upstream's `1 + stall`
+	// — exact stall counts aren't tracked per-pair in this rec and
+	// under-counting is the conservative choice (sync fires slightly too
+	// early rather than missing bytes). Games relying on this hack tend
+	// not to stall heavily in XGKICK-adjacent code.
+	u32 kick_cycles_sync[VU1_MAX_BLOCK_PAIRS] = {};
+	if (xgkickhack)
+	{
+		u32 accum = 0;
+		u32 pc_walk = startPC;
+		for (u32 i = 0; i < numPairs; i++)
+		{
+			const u32 upper_w = *reinterpret_cast<const u32*>(VU1.Micro + pc_walk + 4);
+			const u32 lower_w = *reinterpret_cast<const u32*>(VU1.Micro + pc_walk);
+			const bool ibit_w = (upper_w >> 31) & 1;
+
+			if (!ibit_w && isXgkickOp(lower_w))
+			{
+				// XGKICK op handles its own sync internally (the helper
+				// calls _vuXGKICKTransfer(0, true) to drain any prior kick
+				// before installing new state). Reset accumulator to 1:
+				// the XGKICK itself counts as 1 cycle toward the NEW
+				// kick's pacing — matches VUops.cpp:1934.
+				accum = 1;
+			}
+			else if (!ibit_w && isMemWriteOp(lower_w))
+			{
+				accum += 1;
+				kick_cycles_sync[i] = accum;
+				accum = 0;
+			}
+			else
+			{
+				accum += 1;
+			}
+
+			pc_walk = (pc_walk + 8) & (VU1_PROGSIZE - 1);
+		}
+	}
+
 	// --- Per-pair code emission ---
 	// XGKICK cycle-delay tracking (mirrors microVU mVUinfo.doXGKICK).
 	// When a pair captures an XGKICK (vu1_XGKICK stashes the addr in
@@ -1221,6 +1320,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	// XGKICK, the prior kick is fired *before* that pair's lower emit
 	// (see step 8a), so pair k's kick always reaches GIF before pair k+1
 	// overwrites the scratch with its own captured addr.
+	//
+	// Unused when xgkickhack=true — see pre-walk above.
 	bool pending_xgkick_fire = false;
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
@@ -1273,14 +1374,46 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			armEmitCall(reinterpret_cast<const void*>(vu1Exec));
 			emitReloadCycleReg(cycle_off);
 			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
-			// Honor pending XGKICK fire from prior pair. Hazard fallbacks
-			// never carry an XGKICK themselves (XGKICK has no VF write and
-			// doesn't touch CLIP), so fire unconditionally when pending.
-			if (pending_xgkick_fire)
+			// Non-hack path only: honor pending XGKICK fire from prior pair
+			// and translate interp-captured XGKICK state into the JIT's
+			// scratch. Under xgkickhack, VU1.xgkick* is managed by both
+			// interp and JIT directly — the interp's _vuXGKICK that runs
+			// inside vu1Exec already set xgkickenable, and our per-pair
+			// sync ticks below will advance the paced transfer. No
+			// translation or scratch-firing needed.
+			//
+			// vf_hazard can only fire when lower reads/writes a VF that
+			// upper wrote, and XGKICK has VFwrite=VFread0=VFread1=0, so
+			// vf_hazard pairs are never XGKICK. vi_hazard, however, can
+			// fire when lower reads CLIP (= VI18) and upper writes CLIP;
+			// XGKICK's _vuRegsXGKICK sets VIread = (1 << _Is_), so an
+			// XGKICK with _Is_ == REG_CLIP_FLAG (vi18) matches. Rare but
+			// legal — handled below under non-hack mode.
+			if (!xgkickhack)
 			{
-				armAsm->Mov(x0, VU1_BASE_REG);
-				armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
-				pending_xgkick_fire = false;
+				if (pending_xgkick_fire)
+				{
+					armAsm->Mov(x0, VU1_BASE_REG);
+					armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+					pending_xgkick_fire = false;
+				}
+				// If this pair is an XGKICK that reached the interp via the
+				// vi_hazard path, vu1Exec's _vuXGKICK left VU1.xgkickenable=true
+				// + xgkickaddr + xgkickcyclecount=1 + VPU_STAT bit 12 set.
+				// None of the non-hack JIT paths manage xgkickenable;
+				// leaving it set would trip a later hazard fallback's
+				// _vuTestPipes into the broken _vuXGKICKTransfer
+				// (iVU1Lower_arm64.cpp:540-548). Translate into the JIT's
+				// pending-fire scratch and clear the interp-side state.
+				// The actual kick fires one pair later via step 15 (or
+				// step 8a on back-to-back), matching the 1-pair delay
+				// semantics used by the normal XGKICK capture path.
+				if (isXgkickOp(lower))
+				{
+					armAsm->Mov(x0, VU1_BASE_REG);
+					armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_capture_from_interp));
+					pending_xgkick_fire = true;
+				}
 			}
 			pc = (pc + 8) & (VU1_PROGSIZE - 1);
 			continue;
@@ -1353,6 +1486,24 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 		//     Inlined: common case is VIBackupCycles==0 → CBZ skips entire block.
 		emitDecrementVIBackup(cycle_off, vibackup_off);
 
+		// 6c. CHECK_XGKICKHACK periodic sync tick (C-1). If the pre-walk
+		//     committed accumulated kickcycles to this pair (only happens
+		//     at memwrite pairs), advance the paced XGKICK transfer
+		//     BEFORE this pair's memwrite emits its store — so the transfer
+		//     reads pre-store VU1.Mem state. Mirrors mVU_XGKICK_SYNC(..., false)
+		//     at microVU_Compile.inl:895.
+		//
+		//     No flush/reload needed: _vuXGKICKTransfer(flush=false) reads
+		//     and writes only VU1.xgkick* fields (all memory-only, not
+		//     cached in x21/x24/x25). vu1_XGKICK_hack_sync is a no-op when
+		//     xgkickenable=false (early return inside _vuXGKICKTransfer).
+		if (xgkickhack && kick_cycles_sync[i] > 0)
+		{
+			armAsm->Mov(x0, VU1_BASE_REG);
+			armAsm->Mov(w1, kick_cycles_sync[i]);
+			armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_hack_sync));
+		}
+
 		// 7. Execute upper instruction.
 		//    Set VU->code at runtime (interpreter reads it for register fields).
 		//    Set VU1.code at compile time so the rec emitter resolves the correct
@@ -1372,13 +1523,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 		}
 		else
 		{
-			// 8a. Back-to-back XGKICK sequencing. If the prior pair captured
-			//     an XGKICK and this pair's lower is also an XGKICK, fire the
-			//     prior kick NOW — before vu1_XGKICK clobbers the scratch
-			//     with the new addr. Pair k+1's upper has already emitted
-			//     above (step 7) and upper ops don't write VU1.Mem, so firing
-			//     here doesn't race with any pending store.
-			if (pending_xgkick_fire && isXgkickOp(lower))
+			// 8a. (non-hack) Back-to-back XGKICK sequencing. If the prior
+			//     pair captured an XGKICK and this pair's lower is also an
+			//     XGKICK, fire the prior kick NOW — before vu1_XGKICK
+			//     clobbers the scratch with the new addr. Pair k+1's upper
+			//     has already emitted above (step 7) and upper ops don't
+			//     write VU1.Mem, so firing here doesn't race with any
+			//     pending store. Under xgkickhack the scratch is unused
+			//     (hack path writes VU1.xgkick* directly and the capture
+			//     helper flushes prior via _vuXGKICKTransfer(0, true) itself).
+			if (!xgkickhack && pending_xgkick_fire && isXgkickOp(lower))
 			{
 				armAsm->Mov(x0, VU1_BASE_REG);
 				armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
@@ -1389,7 +1543,27 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 			VU1.code = lower; // compile-time context
 			g_vu1CurrentPC = pc; // compile-time PC for native branches
+
+			// Hackmode XGKICK: recVU1_XGKICK emits a BL to
+			// vu1_XGKICK_hack_capture which internally runs
+			// _vuXGKICKTransfer(0, true). That writes VU1.cycle (adds
+			// transfersize/8 per iteration under flush) and invokes
+			// _vuTestPipes (reads/writes FMAC + IALU pipeline state), so
+			// flush x21/x24/x25 before the BL and reload after. Non-hack
+			// XGKICK (vu1_XGKICK) only writes s_vu1_pending_xgkick_addr,
+			// so no flush is needed there.
+			const bool hack_xgkick_here = xgkickhack && isXgkickOp(lower);
+			if (hack_xgkick_here)
+			{
+				emitFlushCycleReg(cycle_off);
+				emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+			}
 			recVU1_LowerTable[lower >> 25](); // emits BL to specific interpreter fn
+			if (hack_xgkick_here)
+			{
+				emitReloadCycleReg(cycle_off);
+				emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+			}
 		}
 
 		// 9-11. FMAC clear + AddUpperStalls + AddLowerStalls fused.
@@ -1447,30 +1621,38 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			armAsm->And(VU1_FMAC_WPOS_REG, VU1_FMAC_WPOS_REG, 3);
 		}
 
-		// 15. XGKICK deferred fire. A pending kick from the prior pair is
-		//     emitted here — AFTER this pair's opcodes so any store has
-		//     committed before GIF walks VU1.Mem. Back-to-back XGKICK was
-		//     already handled at step 8a, so if we reach here with pending
-		//     set, this pair's lower is guaranteed to be non-XGKICK.
-		if (pending_xgkick_fire)
+		// 15. (non-hack) XGKICK deferred fire. A pending kick from the
+		//     prior pair is emitted here — AFTER this pair's opcodes so
+		//     any store has committed before GIF walks VU1.Mem. Back-to-
+		//     back XGKICK was already handled at step 8a, so if we reach
+		//     here with pending set, this pair's lower is guaranteed to
+		//     be non-XGKICK. Skipped under xgkickhack: the scratch
+		//     mechanism is disabled and pending_xgkick_fire stays false.
+		if (!xgkickhack)
 		{
-			armAsm->Mov(x0, VU1_BASE_REG);
-			armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
-			pending_xgkick_fire = false;
+			if (pending_xgkick_fire)
+			{
+				armAsm->Mov(x0, VU1_BASE_REG);
+				armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
+				pending_xgkick_fire = false;
+			}
+			// Re-arm for the next pair if this one captured an XGKICK.
+			if (!ibit && isXgkickOp(lower))
+				pending_xgkick_fire = true;
 		}
-		// Re-arm for the next pair if this one captured an XGKICK.
-		if (!ibit && isXgkickOp(lower))
-			pending_xgkick_fire = true;
 
 		pc = (pc + 8) & (VU1_PROGSIZE - 1);
 	}
 
-	// Block-end XGKICK drain. If the last pair was XGKICK we never got a
-	// chance to emit the deferred fire inside the loop — drain here so the
-	// scratch (s_vu1_pending_xgkick_addr) never carries state into the next
-	// compiled block. The file-local static assumption in iVU1Lower_arm64.cpp
-	// depends on this drain firing on every exit path.
-	if (pending_xgkick_fire)
+	// Block-end XGKICK drain (non-hack only). If the last pair was XGKICK
+	// we never got a chance to emit the deferred fire inside the loop —
+	// drain here so the scratch (s_vu1_pending_xgkick_addr) never carries
+	// state into the next compiled block. The file-local static assumption
+	// in iVU1Lower_arm64.cpp depends on this drain firing on every exit
+	// path. Skipped under xgkickhack: VU1.xgkickenable carries across
+	// blocks intentionally — the hack's pacing spans block boundaries via
+	// sync ticks in subsequent blocks.
+	if (!xgkickhack && pending_xgkick_fire)
 	{
 		armAsm->Mov(x0, VU1_BASE_REG);
 		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));

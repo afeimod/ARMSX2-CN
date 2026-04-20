@@ -586,6 +586,106 @@ void vu1_XGKICK_fire_deferred(VURegs* VU)
 	// leaving that to the GIF arbitration loop on the EE thread.
 }
 
+// Hazard-fallback XGKICK bridge. CompileBlock's vi_hazard path
+// (iVU1micro_arm64.cpp:1256) runs vu1Exec for the current pair when upper
+// writes CLIP and lower reads/writes CLIP. XGKICK's _vuRegsXGKICK sets
+// VIread = (1 << _Is_); if a program issues `XGKICK vi18` (vi18 ==
+// REG_CLIP_FLAG — unusual but legal) while the paired upper writes CLIP,
+// the hazard fires and the interpreter's _vuXGKICK runs (VUops.cpp:1918).
+// That leaves VU1.xgkickenable=true, xgkickaddr=<captured>,
+// xgkickcyclecount=1, and VPU_STAT bit 12 set. The JIT's normal paths
+// never manage xgkickenable (the whole point of the
+// s_vu1_pending_xgkick_addr scratch design — see line 501 above), so
+// leaving it set leaks into a later hazard fallback's vu1Exec →
+// _vuTestPipes → _vuXGKICKTransfer, which is the broken loop this file
+// goes to lengths to avoid (line 540-548).
+//
+// This helper translates the interp's captured addr into the JIT's
+// pending-fire scratch and clears the interp-side state so the JIT's
+// "xgkickenable is never true under the rec" invariant is restored.
+// Emitted by CompileBlock right after vu1Exec when isXgkickOp(lower).
+//
+// VU arg is unused (kept for ABI compat with armEmitCall, which loads
+// x0 = VU1_BASE_REG at every call site).
+void vu1_XGKICK_capture_from_interp(VURegs* VU)
+{
+	(void)VU;
+	// Defensive: call site gates on isXgkickOp(lower), so xgkickenable
+	// will always be true here under normal flow. Bail out if the interp
+	// short-circuited _vuXGKICK for any reason rather than overwriting
+	// the scratch with stale VU1.xgkickaddr.
+	if (!VU1.xgkickenable)
+		return;
+	s_vu1_pending_xgkick_addr = VU1.xgkickaddr;
+	VU1.xgkickenable        = false;
+	VU1.xgkicksizeremaining = 0;
+	VU1.xgkickcyclecount    = 0;
+	VU0.VI[REG_VPU_STAT].UL &= ~(1u << 12);
+}
+
+// ============================================================================
+//  CHECK_XGKICKHACK path (C-1) — cycle-paced XGKICK for games needing
+//  accurate GIF-busy emulation (Erementar Gerad and a small set of other
+//  titles with crowd/water/particle shaders).
+//
+//  Model: VU1.xgkick{enable,addr,sizeremaining,cyclecount,diff,endpacket}
+//  are managed directly (matching the interpreter's _vuXGKICK model). The
+//  paced transfer advances via _vuXGKICKTransfer(cycles, flush=false) —
+//  8 bytes per cycle, stops when xgkickcyclecount < 2. Under
+//  CHECK_XGKICKHACK, Gif_Unit.h:606's early-exit branch returns packet
+//  sizes with the EOP top bit set, which keeps _vuXGKICKTransfer's loop
+//  termination working (the bug this file's default path avoids via the
+//  scratch-based direct-fire — see line 540-548).
+//
+//  These helpers are the arm64 equivalents of microVU's mVU_XGKICK_SYNC
+//  (microVU_Lower.inl:1788) and the inline state setup in mVU_XGKICK's
+//  pass2 hack branch (microVU_Lower.inl:1841-1866).
+//
+//  The capture-from-interp bridge above and the s_vu1_pending_xgkick_addr
+//  scratch are NOT used under hack mode — both interp (hazard fallbacks)
+//  and JIT agree on VU1.xgkick* state management, so no translation is
+//  needed.
+// ============================================================================
+
+// Hack-mode XGKICK op body. Flushes any prior kick (drains remaining bytes,
+// advancing VU1.cycle by the transfer time), then sets up a new kick whose
+// paced transfer will be advanced by vu1_XGKICK_hack_sync calls emitted
+// at memwrite pairs. Mirrors the interpreter's _vuXGKICK (VUops.cpp:1918).
+//
+// Callers in CompileBlock flush x21 (cached VU1.cycle) + x24/x25 (cached
+// fmac/ialu wpos) before the BL and reload them after, because
+// _vuXGKICKTransfer(0, true) writes VU1.cycle and the trailing
+// _vuTestPipes reads/writes fmacwritepos/ialuwritepos.
+static void vu1_XGKICK_hack_capture(VURegs* VU)
+{
+	if (VU1.xgkickenable)
+		_vuXGKICKTransfer(0, true);
+
+	const u32 addr = (VU->VI[W_Is(VU)].US[0] & 0x3ffu) * 16u;
+	VU1.xgkickenable        = true;
+	VU1.xgkickaddr          = addr;
+	VU1.xgkicksizeremaining = 0;
+	VU1.xgkickendpacket     = false;
+	VU1.xgkicklastcycle     = VU1.cycle;
+	VU1.xgkickcyclecount    = 1; // XGKICK itself counts as 1 cycle (see VUops.cpp:1934)
+	VU1.xgkickdiff          = 0x4000u - addr;
+	VU0.VI[REG_VPU_STAT].UL |= (1u << 12);
+}
+
+// Hack-mode periodic sync tick. Advances the paced transfer by `cycles`
+// without flushing. No-op if xgkickenable=false (early return inside
+// _vuXGKICKTransfer). Emitted by CompileBlock at memwrite pairs —
+// matches mVU_XGKICK_SYNC(mVU, false) at microVU_Compile.inl:895.
+//
+// Caller does NOT need to flush x21/x24/x25: with flush=false,
+// _vuXGKICKTransfer touches only VU1.xgkick{cyclecount,addr,sizeremaining,
+// diff,enable,endpacket} — none of which the JIT caches.
+void vu1_XGKICK_hack_sync(VURegs* VU, u32 cycles)
+{
+	(void)VU;
+	_vuXGKICKTransfer(static_cast<s32>(cycles), false);
+}
+
 // ============================================================================
 //  Per-instruction interp stub toggles (1 = interp, 0 = native)
 // ============================================================================
@@ -2363,7 +2463,19 @@ REC_VU1_LOWER_CALL(XTOP)
 #if ISTUB_VU_XGKICK
 REC_VU1_LOWER_INTERP(XGKICK)
 #else
-REC_VU1_LOWER_CALL(XGKICK)
+// XGKICK has two native paths. CHECK_XGKICKHACK is read at compile time;
+// recArmVU1::Reset() (called on gamefix toggle via VMManager::ApplySettings)
+// flushes s_blocks, so this binding is stable for every cached block's
+// lifetime. See the C-1 comment block above vu1_XGKICK_hack_capture for
+// the full rationale.
+void recVU1_XGKICK()
+{
+	armAsm->Mov(x0, VU1_BASE_REG);
+	if (CHECK_XGKICKHACK)
+		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK_hack_capture));
+	else
+		armEmitCall(reinterpret_cast<const void*>(vu1_XGKICK));
+}
 #endif
 
 // ============================================================================
