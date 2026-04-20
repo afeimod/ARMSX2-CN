@@ -1343,14 +1343,35 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	};
 	PerPairSkip skip_info[VU1_MAX_BLOCK_PAIRS] = {};
 
-	// Stage A+B pre-walk DISABLED (commit 9a68eba8 introduced a correctness
-	// regression — Crazy Taxi breaks. The zero-initialized skip_info above
-	// causes every BL to emit unconditionally, matching pre-9a68eba8
-	// behavior. Later work (Stage C caching in c8c394813 and the XGKICK
-	// fixes in 28a8c785f) still depends on the skip_info fields existing,
-	// so we keep the scaffolding and just short-circuit the pre-walk body.
-	// TODO: root-cause the Stage A+B soundness issue and re-enable.
-	if ((false))
+	// Stage A+B pre-walk (re-enabled after root-causing the Crazy Taxi bug
+	// from commit 9a68eba8).
+	//
+	// Original bug: `skipTestPipes` relied on a maturity check using
+	// `ct_delta` (pair-indexed, no stall tracking). Runtime cycle can be
+	// LARGER than ct_cycle due to stall tests bumping runtime_cycle, which
+	// means a slot with `ct_delta < Cycle` (our model: not mature) can
+	// have `runtime_delta >= Cycle` (runtime: hardware-mature). Skipping
+	// `_vuTestPipes` in that window leaves the mature slot unfed through
+	// `_vuFMACflush` / `_vuFDIVflush` / `_vuEFUflush` — so VI[FLAG_*] /
+	// VI[REG_Q] / VI[REG_P] don't get committed. Games that read those
+	// (FCAND/FCGET/FMxxx/FSxxx, MFIR from Q/P, ADDq, MULq) then see stale
+	// values.
+	//
+	// Fix: `skipTestPipes` now requires ALL pipe rings to be empty in our
+	// model AND all carry-in gates cleared. That rules out the staleness
+	// window entirely — if nothing's in our ring, nothing's pending at
+	// runtime that could have matured stall-bumped either (by the same
+	// monotonicity argument that underpins stall-check soundness).
+	//
+	// Stall-check skips (skipUpperFMACStall0/1, skipLowerFMACStall0/1,
+	// skipLowerFDIVWait, skipLowerEFUWait, skipLowerALUStall) remain
+	// active — they're sound. Their soundness argument is DIFFERENT:
+	// they're based on "no matching slot in our ring" not "no mature
+	// slot". Runtime's stall tests inline `if (delta >= Cycle) continue`
+	// which treats stall-matured slots as retired WITHOUT needing
+	// TestPipes to run. So our ring ⊇ runtime's effective (non-retired-
+	// by-inline) ring, and "no match in our ring" → "no match in
+	// runtime's effective ring" → safe to skip.
 	{
 		int ct_cycle = 0;
 		u32 pc_walk = startPC;
@@ -1446,26 +1467,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				}
 			}
 
-			// step 6 TestPipes: decide elision BEFORE retiring, then retire.
-			// The BL is a no-op when nothing matures at this pair AND all
-			// pipes' carry-in gates have cleared.
-			{
-				const bool fmacMature = (ct_fmac_count > 0)
-					&& ct_fmac[ct_fmac_rpos].valid
-					&& (ct_cycle - ct_fmac[ct_fmac_rpos].sCycle) >= 4;
-				const bool fdivMature = ct_fdiv_pending
-					&& (ct_cycle - ct_fdiv_sCycle) >= ct_fdiv_cycles;
-				const bool efuMature  = ct_efu_pending
-					&& (ct_cycle - ct_efu_sCycle) >= ct_efu_cycles;
-				const bool ialuMature = (ct_ialu_count > 0)
-					&& ct_ialu[ct_ialu_rpos].valid
-					&& (ct_cycle - ct_ialu[ct_ialu_rpos].sCycle) >= ct_ialu[ct_ialu_rpos].cycles;
-
-				skip_info[i].skipTestPipes =
-					!fmacMature && !fdivMature && !efuMature && !ialuMature
-					&& fmac_carry_safe && fdiv_carry_safe
-					&& efu_carry_safe  && ialu_carry_safe;
-			}
+			// step 6 TestPipes: decide elision. Must require ALL pipe rings
+			// empty in our model AND all carry-in gates cleared — see the
+			// pre-walk header comment for the soundness argument. Checking
+			// maturity (the old approach) is UNSAFE: stall bumps can make
+			// runtime slots mature ahead of our model, and those slots have
+			// VI-visible writes (flag/Q/P) that need _vuTestPipes to commit.
+			skip_info[i].skipTestPipes =
+				ct_fmac_count == 0   && fmac_carry_safe
+				&& !ct_fdiv_pending  && fdiv_carry_safe
+				&& !ct_efu_pending   && efu_carry_safe
+				&& ct_ialu_count == 0 && ialu_carry_safe;
 
 			// Retire mature slots in the CT model.
 			while (ct_fmac_count > 0)
