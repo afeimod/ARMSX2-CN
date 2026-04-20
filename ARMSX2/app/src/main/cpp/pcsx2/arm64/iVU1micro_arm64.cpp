@@ -995,8 +995,11 @@ static void emitDecrementVIBackup(int64_t /*cycle_off*/, int64_t vibackup_off)
 // emitted. x24's upper 32 bits are guaranteed zero by the zero-extend-on-
 // 32-bit-write rule — every write to w24 in this file is a 32-bit op.
 //
-// Scratch: w5/x5, x6, x7. x7 ends up holding &VU->fmac[wpos]; the per-field
-// offsets (offsetof(fmacPipe, ...)) bake into each Str's MemOperand immediate.
+// Scratch: w4/x4, w5/x5, w6/x6, x7, x8. x7 holds &VU->fmac[wpos] (fmac_off
+// already folded in, so fmacPipe field offsets fit in Stp/Ldp's imm7 range).
+// x8 is a transient base for the Ldp of VU->statusflag+clipflag whose offset
+// from VU1_BASE exceeds Ldp's imm7 range. All caller-saved per AAPCS64; no
+// BL between here and the last use, so they don't need preservation.
 static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 {
 	const bool upperFMAC = (uregs.pipe == VUPIPE_FMAC);
@@ -1015,59 +1018,86 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	const int64_t fmaccount_off  = (int64_t)offsetof(VURegs, fmaccount);
 	const int64_t macflag_off    = (int64_t)offsetof(VURegs, macflag);
 	const int64_t statusflag_off = (int64_t)offsetof(VURegs, statusflag);
-	const int64_t clipflag_off   = (int64_t)offsetof(VURegs, clipflag);
+	// clipflag is loaded paired with statusflag via Ldp, so no dedicated
+	// offset is needed — the field layout consistency is asserted below.
+	static_assert(offsetof(VURegs, clipflag) == offsetof(VURegs, statusflag) + 4,
+		"Ldp(statusflag, clipflag) requires adjacent u32 layout in VURegs");
+	static_assert(offsetof(fmacPipe, clipflag) == offsetof(fmacPipe, statusflag) + 4,
+		"Stp(statusflag, clipflag) requires adjacent u32 layout in fmacPipe");
+	static_assert(offsetof(fmacPipe, macflag) == offsetof(fmacPipe, Cycle) + 4,
+		"Stp(Cycle, macflag) requires adjacent u32 layout in fmacPipe");
+	static_assert(offsetof(fmacPipe, reglower) == offsetof(fmacPipe, regupper) + 4,
+		"Stp(regupper, reglower) requires adjacent u32 layout in fmacPipe");
+	static_assert(offsetof(fmacPipe, xyzwupper) == offsetof(fmacPipe, flagreg) + 4,
+		"Stp(flagreg, xyzwupper) requires adjacent u32 layout in fmacPipe");
 
 	const int64_t f_regupper   = (int64_t)offsetof(fmacPipe, regupper);
-	const int64_t f_reglower   = (int64_t)offsetof(fmacPipe, reglower);
 	const int64_t f_flagreg    = (int64_t)offsetof(fmacPipe, flagreg);
-	const int64_t f_xyzwupper  = (int64_t)offsetof(fmacPipe, xyzwupper);
 	const int64_t f_xyzwlower  = (int64_t)offsetof(fmacPipe, xyzwlower);
 	const int64_t f_sCycle     = (int64_t)offsetof(fmacPipe, sCycle);
 	const int64_t f_Cycle      = (int64_t)offsetof(fmacPipe, Cycle);
-	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
 	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
-	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
 
-	// x5 = wpos * 48 = (wpos * 3) << 4 — x24 is the zero-extended 64-bit
-	// view of w24 (VU1_FMAC_WPOS_REG), safe because every write to w24 is
-	// 32-bit and therefore zeroes the top half.
-	armAsm->Add(x5, x24, Operand(x24, LSL, 1));
-	armAsm->Lsl(x5, x5, 4);
-	// x7 = VU1_BASE + wpos*48 (fmac_off baked into each Str's imm).
-	armAsm->Add(x7, VU1_BASE_REG, x5);
+	// x7 = &VU->fmac[wpos]. We bake fmac_off into x7 so all fmacPipe field
+	// offsets (0..47) land inside Stp/Ldp's signed-7-bit×4 imm range, which
+	// lets us pair adjacent u32 fields into one store each. Shift-folded
+	// setup keeps this at 3 insns, same as the pre-Stp version:
+	//   (wpos*3) << 4  ==  wpos*48.
+	armAsm->Add(x5, x24, Operand(x24, LSL, 1));          // x5 = wpos*3
+	armAsm->Add(x7, VU1_BASE_REG, Operand(x5, LSL, 4));  // x7 = VU1_BASE + wpos*48
+	armAsm->Add(x7, x7, fmac_off);                        // x7 = &VU->fmac[wpos]
 
-	auto storeImm32 = [&](u32 value, int64_t field_off) {
+	// Pick source register for a compile-time u32 field — wzr when the
+	// value is 0 (skips the Mov). Stp/Str accept wzr as a source.
+	auto regFor = [&](u32 value, const Register& scratch) -> Register {
 		if (value == 0)
-		{
-			armAsm->Str(wzr, MemOperand(x7, fmac_off + field_off));
-		}
-		else
-		{
-			armAsm->Mov(w6, value);
-			armAsm->Str(w6, MemOperand(x7, fmac_off + field_off));
-		}
+			return wzr;
+		armAsm->Mov(scratch, value);
+		return scratch;
 	};
 
-	storeImm32(regUpper,    f_regupper);
-	storeImm32(regLower,    f_reglower);
-	storeImm32(flagregBoth, f_flagreg);
-	storeImm32(xyzwUpper,   f_xyzwupper);
-	storeImm32(xyzwLower,   f_xyzwlower);
+	// fmacPipe layout: regupper(0) reglower(4) flagreg(8) xyzwupper(12)
+	//                  xyzwlower(16) _pad(20) sCycle(24) Cycle(32)
+	//                  macflag(36) statusflag(40) clipflag(44).
+	// All-u32 adjacent pairs get Stp'd.
 
-	// sCycle (u64) = VU->cycle — use the cached VU1_CYCLE_REG directly.
-	armAsm->Str(VU1_CYCLE_REG, MemOperand(x7, fmac_off + f_sCycle));
+	// regupper + reglower → one Stp
+	{
+		Register r1 = regFor(regUpper, w5);
+		Register r2 = regFor(regLower, w6);
+		armAsm->Stp(r1, r2, MemOperand(x7, f_regupper));
+	}
 
-	// Cycle = 4 (compile-time constant — FMAC latency is always 4).
-	armAsm->Mov(w6, 4);
-	armAsm->Str(w6, MemOperand(x7, fmac_off + f_Cycle));
+	// flagreg + xyzwupper → one Stp
+	{
+		Register r1 = regFor(flagregBoth, w5);
+		Register r2 = regFor(xyzwUpper,   w6);
+		armAsm->Stp(r1, r2, MemOperand(x7, f_flagreg));
+	}
 
-	// macflag / statusflag / clipflag snapshotted from VU->*.
+	// xyzwlower sits alone (next 4 bytes are padding before sCycle).
+	{
+		Register r = regFor(xyzwLower, w5);
+		armAsm->Str(r, MemOperand(x7, f_xyzwlower));
+	}
+
+	// sCycle (u64) = VU->cycle — from the pinned VU1_CYCLE_REG (x21).
+	armAsm->Str(VU1_CYCLE_REG, MemOperand(x7, f_sCycle));
+
+	// Cycle(const 4) + macflag(loaded from VU->macflag) → one Stp.
+	armAsm->Mov(w5, 4);
 	armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, macflag_off));
-	armAsm->Str(w6, MemOperand(x7, fmac_off + f_macflag));
-	armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, statusflag_off));
-	armAsm->Str(w6, MemOperand(x7, fmac_off + f_statusflag));
-	armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, clipflag_off));
-	armAsm->Str(w6, MemOperand(x7, fmac_off + f_clipflag));
+	armAsm->Stp(w5, w6, MemOperand(x7, f_Cycle));
+
+	// statusflag + clipflag: paired via Ldp + Stp. VURegs lays out macflag,
+	// statusflag, clipflag as consecutive u32 (see VU.h), so Ldp from
+	// &VU->statusflag yields statusflag + clipflag.
+	//
+	// statusflag_off is ~VU offset 1188 which is outside Ldp's imm7 range
+	// (±256 for 32-bit pair), so we compute a base scratch first.
+	armAsm->Add(x8, VU1_BASE_REG, statusflag_off);
+	armAsm->Ldp(w5, w6, MemOperand(x8));
+	armAsm->Stp(w5, w6, MemOperand(x7, f_statusflag));
 
 	// fmaccount++
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmaccount_off));
