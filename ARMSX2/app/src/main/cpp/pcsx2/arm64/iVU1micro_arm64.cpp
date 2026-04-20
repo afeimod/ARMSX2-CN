@@ -805,6 +805,19 @@ static void emitReloadCycleReg(int64_t cycle_off)
 static const auto VU1_FMAC_WPOS_REG = w24;
 static const auto VU1_IALU_WPOS_REG = w25;
 
+// Phase-6 opt #1: pinned pointers to the linkEntry gate globals. Both are
+// callee-saved (x19-x28 per AAPCS64). Loaded once at block prologue,
+// restored at epilogue. Collapses each linkEntry budget+termination check
+// from ~9 instructions (two adrp+add+ldr sequences) down to ~5 (direct
+// Ldr via the pinned base). Since every linked-chain block entry runs
+// this gate, the compounded savings are significant.
+//
+//   x26 → &s_vu1_cycle_limit  (u64)
+//   x27 → &s_vu1_program_ended (THREAD_VU1) OR &VU0 (!THREAD_VU1,
+//         used with vpu_stat_off for the VPU_STAT 0x100 test)
+static const auto VU1_CYCLE_LIMIT_ADDR_REG = x26;
+static const auto VU1_TERM_ADDR_REG        = x27;
+
 static void emitFlushWposRegs(int64_t fmacwpos_off, int64_t ialuwpos_off)
 {
 	armAsm->Str(VU1_FMAC_WPOS_REG, MemOperand(VU1_BASE_REG, fmacwpos_off));
@@ -1560,13 +1573,24 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//   [sp+32..39] = x23 (VU1_BASE_REG)
 	//   [sp+40..47] = x24 (VU1_FMAC_WPOS_REG — Stage C3 cached fmacwritepos)
 	//   [sp+48..55] = x25 (VU1_IALU_WPOS_REG — Stage C3 cached ialuwritepos)
-	//   [sp+56..63] = unused pad for 16-byte alignment
-	armAsm->Stp(x29, x30, MemOperand(sp, -64, PreIndex));
+	//   [sp+56..63] = x26 (VU1_CYCLE_LIMIT_ADDR_REG — opt #1 pinned gate addr)
+	//   [sp+64..71] = x27 (VU1_TERM_ADDR_REG           — opt #1 pinned gate addr)
+	//   [sp+72..79] = unused pad for 16-byte alignment
+	armAsm->Stp(x29, x30, MemOperand(sp, -80, PreIndex));
 	armAsm->Stp(VU1_CYCLE_REG, x22, MemOperand(sp, 16));
 	armAsm->Stp(VU1_BASE_REG, x24, MemOperand(sp, 32));
-	armAsm->Str(x25, MemOperand(sp, 48));
+	armAsm->Stp(x25, VU1_CYCLE_LIMIT_ADDR_REG, MemOperand(sp, 48));
+	armAsm->Str(VU1_TERM_ADDR_REG, MemOperand(sp, 64));
 	armAsm->Mov(x29, sp);
 	armMoveAddressToReg(VU1_BASE_REG, &VU1);
+	// Opt #1: pin the linkEntry gate addresses. Loaded once per block;
+	// every codeEntry+linkEntry pair amortizes the cost across all linked
+	// entries within the chain.
+	armMoveAddressToReg(VU1_CYCLE_LIMIT_ADDR_REG, &s_vu1_cycle_limit);
+	if (THREAD_VU1)
+		armMoveAddressToReg(VU1_TERM_ADDR_REG, &s_vu1_program_ended);
+	else
+		armMoveAddressToReg(VU1_TERM_ADDR_REG, &VU0);
 
 	// Compile-time constants for field offsets used throughout the loop.
 	const int64_t cycle_off     = (int64_t)offsetof(VURegs, cycle);
@@ -1627,28 +1651,26 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//
 	//      Matches the old `stopped` computation in Execute's while body.
 	//
-	// Cost: ~6-8 instructions per block entry. Could hoist the limit /
-	// flag addresses into pinned registers in a future perf pass.
+	// Opt #1: both gate-target addresses are pre-pinned in
+	// VU1_CYCLE_LIMIT_ADDR_REG (x26) and VU1_TERM_ADDR_REG (x27) by the
+	// prologue. linkEntry collapses to Ldr + Cmp + B per check.
 	{
 		// 1. Cycle budget.
-		armMoveAddressToReg(x5, &s_vu1_cycle_limit);
-		armAsm->Ldr(x5, MemOperand(x5));
+		armAsm->Ldr(x5, MemOperand(VU1_CYCLE_LIMIT_ADDR_REG));
 		armAsm->Cmp(VU1_CYCLE_REG, x5);
 		armAsm->B(&budget_exceeded_exit, hs);
 
 		// 2. Termination.
 		if (THREAD_VU1)
 		{
-			armMoveAddressToReg(x5, &s_vu1_program_ended);
-			armAsm->Ldrb(w5, MemOperand(x5));
+			armAsm->Ldrb(w5, MemOperand(VU1_TERM_ADDR_REG));
 			armAsm->Cbnz(w5, &budget_exceeded_exit);
 		}
 		else
 		{
 			const int64_t vpu_stat_off = (int64_t)offsetof(VURegs, VI)
 				+ REG_VPU_STAT * (int64_t)sizeof(REG_VI);
-			armMoveAddressToReg(x5, &VU0);
-			armAsm->Ldr(w5, MemOperand(x5, vpu_stat_off));
+			armAsm->Ldr(w5, MemOperand(VU1_TERM_ADDR_REG, vpu_stat_off));
 			armAsm->Tst(w5, 0x100);
 			armAsm->B(&budget_exceeded_exit, eq);
 		}
@@ -2213,11 +2235,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// memory before restoring the caller's x24/x25.
 	emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
 
-	// --- Epilogue (64-byte frame; mirrors the prologue layout above) ---
-	armAsm->Ldr(x25, MemOperand(sp, 48));
+	// --- Epilogue (80-byte frame; mirrors the prologue layout above) ---
+	armAsm->Ldr(VU1_TERM_ADDR_REG, MemOperand(sp, 64));
+	armAsm->Ldp(x25, VU1_CYCLE_LIMIT_ADDR_REG, MemOperand(sp, 48));
 	armAsm->Ldp(VU1_BASE_REG, x24, MemOperand(sp, 32));
 	armAsm->Ldp(VU1_CYCLE_REG, x22, MemOperand(sp, 16));
-	armAsm->Ldp(x29, x30, MemOperand(sp, 64, PostIndex));
+	armAsm->Ldp(x29, x30, MemOperand(sp, 80, PostIndex));
 	armAsm->Ret();
 
 	u8* end = armEndBlock();
