@@ -133,12 +133,14 @@ static inline bool isMemWriteOp(u32 lower)
 }
 
 // ============================================================================
-//  Rec emitter dispatch tables (defined in iVU1Upper/Lower_arm64.cpp)
+//  Rec emitter dispatch entry points (defined in iVU1Upper/Lower_arm64.cpp).
+//  These replaced recVU1_UpperTable[64] / recVU1_LowerTable[128] — direct
+//  switch dispatchers in the same TU as the per-op emitters, so the
+//  compiler can inline small emitters and drop the indirect-call overhead.
 // ============================================================================
 
-using VU1RecFn = void (*)();
-extern VU1RecFn recVU1_UpperTable[64];
-extern VU1RecFn recVU1_LowerTable[128];
+void emitVU1Upper(u32 upper);
+void emitVU1Lower(u32 lower);
 
 // Flag-deferral state owned by iVU1Upper_arm64.cpp. Set per-pair before
 // dispatching the upper emitter — when false, FMAC arithmetic emitters
@@ -2106,7 +2108,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 		VU1.code = upper; // compile-time context for the rec emitter
 		g_vu1NeedsFlags = pair_needs_flags[i]; // flag-deferral hint for FMAC emitters
-		recVU1_UpperTable[upper & 0x3f](); // emits BL to specific interpreter fn
+		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
 
 		// 8. Lower instruction handling.
 		if (ibit)
@@ -2152,7 +2154,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				emitFlushCycleReg(cycle_off);
 				emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
 			}
-			recVU1_LowerTable[lower >> 25](); // emits BL to specific interpreter fn
+			emitVU1Lower(lower); // switch dispatch — emits native ARM64 for this op
 			if (hack_xgkick_here)
 			{
 				emitReloadCycleReg(cycle_off);

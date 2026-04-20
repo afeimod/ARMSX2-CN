@@ -2592,68 +2592,51 @@ static VU1RecFn recVU1_LowerOP_Table[64] = {
 static void recVU1_LowerOP() { recVU1_LowerOP_Table[VU1.code & 0x3f](); }
 
 // ============================================================================
-//  recVU1_LowerTable[128]
+//  emitVU1Lower — top-level lower-opcode dispatch.
 //
-//  Maps lower opcode index (lower_word >> 25) to a code-emitter function.
-//  Layout mirrors VU1_LOWER_OPCODE in VUops.cpp.
-//  Index 0x40 dispatches through recVU1_LowerOP sub-table chain.
+//  Replaces the old recVU1_LowerTable[128] function-pointer array with a
+//  compile-time switch on `lower >> 25`. Same TU as the recVU1_* emitters,
+//  so the compiler can inline small ones (e.g. IADDIU, FCGET) directly into
+//  the dispatcher instead of going through an indirect call.
+//
+//  Layout mirrors VU1_LOWER_OPCODE in VUops.cpp. Index 0x40 dispatches into
+//  the recVU1_LowerOP sub-table chain (still a table-driven sub-dispatch,
+//  which is fine — those paths are much rarer than the direct cases below).
+//  All other unassigned indices land on recVU1_Lower_Unknown via default.
 // ============================================================================
-
-// clang-format off
-// 128 entries, 4 per line = 32 lines
-VU1RecFn recVU1_LowerTable[128] = {
-	// 0x00-0x03: LQ, SQ, unk, unk
-	recVU1_LQ,            recVU1_SQ,            recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x04-0x07: ILW, ISW, unk, unk
-	recVU1_ILW,           recVU1_ISW,           recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x08-0x0B: IADDIU, ISUBIU, unk, unk
-	recVU1_IADDIU,        recVU1_ISUBIU,        recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x0C-0x0F: unk x4
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x10-0x13: FCEQ, FCSET, FCAND, FCOR
-	recVU1_FCEQ,          recVU1_FCSET,         recVU1_FCAND,         recVU1_FCOR,
-	// 0x14-0x17: FSEQ, FSSET, FSAND, FSOR
-	recVU1_FSEQ,          recVU1_FSSET,         recVU1_FSAND,         recVU1_FSOR,
-	// 0x18-0x1B: FMEQ, unk, FMAND, FMOR
-	recVU1_FMEQ,          recVU1_Lower_Unknown, recVU1_FMAND,         recVU1_FMOR,
-	// 0x1C-0x1F: FCGET, unk, unk, unk
-	recVU1_FCGET,         recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x20-0x23: B, BAL, unk, unk
-	recVU1_B,             recVU1_BAL,           recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x24-0x27: JR, JALR, unk, unk
-	recVU1_JR,            recVU1_JALR,          recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x28-0x2B: IBEQ, IBNE, unk, unk
-	recVU1_IBEQ,          recVU1_IBNE,          recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x2C-0x2F: IBLTZ, IBGTZ, IBLEZ, IBGEZ
-	recVU1_IBLTZ,         recVU1_IBGTZ,         recVU1_IBLEZ,         recVU1_IBGEZ,
-	// 0x30-0x3F: unknown x16
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x40: LowerOP (sub-table dispatch via recVU1_LowerOP)
-	// 0x41-0x43: unknown
-	recVU1_LowerOP,       recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x44-0x47: unknown x4
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x48-0x4B: unknown x4
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x4C-0x4F: unknown x4
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x50-0x5F: unknown x16
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x60-0x6F: unknown x16
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	// 0x70-0x7F: unknown x16
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-	recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown, recVU1_Lower_Unknown,
-};
-// clang-format on
+void emitVU1Lower(u32 lower)
+{
+	switch (lower >> 25)
+	{
+		case 0x00: recVU1_LQ();      break;
+		case 0x01: recVU1_SQ();      break;
+		case 0x04: recVU1_ILW();     break;
+		case 0x05: recVU1_ISW();     break;
+		case 0x08: recVU1_IADDIU();  break;
+		case 0x09: recVU1_ISUBIU();  break;
+		case 0x10: recVU1_FCEQ();    break;
+		case 0x11: recVU1_FCSET();   break;
+		case 0x12: recVU1_FCAND();   break;
+		case 0x13: recVU1_FCOR();    break;
+		case 0x14: recVU1_FSEQ();    break;
+		case 0x15: recVU1_FSSET();   break;
+		case 0x16: recVU1_FSAND();   break;
+		case 0x17: recVU1_FSOR();    break;
+		case 0x18: recVU1_FMEQ();    break;
+		case 0x1A: recVU1_FMAND();   break;
+		case 0x1B: recVU1_FMOR();    break;
+		case 0x1C: recVU1_FCGET();   break;
+		case 0x20: recVU1_B();       break;
+		case 0x21: recVU1_BAL();     break;
+		case 0x24: recVU1_JR();      break;
+		case 0x25: recVU1_JALR();    break;
+		case 0x28: recVU1_IBEQ();    break;
+		case 0x29: recVU1_IBNE();    break;
+		case 0x2C: recVU1_IBLTZ();   break;
+		case 0x2D: recVU1_IBGTZ();   break;
+		case 0x2E: recVU1_IBLEZ();   break;
+		case 0x2F: recVU1_IBGEZ();   break;
+		case 0x40: recVU1_LowerOP(); break;
+		default:   recVU1_Lower_Unknown(); break;
+	}
+}

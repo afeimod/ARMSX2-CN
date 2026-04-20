@@ -1862,47 +1862,87 @@ static void recVU1_Upper_FD()
 }
 
 // ============================================================================
-//  recVU1_UpperTable[64]
+//  emitVU1Upper — top-level upper-opcode dispatch.
 //
-//  Maps upper opcode index (upper_word & 0x3f) to a code-emitter function.
+//  Replaces the old recVU1_UpperTable[64] function-pointer array with a
+//  compile-time switch on `upper & 0x3f`. Generates a jump table under most
+//  optimisers (64 dense cases), but being in the same TU as the emitters
+//  lets the compiler see straight through to each recVU1_* function instead
+//  of stopping at an indirect call — so it can inline small emitters like
+//  recVU1_NOP directly into the dispatcher.
+//
 //  Layout mirrors VU1_UPPER_OPCODE in VUops.cpp.
-//
-//  Indices 0x30-0x3B are reserved/unknown in the VU ISA; recVU1_Upper_FD
-//  falls back to VU1_UPPER_OPCODE for those (includes unknown-insn logging).
-//  Indices 0x3C-0x3F are the FD sub-table; recVU1_Upper_FD does compile-time
-//  dispatch into the appropriate recVU1_* emitter based on VU1.code.
+//    0x00-0x2F: direct FMAC / MAX / MINI variants.
+//    0x30-0x3F: delegated to recVU1_Upper_FD (which does its own compile-time
+//               FD sub-table dispatch; 0x30-0x3B fall back to the interpreter
+//               via VU1_UPPER_OPCODE for reserved/unknown slots).
 // ============================================================================
-using VU1RecFn = void (*)();
-
-VU1RecFn recVU1_UpperTable[64] = {
-	// 0x00-0x03: ADD broadcast
-	recVU1_ADDx, recVU1_ADDy, recVU1_ADDz, recVU1_ADDw,
-	// 0x04-0x07: SUB broadcast
-	recVU1_SUBx, recVU1_SUBy, recVU1_SUBz, recVU1_SUBw,
-	// 0x08-0x0B: MADD broadcast
-	recVU1_MADDx, recVU1_MADDy, recVU1_MADDz, recVU1_MADDw,
-	// 0x0C-0x0F: MSUB broadcast
-	recVU1_MSUBx, recVU1_MSUBy, recVU1_MSUBz, recVU1_MSUBw,
-	// 0x10-0x13: MAX broadcast
-	recVU1_MAXx, recVU1_MAXy, recVU1_MAXz, recVU1_MAXw,
-	// 0x14-0x17: MINI broadcast
-	recVU1_MINIx, recVU1_MINIy, recVU1_MINIz, recVU1_MINIw,
-	// 0x18-0x1B: MUL broadcast
-	recVU1_MULx, recVU1_MULy, recVU1_MULz, recVU1_MULw,
-	// 0x1C-0x1F: MULq, MAXi, MULi, MINIi
-	recVU1_MULq, recVU1_MAXi, recVU1_MULi, recVU1_MINIi,
-	// 0x20-0x23: ADDq, MADDq, ADDi, MADDi
-	recVU1_ADDq, recVU1_MADDq, recVU1_ADDi, recVU1_MADDi,
-	// 0x24-0x27: SUBq, MSUBq, SUBi, MSUBi
-	recVU1_SUBq, recVU1_MSUBq, recVU1_SUBi, recVU1_MSUBi,
-	// 0x28-0x2B: ADD, MADD, MUL, MAX
-	recVU1_ADD, recVU1_MADD, recVU1_MUL, recVU1_MAX,
-	// 0x2C-0x2F: SUB, MSUB, OPMSUB, MINI
-	recVU1_SUB, recVU1_MSUB, recVU1_OPMSUB, recVU1_MINI,
-	// 0x30-0x3B: reserved/unknown — delegate via interpreter
-	recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD,
-	recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD,
-	recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD,
-	// 0x3C-0x3F: FD sub-table dispatch — recVU1_Upper_FD does compile-time dispatch
-	recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD, recVU1_Upper_FD,
-};
+void emitVU1Upper(u32 upper)
+{
+	switch (upper & 0x3f)
+	{
+		// 0x00-0x03: ADD broadcast
+		case 0x00: recVU1_ADDx();  break;
+		case 0x01: recVU1_ADDy();  break;
+		case 0x02: recVU1_ADDz();  break;
+		case 0x03: recVU1_ADDw();  break;
+		// 0x04-0x07: SUB broadcast
+		case 0x04: recVU1_SUBx();  break;
+		case 0x05: recVU1_SUBy();  break;
+		case 0x06: recVU1_SUBz();  break;
+		case 0x07: recVU1_SUBw();  break;
+		// 0x08-0x0B: MADD broadcast
+		case 0x08: recVU1_MADDx(); break;
+		case 0x09: recVU1_MADDy(); break;
+		case 0x0A: recVU1_MADDz(); break;
+		case 0x0B: recVU1_MADDw(); break;
+		// 0x0C-0x0F: MSUB broadcast
+		case 0x0C: recVU1_MSUBx(); break;
+		case 0x0D: recVU1_MSUBy(); break;
+		case 0x0E: recVU1_MSUBz(); break;
+		case 0x0F: recVU1_MSUBw(); break;
+		// 0x10-0x13: MAX broadcast
+		case 0x10: recVU1_MAXx();  break;
+		case 0x11: recVU1_MAXy();  break;
+		case 0x12: recVU1_MAXz();  break;
+		case 0x13: recVU1_MAXw();  break;
+		// 0x14-0x17: MINI broadcast
+		case 0x14: recVU1_MINIx(); break;
+		case 0x15: recVU1_MINIy(); break;
+		case 0x16: recVU1_MINIz(); break;
+		case 0x17: recVU1_MINIw(); break;
+		// 0x18-0x1B: MUL broadcast
+		case 0x18: recVU1_MULx();  break;
+		case 0x19: recVU1_MULy();  break;
+		case 0x1A: recVU1_MULz();  break;
+		case 0x1B: recVU1_MULw();  break;
+		// 0x1C-0x1F: MULq, MAXi, MULi, MINIi
+		case 0x1C: recVU1_MULq();  break;
+		case 0x1D: recVU1_MAXi();  break;
+		case 0x1E: recVU1_MULi();  break;
+		case 0x1F: recVU1_MINIi(); break;
+		// 0x20-0x23: ADDq, MADDq, ADDi, MADDi
+		case 0x20: recVU1_ADDq();  break;
+		case 0x21: recVU1_MADDq(); break;
+		case 0x22: recVU1_ADDi();  break;
+		case 0x23: recVU1_MADDi(); break;
+		// 0x24-0x27: SUBq, MSUBq, SUBi, MSUBi
+		case 0x24: recVU1_SUBq();  break;
+		case 0x25: recVU1_MSUBq(); break;
+		case 0x26: recVU1_SUBi();  break;
+		case 0x27: recVU1_MSUBi(); break;
+		// 0x28-0x2B: ADD, MADD, MUL, MAX
+		case 0x28: recVU1_ADD();   break;
+		case 0x29: recVU1_MADD();  break;
+		case 0x2A: recVU1_MUL();   break;
+		case 0x2B: recVU1_MAX();   break;
+		// 0x2C-0x2F: SUB, MSUB, OPMSUB, MINI
+		case 0x2C: recVU1_SUB();    break;
+		case 0x2D: recVU1_MSUB();   break;
+		case 0x2E: recVU1_OPMSUB(); break;
+		case 0x2F: recVU1_MINI();   break;
+		// 0x30-0x3F: FD sub-table (reserved/unknown slots 0x30-0x3B fall
+		// through inside recVU1_Upper_FD to the interpreter).
+		default:   recVU1_Upper_FD(); break;
+	}
+}
