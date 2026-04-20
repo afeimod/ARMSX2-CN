@@ -28,6 +28,14 @@ extern void _vuXGKICKTransfer(s32 cycles, bool flush);
 // At runtime, x23 always holds &VU1 throughout a compiled block.
 static const auto VU1_BASE_REG = x23;
 
+// Phase-7 pinned flag regs. Must match the aliases in iVU1micro_arm64.cpp.
+// Block prologue primes them from memory; block epilogue flushes back.
+// Lower ops only touch statusflag (FDIV/SQRT/RSQRT/FSSET) and clipflag
+// (FCSET). FMAND/FMEQ/FMOR read VI[REG_MAC_FLAG] (the committed pipe-
+// delayed slot), not VU->macflag (live), so w19 isn't needed here.
+static const auto VU1_STATUSFLAG_REG = w20;
+static const auto VU1_CLIPFLAG_REG   = w28;
+
 // Compile-time current pair PC. Set by the per-pair dispatch loop in
 // iVU1micro_arm64.cpp before each lower-op emit. Used by native branch
 // emitters to resolve PC-relative targets at compile time (since step 2
@@ -920,7 +928,6 @@ void recVU1_DIV() {
 	const u32 ftf = (VU1.code >> 23) & 0x3;
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 fsf = (VU1.code >> 21) & 0x3;
-	const int64_t sf_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
 
 	// Load raw u32 float bits
@@ -932,10 +939,8 @@ void recVU1_DIV() {
 	// vuDouble clamp both operands
 	emitVuDouble(w0, w2);
 	emitVuDouble(w1, w2);
-	// Clear statusflag bits [5:4]
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Bic(w2, w2, 0x30);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	// Clear statusflag bits [5:4] on the pinned reg (no memory round-trip).
+	armAsm->Bic(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x30);
 	// Convert to float
 	armAsm->Fmov(s0, w0); // ft
 	armAsm->Fmov(s1, w1); // fs
@@ -949,15 +954,11 @@ void recVU1_DIV() {
 	armAsm->Fcmp(s1, 0.0);
 	armAsm->B(&fsNotZero, a64::ne);
 	// fs==0: statusflag |= 0x10
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x10);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x10);
 	armAsm->B(&signCheck);
 	armAsm->Bind(&fsNotZero);
 	// fs!=0: statusflag |= 0x20
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x20);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x20);
 	armAsm->Bind(&signCheck);
 	// Sign check: (raw_ft ^ raw_fs) bit 31
 	armAsm->Eor(w3, w4, w5);
@@ -990,25 +991,20 @@ REC_VU1_LOWER_INTERP(SQRT)
 void recVU1_SQRT() {
 	const u32 ft = (VU1.code >> 16) & 0x1F;
 	const u32 ftf = (VU1.code >> 23) & 0x3;
-	const int64_t sf_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
 
 	// Load and clamp ft
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + ftf * 4));
 	emitVuDouble(w0, w2);
-	// Clear statusflag bits [5:4]
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Bic(w2, w2, 0x30);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	// Clear statusflag bits [5:4] on the pinned reg.
+	armAsm->Bic(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x30);
 	// Convert to float
 	armAsm->Fmov(s0, w0);
 	// If negative: statusflag |= 0x10, use fabs
 	a64::Label notNeg, store;
 	armAsm->Fcmp(s0, 0.0);
 	armAsm->B(&notNeg, a64::ge);
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x10);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x10);
 	armAsm->Bind(&notNeg);
 	// sqrt(fabs(ft))
 	armAsm->Fabs(s0, s0);
@@ -1028,7 +1024,6 @@ void recVU1_RSQRT() {
 	const u32 ftf = (VU1.code >> 23) & 0x3;
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 fsf = (VU1.code >> 21) & 0x3;
-	const int64_t sf_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
 
 	// Load raw bits
@@ -1038,10 +1033,8 @@ void recVU1_RSQRT() {
 	armAsm->Mov(w5, w1); // save raw fs
 	emitVuDouble(w0, w2);
 	emitVuDouble(w1, w2);
-	// Clear statusflag [5:4]
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Bic(w2, w2, 0x30);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	// Clear statusflag [5:4] on the pinned reg.
+	armAsm->Bic(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x30);
 	armAsm->Fmov(s0, w0); // ft
 	armAsm->Fmov(s1, w1); // fs
 
@@ -1051,9 +1044,7 @@ void recVU1_RSQRT() {
 
 	// --- ft == 0 ---
 	// statusflag |= 0x20
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x20);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x20);
 
 	a64::Label fsIsZero;
 	armAsm->Fcmp(s1, 0.0);
@@ -1073,9 +1064,7 @@ void recVU1_RSQRT() {
 
 	armAsm->Bind(&fsIsZero);
 	// fs == 0, ft == 0: q = ±0, statusflag |= 0x10
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x10);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x10);
 	a64::Label diffSign2;
 	armAsm->Eor(w3, w4, w5);
 	armAsm->Tbnz(w3, 31, &diffSign2);
@@ -1088,13 +1077,11 @@ void recVU1_RSQRT() {
 
 	// --- ft != 0 ---
 	armAsm->Bind(&ftNotZero);
-	// If ft < 0: statusflag |= 0x10
+	// If ft < 0: statusflag |= 0x10 (on the pinned reg).
 	a64::Label ftPos;
 	armAsm->Fcmp(s0, 0.0);
 	armAsm->B(&ftPos, a64::ge);
-	armAsm->Ldr(w2, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->Orr(w2, w2, 0x10);
-	armAsm->Str(w2, MemOperand(VU1_BASE_REG, sf_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x10);
 	armAsm->Bind(&ftPos);
 	// temp = sqrt(fabs(ft)); q = fs / temp
 	armAsm->Fabs(s0, s0);
@@ -2020,15 +2007,13 @@ REC_VU1_LOWER_INTERP(FSSET)
 void recVU1_FSSET() {
 	const u32 imm     = decodeFSImm(VU1.code);
 	const u32 top     = imm & 0xFC0;
-	const int64_t sf_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
-	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, sf_off));
-	armAsm->And(w0, w0, 0x3F);
+	// Read/write statusflag in the pinned reg — no memory round-trip.
+	armAsm->And(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, 0x3F);
 	if (top != 0)
 	{
 		armAsm->Mov(w1, top);
-		armAsm->Orr(w0, w0, w1);
+		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, w1);
 	}
-	armAsm->Str(w0, MemOperand(VU1_BASE_REG, sf_off));
 }
 #endif
 
@@ -2131,14 +2116,11 @@ REC_VU1_LOWER_INTERP(FCSET)
 #else
 void recVU1_FCSET() {
 	const u32 imm = VU1.code & 0xFFFFFF;
-	const int64_t cf_off = static_cast<int64_t>(offsetof(VURegs, clipflag));
+	// Write directly to the pinned clipflag reg.
 	if (imm == 0)
-		armAsm->Str(wzr, MemOperand(VU1_BASE_REG, cf_off));
+		armAsm->Mov(VU1_CLIPFLAG_REG, wzr);
 	else
-	{
-		armAsm->Mov(w0, imm);
-		armAsm->Str(w0, MemOperand(VU1_BASE_REG, cf_off));
-	}
+		armAsm->Mov(VU1_CLIPFLAG_REG, imm);
 }
 #endif
 

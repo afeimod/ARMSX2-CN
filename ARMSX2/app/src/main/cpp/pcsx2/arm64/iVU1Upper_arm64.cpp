@@ -38,6 +38,12 @@ bool g_vu1NeedsFlags = true;
 
 static const auto VU1_BASE_REG = x23;
 
+// Phase-7 pinned flag regs. Must match the aliases in iVU1micro_arm64.cpp.
+// Loaded at block prologue, flushed at epilogue / around vu1Exec.
+static const auto VU1_MACFLAG_REG    = w19;
+static const auto VU1_STATUSFLAG_REG = w20;
+static const auto VU1_CLIPFLAG_REG   = w28;
+
 static constexpr int64_t vfOff(u32 reg)
 {
 	return static_cast<int64_t>(offsetof(VURegs, VF)) + reg * static_cast<int64_t>(sizeof(VECTOR));
@@ -113,10 +119,11 @@ enum class FmacWritebackMode { GenericFmac, OpmXYZ };
 //   mode : see FmacWritebackMode above.
 //
 // Scratch: v2, v3, v4, v6, v7, v8; w4, w5, w6, w7. All caller-saved.
+// Writes VU->macflag and VU->statusflag via the pinned regs (VU1_MACFLAG_REG
+// / VU1_STATUSFLAG_REG) rather than memory — Phase-7 caches all three flag
+// fields in callee-saved registers for the duration of the block.
 static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
-	const int64_t macflag_off    = static_cast<int64_t>(offsetof(VURegs, macflag));
-	const int64_t statusflag_off = static_cast<int64_t>(offsetof(VURegs, statusflag));
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
 	const bool  overflow_clamp   = CHECK_VU_OVERFLOW(1);
 	const bool  opm_mode         = (mode == FmacWritebackMode::OpmXYZ);
@@ -222,15 +229,15 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 
 	// For OPMULA/OPMSUB, preserve the existing W lane flag bits (bits
 	// 0/4/8/12 — the 0x1111 mask). Merge prior macflag[W_bits] with the
-	// newly-computed XYZ bits.
+	// newly-computed XYZ bits. Read from the pinned reg, not memory.
 	if (opm_mode)
 	{
-		armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, macflag_off));
-		armAsm->And(w4, w4, 0x1111u);       // keep only old W bits
-		armAsm->Orr(w6, w6, w4);            // combine with fresh XYZ bits
+		armAsm->And(w4, VU1_MACFLAG_REG, 0x1111u);  // keep only old W bits
+		armAsm->Orr(w6, w6, w4);                    // combine with fresh XYZ bits
 	}
 
-	armAsm->Str(w6, MemOperand(VU1_BASE_REG, macflag_off));
+	// Macflag lives in the pinned reg for the block; no memory store here.
+	armAsm->Mov(VU1_MACFLAG_REG, w6);
 
 	// ------------------------------------------------------------------
 	// Step F: derive statusflag. Bit i of statusflag = "any bit set in
@@ -238,17 +245,17 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	// ------------------------------------------------------------------
 
 	armAsm->Tst(w6, 0x000Fu);
-	armAsm->Cset(w7, ne);
+	armAsm->Cset(VU1_STATUSFLAG_REG, ne);
 	armAsm->Tst(w6, 0x00F0u);
 	armAsm->Cset(w4, ne);
-	armAsm->Orr(w7, w7, Operand(w4, LSL, 1));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 1));
 	armAsm->Tst(w6, 0x0F00u);
 	armAsm->Cset(w4, ne);
-	armAsm->Orr(w7, w7, Operand(w4, LSL, 2));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 2));
 	armAsm->Tst(w6, 0xF000u);
 	armAsm->Cset(w4, ne);
-	armAsm->Orr(w7, w7, Operand(w4, LSL, 3));
-	armAsm->Str(w7, MemOperand(VU1_BASE_REG, statusflag_off));
+	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 3));
+	// statusflag lives in the pinned reg; no memory store here.
 
 	// ------------------------------------------------------------------
 	// Step G: write clamped v5 to dst with xyzw (eff_xyzw) mask. Skip when
@@ -1666,7 +1673,6 @@ REC_VU1_UPPER_INTERP(CLIP)
 void recVU1_CLIP() {
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 ft = (VU1.code >> 16) & 0x1F;
-	const int64_t clipflag_off = static_cast<int64_t>(offsetof(VURegs, clipflag));
 
 	// value = raw ft.w
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
@@ -1685,9 +1691,8 @@ void recVU1_CLIP() {
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));
 	armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));
 
-	// w6 = VU->clipflag << 6
-	armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, clipflag_off));
-	armAsm->Lsl(w6, w6, 6);
+	// w6 = VU->clipflag << 6 (read from pinned VU1_CLIPFLAG_REG, not memory).
+	armAsm->Lsl(w6, VU1_CLIPFLAG_REG, 6);
 
 	// bit 0: fs.x > value  (signed)
 	armAsm->Cmp(w3, w0);
@@ -1717,9 +1722,8 @@ void recVU1_CLIP() {
 	armAsm->Cset(w7, gt);
 	armAsm->Orr(w6, w6, Operand(w7, LSL, 5));
 
-	// Mask to 24 bits and store.
-	armAsm->And(w6, w6, 0xFFFFFFu);
-	armAsm->Str(w6, MemOperand(VU1_BASE_REG, clipflag_off));
+	// Mask to 24 bits and write back to the pinned reg.
+	armAsm->And(VU1_CLIPFLAG_REG, w6, 0xFFFFFFu);
 }
 #endif
 
