@@ -1004,6 +1004,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	};
 	PerPairSkip skip_info[VU1_MAX_BLOCK_PAIRS] = {};
 
+	// Stage A+B pre-walk DISABLED (commit 9a68eba8 introduced a correctness
+	// regression — Crazy Taxi breaks. The zero-initialized skip_info above
+	// causes every BL to emit unconditionally, matching pre-9a68eba8
+	// behavior. Later work (Stage C caching in c8c394813 and the XGKICK
+	// fixes in 28a8c785f) still depends on the skip_info fields existing,
+	// so we keep the scaffolding and just short-circuit the pre-walk body.
+	// TODO: root-cause the Stage A+B soundness issue and re-enable.
+	if ((false))
 	{
 		int ct_cycle = 0;
 		u32 pc_walk = startPC;
