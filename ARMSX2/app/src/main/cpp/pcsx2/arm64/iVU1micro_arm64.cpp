@@ -1209,6 +1209,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// zeroing the whole array.
 	std::memset(data_base, 0, data_size);
 
+	// Block-level E/D/T flags — drive step 13 (ebit countdown) gating below.
+	// Zero extra cost here: we already read `upper` for the regs decode.
+	bool block_has_ebit         = false;
+	bool block_has_dbit_or_tbit = false;
 	{
 		u32 pc = startPC;
 		for (u32 i = 0; i < numPairs; i++)
@@ -1226,6 +1230,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				VU1regs_LOWER_OPCODE[lower >> 25](&lregs_data[i]);
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
+
+			block_has_ebit         |= ((upper >> 30) & 1) != 0;
+			block_has_dbit_or_tbit |= ((upper >> 28) & 1) != 0;
+			block_has_dbit_or_tbit |= ((upper >> 27) & 1) != 0;
 
 			pc = (pc + 8) & (VU1_PROGSIZE - 1);
 		}
@@ -2032,6 +2040,19 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//     writes VU->cycle (pipeline drain can advance the cycle to
 		//     retire still-pending slots), so flush/reload the cached
 		//     cycle register around the BL.
+		//
+		// Gated on block-level flags: if no pair in this block has E-bit
+		// set (step 3 writes ebit=2) and no pair has D/T-bit set (step 4's
+		// vu1CheckDTBits writes ebit=1 on fire), then VU->ebit stays 0
+		// throughout the block and the countdown is always a no-op.
+		//
+		// Cross-block carryover: a prior block that ran its own ebit
+		// countdown to 0 calls vu1EbitDone → sets s_vu1_program_ended /
+		// clears VPU_STAT running bit; the current block's linkEntry gate
+		// catches termination before reaching this per-pair body. So
+		// "ebit=0 at block entry" holds for any block that actually
+		// executes its per-pair loop.
+		if (block_has_ebit || block_has_dbit_or_tbit)
 		{
 			Label skip_ebit;
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ebit_off));
