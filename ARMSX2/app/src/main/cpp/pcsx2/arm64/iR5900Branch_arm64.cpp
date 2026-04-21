@@ -52,7 +52,10 @@ using namespace R5900;
 #define ISTUB_BGEZALL  0
 #define ISTUB_BLTZALL  0
 #define ISTUB_J        0
-#define ISTUB_JAL      1
+#define ISTUB_JAL      1  // GT4 regresses (wobbly wheels, reflections, loading spinner)
+                          // — target-bit + sign-extend + _deleteEEreg fixes applied
+                          // to the native body below but are necessary-not-sufficient.
+                          // See armsx2_arm64_truth_is_x86jit memory file.
 #define ISTUB_JR       0
 #define ISTUB_JALR     0
 #define ISTUB_SYSCALL  0
@@ -631,26 +634,55 @@ void recBLTZALL()
 #endif
 
 // ---- J ----
+// Target: upper 4 bits come from the delay-slot address (= `pc` at entry here,
+// since the recompiler's `pc` is already pointing at the delay slot), not from
+// pc+4. Matches x86 recJ (iR5900Jump.cpp:34).
 #if ISTUB_J
 void recJ() { armBranchCallInterpreter(R5900::Interpreter::OpcodeImpl::J); }
 #else
 void recJ()
 {
-	u32 target = (_Target_ << 2) | ((pc + 4) & 0xf0000000);
+	u32 target = (_Target_ << 2) | (pc & 0xf0000000);
 	recompileNextInstruction(true, false);
 	SetBranchImm(target);
 }
 #endif
 
 // ---- JAL ----
+// Fully mirrors x86 recJAL (iR5900Jump.cpp:43-66), including its
+// _deleteEEreg(31, 0) prologue which we'd previously skipped on the assumption
+// the GPR cache / const tracker were clean at op entry. That assumption was
+// load-bearing and GT4 proved it unreliable — something was leaving stale
+// state for $ra across ops.
+//
+// Structural mapping x86 → arm64:
+//   _deleteEEreg(31, 0) with flush=0:
+//     - _deleteGPRtoX86reg(31, DELETE_REG_FLUSH_AND_FREE)   → armGprInvalidate(31)
+//     - GPR_DEL_CONST(31)                                   → GPR_DEL_CONST(31)
+//     - (no const flush emitted — we're about to overwrite)
+//
+// Value fixes vs. the old (disabled) arm64 implementation:
+//   1. Target upper 4 bits come from `pc & 0xf0000000`, not `(pc+4) & …`.
+//      In this recompiler pc at op entry IS the delay-slot address, so
+//      the +4 pulled the wrong 256MB segment at boundaries.
+//   2. Link address written as zero-extended u32 (UL[0] = pc+4, UL[1] = 0),
+//      not sign-extended s32 → s64. The old SD[0] = (s32)(pc+4) stored
+//      0xFFFFFFFF???????? in the upper half for any pc+4 ≥ 0x80000000
+//      (BIOS / kseg0 / kseg1), silently corrupting $ra.
 #if ISTUB_JAL
 void recJAL() { armBranchCallInterpreter(R5900::Interpreter::OpcodeImpl::JAL); }
 #else
 void recJAL()
 {
-	u32 target = (_Target_ << 2) | ((pc + 4) & 0xf0000000);
+	u32 target = (_Target_ << 2) | (pc & 0xf0000000);
 
-	g_cpuConstRegs[31].SD[0] = (s32)(pc + 4);
+	// Match x86's _deleteEEreg(31, 0): drop any host cache slot and clear the
+	// const-tracker bit for $ra before installing the new link value.
+	armGprInvalidate(31);
+	GPR_DEL_CONST(31);
+
+	g_cpuConstRegs[31].UL[0] = pc + 4;
+	g_cpuConstRegs[31].UL[1] = 0;
 	GPR_SET_CONST(31);
 
 	recompileNextInstruction(true, false);
@@ -678,17 +710,31 @@ void recJR()
 #endif
 
 // ---- JALR ----
+// MIPS spec: rd is encoded in the instruction and can be any GPR, including
+// $zero (r0). When rd == 0 the link write is discarded (hardware behavior on
+// $zero) and the op degenerates to JR. Matches x86 recJALR (iR5900Jump.cpp:145):
+// `if (_Rd_) { ...write link... }` — NO fallback to r31.
+//
+// Link write is zero-extended u32 (UL[0] = pc+4, UL[1] = 0), matching the
+// same invariant fixed in recJAL above.
 #if ISTUB_JALR
 void recJALR() { armBranchCallInterpreter(R5900::Interpreter::OpcodeImpl::JALR); }
 #else
 void recJALR()
 {
-	int rd = _Rd_ ? _Rd_ : 31;
-
 	armLoadGPR64(RDELAYSLOTGPR, _Rs_);
 
-	g_cpuConstRegs[rd].SD[0] = (s32)(pc + 4);
-	GPR_SET_CONST(rd);
+	if (_Rd_)
+	{
+		// Match x86 _deleteEEreg(_Rd_, 0): drop host cache + const tracker
+		// for the link register before installing the new link value.
+		armGprInvalidate(_Rd_);
+		GPR_DEL_CONST(_Rd_);
+
+		g_cpuConstRegs[_Rd_].UL[0] = pc + 4;
+		g_cpuConstRegs[_Rd_].UL[1] = 0;
+		GPR_SET_CONST(_Rd_);
+	}
 
 	armFlushConstRegs();
 	recompileNextInstruction(true, false);
