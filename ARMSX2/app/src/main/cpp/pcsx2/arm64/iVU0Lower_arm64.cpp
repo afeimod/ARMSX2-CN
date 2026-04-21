@@ -139,11 +139,13 @@ static float vu0Double(vu_u32 f)
 	return *(float*)&f;
 }
 
-// Branch address calculation — mirrors _branchAddr() in VUops.cpp
+// Branch address calculation — mirrors _branchAddr() in VUops.cpp.
+// VU0 has 4KB micro memory (mask 0x0fff); the VU1 mask 0x3fff would
+// compute bpc outside VU0's range and corrupt TPC on taken branches.
 static s32 vu0BranchAddr(VURegs* VU)
 {
 	s32 bpc = VU->VI[REG_TPC].SL + (W_Imm11(VU) * 8);
-	bpc &= 0x3fff;
+	bpc &= 0x0fff;
 	return bpc;
 }
 
