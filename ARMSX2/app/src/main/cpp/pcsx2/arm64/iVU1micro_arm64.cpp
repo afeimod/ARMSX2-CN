@@ -1859,18 +1859,37 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 
 	// Hackmode pre-walk: compute per-pair kickcycles (cycles to sync into
 	// the paced XGKICK transfer at this pair's memwrite boundary).
-	// Accumulates 1 per pair post-XGKICK, commits + resets on memwrite
-	// pairs. Mirrors mVUregs.xgkickcycles / mVUlow.kickcycles accumulation
-	// at microVU_Compile.inl:779-786.
+	// Accumulates `1 + mVUstall` per pair post-XGKICK, commits + resets
+	// on memwrite pairs. Mirrors mVUregs.xgkickcycles / mVUlow.kickcycles
+	// accumulation at microVU_Compile.inl:779-786.
 	//
-	// Note: we count 1 cycle per pair rather than upstream's `1 + stall`
-	// — exact stall counts aren't tracked per-pair in this rec and
-	// under-counting is the conservative choice (sync fires slightly too
-	// early rather than missing bytes). Games relying on this hack tend
-	// not to stall heavily in XGKICK-adjacent code.
+	// mVUstall is reconstructed by simulating upstream's per-lane pipeline
+	// counters (mVUregs.VF[reg].{x,y,z,w} and mVUregs.VI[reg]) — FMAC
+	// writes set a lane to 4, every pair decrements by `1 + mVUstall`
+	// (saturating at 0), and each pair's stall is the max remaining
+	// count across all lanes it reads. This matches analyzeReg1 /
+	// analyzeVIreg1 / mVUincCycles / mVUsetCycles exactly. Under-counting
+	// cycles here would have _vuXGKICKTransfer drain too slowly relative
+	// to real GIF pacing, breaking games like Crash Twinsanity whose
+	// XGKICK-adjacent code is FMAC-heavy.
+	//
+	// Q/P/xgkick pipeline stalls are omitted — rare enough that the
+	// FMAC+IALU approximation tracks upstream within a cycle or two per
+	// sync window, well inside GIF pacing tolerance.
 	u32 kick_cycles_sync[VU1_MAX_BLOCK_PAIRS] = {};
 	if (xgkickhack)
 	{
+		// xyzw bit layout (matches VUops.cpp:25 _XYZW): bit 3=X, bit 2=Y,
+		// bit 1=Z, bit 0=W. Per-lane index for our pl_vf is natural 0..3
+		// (X/Y/Z/W), so lane index = 3 - bit_position.
+		u8 pl_vf[32][4] = {};
+		u8 pl_vi[16]    = {};
+
+		auto decLaneArr = [](u8* arr, u32 n, u32 len) {
+			for (u32 k = 0; k < len; k++)
+				arr[k] = (arr[k] > n) ? static_cast<u8>(arr[k] - n) : 0;
+		};
+
 		u32 accum = 0;
 		u32 pc_walk = startPC;
 		for (u32 i = 0; i < numPairs; i++)
@@ -1878,29 +1897,136 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			const u32 upper_w = *reinterpret_cast<const u32*>(VU1.Micro + pc_walk + 4);
 			const u32 lower_w = *reinterpret_cast<const u32*>(VU1.Micro + pc_walk);
 			const bool ibit_w = (upper_w >> 31) & 1;
+			const _VURegsNum& uregs_i = uregs_data[i];
+			const _VURegsNum& lregs_i = lregs_data[i];
 
+			// Step 1: baseline +1 cycle decrement (mVUincCycles(mVU, 1)).
+			decLaneArr(&pl_vf[0][0], 1, 32 * 4);
+			decLaneArr(&pl_vi[0],    1, 16);
+
+			// Step 2: compute mVUstall from this pair's reads. Upper is
+			// always decoded (even on I-bit pairs, since upper still runs
+			// — the I-bit only suppresses the lower slot). Lower is only
+			// decoded when !ibit.
+			u32 stall = 0;
+			auto readVF = [&](u8 reg, u8 xyzw) {
+				if (reg == 0 || xyzw == 0)
+					return;
+				for (int b = 0; b < 4; b++)
+				{
+					if (xyzw & (1u << b))
+					{
+						const int lane = 3 - b;
+						if (pl_vf[reg][lane] > stall)
+							stall = pl_vf[reg][lane];
+					}
+				}
+			};
+			auto readVI = [&](u32 mask) {
+				mask &= 0xFFFFu;
+				while (mask)
+				{
+					const u32 r = __builtin_ctz(mask);
+					if (pl_vi[r] > stall)
+						stall = pl_vi[r];
+					mask &= mask - 1;
+				}
+			};
+
+			readVF(uregs_i.VFread0, uregs_i.VFr0xyzw);
+			readVF(uregs_i.VFread1, uregs_i.VFr1xyzw);
+			readVI(uregs_i.VIread);
+
+			if (!ibit_w)
+			{
+				readVF(lregs_i.VFread0, lregs_i.VFr0xyzw);
+				readVF(lregs_i.VFread1, lregs_i.VFr1xyzw);
+				readVI(lregs_i.VIread);
+			}
+
+			// Step 3: advance by stall (mVUsetCycles -> mVUincCycles(stall)).
+			if (stall)
+			{
+				decLaneArr(&pl_vf[0][0], stall, 32 * 4);
+				decLaneArr(&pl_vi[0],    stall, 16);
+			}
+
+			// Step 4: install writes from this pair. FMAC writes per-lane=4;
+			// IALU writes VI[reg]=cycles (typically 0 for IADD/ISUB-family,
+			// non-zero for branch-ALU which is rare on the memwrite path).
+			// tCycles in upstream takes max of existing vs new — since we
+			// just decremented and FMAC=4 is the max latency, straight
+			// assignment matches.
+			auto writeVF = [&](u8 reg, u8 xyzw, u8 cyc) {
+				if (reg == 0 || xyzw == 0)
+					return;
+				for (int b = 0; b < 4; b++)
+				{
+					if (xyzw & (1u << b))
+					{
+						const int lane = 3 - b;
+						if (pl_vf[reg][lane] < cyc)
+							pl_vf[reg][lane] = cyc;
+					}
+				}
+			};
+			auto writeVI = [&](u32 mask, u8 cyc) {
+				if (cyc == 0)
+					return;
+				mask &= 0xFFFFu;
+				while (mask)
+				{
+					const u32 r = __builtin_ctz(mask);
+					if (pl_vi[r] < cyc)
+						pl_vi[r] = cyc;
+					mask &= mask - 1;
+				}
+			};
+
+			if (uregs_i.pipe == VUPIPE_FMAC)
+				writeVF(uregs_i.VFwrite, uregs_i.VFwxyzw, 4);
+			if (!ibit_w)
+			{
+				if (lregs_i.pipe == VUPIPE_FMAC)
+					writeVF(lregs_i.VFwrite, lregs_i.VFwxyzw, 4);
+				else if (lregs_i.pipe == VUPIPE_IALU && lregs_i.cycles > 0)
+					writeVI(lregs_i.VIwrite, static_cast<u8>(lregs_i.cycles));
+			}
+
+			// Step 5: accumulate per-pair kickcycles (microVU_Compile.inl:781).
 			if (!ibit_w && isXgkickOp(lower_w))
 			{
-				// XGKICK op handles its own sync internally (the helper
-				// calls _vuXGKICKTransfer(0, true) to drain any prior kick
-				// before installing new state). Reset accumulator to 1:
-				// the XGKICK itself counts as 1 cycle toward the NEW
-				// kick's pacing — matches VUops.cpp:1934.
+				// XGKICK: reset to 1 (VUops.cpp:1934 — kick itself is 1 cycle).
 				accum = 1;
 			}
 			else if (!ibit_w && isMemWriteOp(lower_w))
 			{
-				accum += 1;
+				accum += 1 + stall;
 				kick_cycles_sync[i] = accum;
 				accum = 0;
 			}
 			else
 			{
-				accum += 1;
+				accum += 1 + stall;
 			}
 
 			pc_walk = (pc_walk + 8) & (VU1_PROGSIZE - 1);
 		}
+
+		// Block-end residual commit (Bug #2 — matches microVU_Compile.inl
+		// :812-816 / :835-839 / :845-849). When block ends on a non-memwrite
+		// pair, upstream commits the running xgkickcycles onto the last
+		// pair's mVUlow.kickcycles so the 2nd-pass sync (line 897) drains
+		// them before the block exits. Without this, cycles accumulated
+		// after the last in-block memwrite are dropped at block end and
+		// the next block's pre-walk restarts at 0 — starving the paced
+		// XGKICK of drain budget across block boundaries for patterns
+		// like `XGKICK; <arith>; branch` (common in Crash Twinsanity's
+		// render loop). Folding into the last pair's existing sync site
+		// keeps the drain ordered before the exit selector, which mirrors
+		// upstream's before-exec placement.
+		if (accum > 0 && numPairs > 0)
+			kick_cycles_sync[numPairs - 1] += accum;
 	}
 
 	// --- Per-pair code emission ---
