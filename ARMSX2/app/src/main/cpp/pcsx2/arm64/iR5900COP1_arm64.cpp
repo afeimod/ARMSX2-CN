@@ -7,6 +7,7 @@
 #include "Common.h"
 #include "R5900OpcodeTables.h"
 #include "arm64/arm64Emitter.h"
+#include "common/FPControl.h"
 
 using namespace R5900;
 
@@ -26,8 +27,12 @@ static constexpr s64 ACC_OFFSET = FPUREGS_BASE + offsetof(fpuRegisters, ACC);
 // PS2 FPU constants
 static constexpr u32 PS2_POS_FMAX  = 0x7F7FFFFF;
 static constexpr u32 PS2_FPU_FLAG_C  = 0x00800000;
+static constexpr u32 PS2_FPU_FLAG_I  = 0x00020000;
+static constexpr u32 PS2_FPU_FLAG_D  = 0x00010000;
 static constexpr u32 PS2_FPU_FLAG_O  = 0x00008000;
 static constexpr u32 PS2_FPU_FLAG_U  = 0x00004000;
+static constexpr u32 PS2_FPU_FLAG_SI = 0x00000040;
+static constexpr u32 PS2_FPU_FLAG_SD = 0x00000020;
 static constexpr u32 PS2_FPU_FLAG_SO = 0x00000010;
 static constexpr u32 PS2_FPU_FLAG_SU = 0x00000008;
 
@@ -374,6 +379,15 @@ static void armFpuClampOutput(const a64::VRegister& sSrc, const a64::Register& w
 	armAsm->Bind(&storeDone);
 }
 
+// Emit: Msr FPCR, #bitmask — write FPCR to a compile-time-known value.
+// Clobbers RSCRATCHGPR. Used to bracket SQRT / DIV / RSQRT whose PS2 semantics
+// require a rounding mode different from the ambient FPUFPCR.
+static void armEmitFpcrSet(u64 bitmask)
+{
+	armAsm->Mov(RSCRATCHGPR, bitmask);
+	armAsm->Msr(a64::FPCR, RSCRATCHGPR);
+}
+
 // Emit a two-operand FPU arithmetic op: fd = clamp(op(clamp(fs), clamp(ft)))
 // opFunc emits the actual instruction given (sDst, sSrc0, sSrc1)
 template<typename OpFunc>
@@ -447,16 +461,29 @@ void recMOV_S()
 #endif
 
 // ---- MAX_S / MIN_S ----
+// x86 iFPU.cpp:1390-1406 uses SSE MAXSS/MINSS via recCommutativeOp(op >= 2 path),
+// which applies fpuFloat2 (PS2 NaN/Inf → ±Fmax clamp) to both operands before the
+// SSE op. Our armFpuBinOp does equivalent input clamping + op + output clamping
+// (the output clamp is redundant for MAX/MIN since the result is bounded by the
+// already-clamped inputs, but it's harmless and keeps the code path uniform).
 #if ISTUB_MAX_S
 void recMAX_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MAX_S); }
 #else
-void recMAX_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MAX_S); }
+void recMAX_S()
+{
+	armFpuBinOp(_Fd_cop1_, _Fs_cop1_, _Ft_cop1_,
+		[](auto d, auto a, auto b) { armAsm->Fmax(d, a, b); });
+}
 #endif
 
 #if ISTUB_MIN_S
 void recMIN_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MIN_S); }
 #else
-void recMIN_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MIN_S); }
+void recMIN_S()
+{
+	armFpuBinOp(_Fd_cop1_, _Fs_cop1_, _Ft_cop1_,
+		[](auto d, auto a, auto b) { armAsm->Fmin(d, a, b); });
+}
 #endif
 
 // ---- ADD_S ----
@@ -568,6 +595,11 @@ void recMSUB_S()
 #endif
 
 // ---- MADDA_S ----
+// ACC = clamp(clamp(fs * ft) + clamp(ACC)). Mirrors recMADD_S's clamp discipline;
+// earlier revision skipped the intermediate-product clamp and the ACC-clamp,
+// making MADDA's rounding inconsistent with MADD. x86 recMADDtemp clamps both
+// the product and ACC (via fpuFloat2/fpuFloat) before the FPU_ADD regardless of
+// whether the result goes to Fd (MADD) or ACC (MADDA), so we match.
 #if ISTUB_MADDA_S
 void recMADDA_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MADDA_S); }
 #else
@@ -578,8 +610,10 @@ void recMADDA_S()
 	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
 	armFpuClampInput(RWSCRATCH2, RFSCRATCH1);
 	armAsm->Fmul(RFSCRATCH0, RFSCRATCH0, RFSCRATCH1);
+	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);
 	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, ACC_OFFSET));
-	armAsm->Fmov(RFSCRATCH1, RWSCRATCH);
+	armFpuClampInput(RWSCRATCH, RFSCRATCH1);
 	armAsm->Fadd(RFSCRATCH0, RFSCRATCH1, RFSCRATCH0);
 	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, ACC_OFFSET));
@@ -587,6 +621,7 @@ void recMADDA_S()
 #endif
 
 // ---- MSUBA_S ----
+// ACC = clamp(clamp(ACC) - clamp(fs * ft)). Same clamp-discipline fix as MADDA.
 #if ISTUB_MSUBA_S
 void recMSUBA_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::MSUBA_S); }
 #else
@@ -597,31 +632,274 @@ void recMSUBA_S()
 	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
 	armFpuClampInput(RWSCRATCH2, RFSCRATCH1);
 	armAsm->Fmul(RFSCRATCH0, RFSCRATCH0, RFSCRATCH1);
+	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);
 	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, ACC_OFFSET));
-	armAsm->Fmov(RFSCRATCH1, RWSCRATCH);
+	armFpuClampInput(RWSCRATCH, RFSCRATCH1);
 	armAsm->Fsub(RFSCRATCH0, RFSCRATCH1, RFSCRATCH0);
 	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
 	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, ACC_OFFSET));
 }
 #endif
 
-// ---- DIV_S / SQRT_S / RSQRT_S ----
+// ---- DIV_S ----
+// Matches x86 recDIV_S_xmm + recDIVhelper1 (iFPU.cpp:1037-1169). Flow:
+//   if (FPUFPCR != FPUDivFPCR): switch FPCR to FPUDivFPCR
+//   clear I|D flags
+//   clamp fs, ft
+//   if (ft == 0):
+//     if (fs == 0): set I|SI (0/0 → indeterminate)
+//     else:         set D|SD (x/0 → divide by zero)
+//     fd = sign(fs XOR ft) | POS_FMAX
+//   else:
+//     fd = clamp(fs / ft)
+//   if (FPUFPCR != FPUDivFPCR): restore FPCR to FPUFPCR
+//
+// FPCR bracketing: PS2 DIV uses the FPUDivFPCR rounding mode (default Nearest),
+// which by default differs from FPUFPCR (ChopZero). The x86 JIT brackets with
+// xLDMXCSR; we mirror with Msr FPCR. Check at emit time so we don't pay the
+// cost when the user's config has identical FPUFPCR/FPUDivFPCR.
+//
+// SI/SD are sticky — x86 clears only I|D up front, preserving previous sticky
+// bits. We do the same (Bic against I|D only).
 #if ISTUB_DIV_S
 void recDIV_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::DIV_S); }
 #else
-void recDIV_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::DIV_S); }
+void recDIV_S()
+{
+	const bool fpcr_switch = (EmuConfig.Cpu.FPUFPCR.bitmask != EmuConfig.Cpu.FPUDivFPCR.bitmask);
+
+	// Switch FPCR to FPUDivFPCR before the Fdiv. Bracket is placed around the
+	// whole op rather than just the Fdiv because flag-path stores and integer
+	// ops are FPCR-independent anyway, and emitting it once avoids duplication
+	// between the normal and div-by-zero paths.
+	if (fpcr_switch)
+		armEmitFpcrSet(EmuConfig.Cpu.FPUDivFPCR.bitmask);
+
+	// Clear I and D flags
+	armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+	armAsm->Bic(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_I | PS2_FPU_FLAG_D);
+	armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+
+	// Load and clamp fs
+	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fs_cop1_)));
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);
+	// RWSCRATCH now holds clamped-fs bits; RFSCRATCH0 holds clamped-fs float.
+
+	// Load and clamp ft
+	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
+	armFpuClampInput(RWSCRATCH2, RFSCRATCH1);
+	// RWSCRATCH2 now holds clamped-ft bits; RFSCRATCH1 holds clamped-ft float.
+
+	// Test ft == 0 (compare bits to zero — after clamp, ±0 both have mantissa 0
+	// and sign the only non-zero bit, so a non-zero bit-pattern means non-zero).
+	// Use Tst to mask off the sign bit, then check if the remaining bits are 0.
+	armAsm->Tst(RWSCRATCH2, 0x7FFFFFFFu);
+	a64::Label divByZero, done;
+	armAsm->B(&divByZero, a64::eq);
+
+	// Normal divide: fd = clamp(fs / ft)
+	armAsm->Fdiv(RFSCRATCH0, RFSCRATCH0, RFSCRATCH1);
+	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
+	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fd_cop1_)));
+	armAsm->B(&done);
+
+	// Divide-by-zero
+	armAsm->Bind(&divByZero);
+	{
+		// Determine flags: fs == 0 → I|SI (0/0), else D|SD (x/0)
+		armAsm->Tst(RWSCRATCH, 0x7FFFFFFFu);
+		a64::Label zeroZero, flagsDone;
+		armAsm->B(&zeroZero, a64::eq);
+
+		// x/0 → D|SD
+		armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_D | PS2_FPU_FLAG_SD);
+		armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->B(&flagsDone);
+
+		// 0/0 → I|SI
+		armAsm->Bind(&zeroZero);
+		armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_I | PS2_FPU_FLAG_SI);
+		armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+
+		armAsm->Bind(&flagsDone);
+
+		// Result = sign(fs XOR ft) | POS_FMAX
+		armAsm->Eor(RWSCRATCH, RWSCRATCH, RWSCRATCH2);
+		armAsm->And(RWSCRATCH, RWSCRATCH, 0x80000000u);
+		armAsm->Mov(RWSCRATCH3, PS2_POS_FMAX);
+		armAsm->Orr(RWSCRATCH, RWSCRATCH, RWSCRATCH3);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fd_cop1_)));
+	}
+
+	armAsm->Bind(&done);
+
+	// Restore FPCR if we switched.
+	if (fpcr_switch)
+		armEmitFpcrSet(EmuConfig.Cpu.FPUFPCR.bitmask);
+}
 #endif
 
+// ---- SQRT_S ----
+// Matches x86 recSQRT_S_xmm (iFPU.cpp:1739-1783). Flow:
+//   if (FPUFPCR round != Nearest): switch FPCR to FPUFPCR-with-Nearest
+//   clear I|D
+//   if (ft < 0): set I|SI; ft = abs(ft)
+//   clamp ft (positive side only needed since sign is cleared)
+//   fd = sqrt(ft)
+//   if (FPUFPCR round != Nearest): restore FPCR to FPUFPCR
+//
+// PS2 SQRT is always round-to-nearest regardless of FCR31. x86 brackets with
+// xLDMXCSR around the SQRTSS; we mirror with Msr FPCR. The bracket is gated
+// at emit time — if the user's FPUFPCR already rounds to nearest (rare —
+// default is ChopZero), skip the switch.
 #if ISTUB_SQRT_S
 void recSQRT_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::SQRT_S); }
 #else
-void recSQRT_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::SQRT_S); }
+void recSQRT_S()
+{
+	const bool fpcr_switch = (EmuConfig.Cpu.FPUFPCR.GetRoundMode() != FPRoundMode::Nearest);
+	FPControlRegister nearest_fpcr = EmuConfig.Cpu.FPUFPCR;
+	nearest_fpcr.SetRoundMode(FPRoundMode::Nearest);
+
+	if (fpcr_switch)
+		armEmitFpcrSet(nearest_fpcr.bitmask);
+
+	// Clear I and D flags
+	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+	armAsm->Bic(RWSCRATCH2, RWSCRATCH2, PS2_FPU_FLAG_I | PS2_FPU_FLAG_D);
+	armAsm->Str(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+
+	// Load ft bits
+	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
+
+	// If negative, set I|SI flags and take abs
+	a64::Label notNeg;
+	armAsm->Tbz(RWSCRATCH, 31, &notNeg);
+	{
+		armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH2, RWSCRATCH2, PS2_FPU_FLAG_I | PS2_FPU_FLAG_SI);
+		armAsm->Str(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
+	}
+	armAsm->Bind(&notNeg);
+
+	// Clamp (inf/NaN → Fmax, denormal → 0) and sqrt
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);
+	armAsm->Fsqrt(RFSCRATCH0, RFSCRATCH0);
+
+	// No output clamp needed: sqrt(Fmax) ≈ 1.8e19 is finite and normal.
+	armAsm->Str(RFSCRATCH0, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fd_cop1_)));
+
+	if (fpcr_switch)
+		armEmitFpcrSet(EmuConfig.Cpu.FPUFPCR.bitmask);
+}
 #endif
 
+// ---- RSQRT_S ----
+// Matches x86 DOUBLE::recRSQRT_S_xmm's bracketing (iFPUd.cpp:1005-1027).
+// The fast-path iFPU.cpp version skips FPCR bracketing because it uses RSQRTSS
+// (an approximation that ignores MXCSR rounding). We don't have an equivalent
+// "always-round-to-nearest" SQRT-and-divide on arm64 — Fsqrt/Fdiv respect FPCR
+// — so we follow the DOUBLE variant's lead and force FPCR to Nearest around
+// the whole op.
+//
+// Flow:
+//   if (FPUFPCR round != Nearest): switch FPCR to FPUFPCR-with-Nearest
+//   clear I|D
+//   if (ft < 0): set I|SI; ft = abs(ft)
+//   if (ft == 0):
+//     if (fs == 0): set I|SI (0/0)
+//     else:         set D|SD (x/0)
+//     fd = sign(fs) | POS_FMAX
+//   else:
+//     fd = clamp(fs / sqrt(clamp(ft)))
+//   if (FPUFPCR round != Nearest): restore FPCR
 #if ISTUB_RSQRT_S
 void recRSQRT_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::RSQRT_S); }
 #else
-void recRSQRT_S() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::RSQRT_S); }
+void recRSQRT_S()
+{
+	const bool fpcr_switch = (EmuConfig.Cpu.FPUFPCR.GetRoundMode() != FPRoundMode::Nearest);
+	FPControlRegister nearest_fpcr = EmuConfig.Cpu.FPUFPCR;
+	nearest_fpcr.SetRoundMode(FPRoundMode::Nearest);
+
+	if (fpcr_switch)
+		armEmitFpcrSet(nearest_fpcr.bitmask);
+
+	// Clear I and D flags
+	armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+	armAsm->Bic(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_I | PS2_FPU_FLAG_D);
+	armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+
+	// Load fs bits (into RWSCRATCH) and ft bits (into RWSCRATCH2)
+	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fs_cop1_)));
+	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
+
+	// If ft negative: set I|SI, clear sign (abs)
+	a64::Label ftNotNeg;
+	armAsm->Tbz(RWSCRATCH2, 31, &ftNotNeg);
+	{
+		armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_I | PS2_FPU_FLAG_SI);
+		armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->And(RWSCRATCH2, RWSCRATCH2, 0x7FFFFFFFu);
+	}
+	armAsm->Bind(&ftNotNeg);
+
+	// Check ft == 0 (magnitude bits all zero after sign clear)
+	armAsm->Tst(RWSCRATCH2, 0x7FFFFFFFu);
+	a64::Label divByZero, done;
+	armAsm->B(&divByZero, a64::eq);
+
+	// Normal RSQRT: fd = clamp(fs / sqrt(clamp(ft)))
+	armFpuClampInput(RWSCRATCH2, RFSCRATCH1);         // clamp(ft) → s1
+	armAsm->Fsqrt(RFSCRATCH1, RFSCRATCH1);            // s1 = sqrt(clamp(ft))
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);          // clamp(fs) → s0
+	armAsm->Fdiv(RFSCRATCH0, RFSCRATCH0, RFSCRATCH1); // s0 = fs / sqrt(ft)
+	armFpuClampOutput(RFSCRATCH0, RWSCRATCH);
+	armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fd_cop1_)));
+	armAsm->B(&done);
+
+	// Divide-by-zero (ft == 0)
+	armAsm->Bind(&divByZero);
+	{
+		// Determine flags: fs == 0 → I|SI (0/0), else D|SD (x/0).
+		// Note: x86 checks fs raw bits here — we match. If ft was negative
+		// (I|SI already set above), the 0/0 branch re-ORs I|SI which is a no-op.
+		armAsm->Tst(RWSCRATCH, 0x7FFFFFFFu);
+		a64::Label zeroZero, flagsDone;
+		armAsm->B(&zeroZero, a64::eq);
+
+		// x/0 → D|SD
+		armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_D | PS2_FPU_FLAG_SD);
+		armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->B(&flagsDone);
+
+		// 0/0 → I|SI
+		armAsm->Bind(&zeroZero);
+		armAsm->Ldr(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+		armAsm->Orr(RWSCRATCH3, RWSCRATCH3, PS2_FPU_FLAG_I | PS2_FPU_FLAG_SI);
+		armAsm->Str(RWSCRATCH3, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
+
+		armAsm->Bind(&flagsDone);
+
+		// Result = sign(fs) | POS_FMAX (x86 doesn't XOR with ft here since ft
+		// was already made non-negative by the abs above).
+		armAsm->And(RWSCRATCH, RWSCRATCH, 0x80000000u);
+		armAsm->Mov(RWSCRATCH3, PS2_POS_FMAX);
+		armAsm->Orr(RWSCRATCH, RWSCRATCH, RWSCRATCH3);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fd_cop1_)));
+	}
+
+	armAsm->Bind(&done);
+
+	if (fpcr_switch)
+		armEmitFpcrSet(EmuConfig.Cpu.FPUFPCR.bitmask);
+}
 #endif
 
 // ---- C_F ----
@@ -639,34 +917,34 @@ void recC_F()
 #endif
 
 // ---- C_EQ / C_LT / C_LE ----
-// PS2 FPU comparison: denormals flush to 0, compare as ordered integers.
-// Uses sign-magnitude to two's complement conversion for correct float ordering.
+// Matches x86 iFPU.cpp:721-796 (C_EQ_xmm), 808-885 (C_LE_xmm), 888-965 (C_LT_xmm):
+// clamp both operands (Inf/NaN → ±Fmax, denormals → ±0) then compare, set the
+// FPU C flag (bit 23 of fprc[31]) based on the result.
+//
+// Previous arm64 revision used a sign-magnitude→two's-complement integer-key
+// compare. It was clever but had edge cases: Inf/NaN bit patterns have
+// exponent=0xFF which compared as extremely-large integers — correct for +Inf
+// but wrong if a NaN slipped through (PS2 rarely produces NaN but VU interop
+// can). Clamping up front normalizes to ±Fmax so Fcmp's ordered-compare is
+// semantically equivalent to x86's clamp+UCOMISS without the edge cases.
+//
+// After armFpuClampInput, operands are guaranteed finite ±0..±Fmax, so the
+// unordered (NaN) outcome of Fcmp can't occur — ordered eq/lt/le set NZCV
+// unambiguously and Cset reads them directly.
 static void armFpuCompare(a64::Condition cond)
 {
-	const a64::Register wzr = a64::WRegister(31);
-
-	// Load fs and convert to comparison key
+	// Load and clamp fs → s0 (uses RWSCRATCH as intermediate)
 	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Fs_cop1_)));
-	armAsm->Ubfx(RWARG3, RWSCRATCH, 23, 8);           // RWARG3 = exponent (save for later)
-	armAsm->Mov(RWSCRATCH3, 0x80000000u);
-	armAsm->Sub(RWSCRATCH3, RWSCRATCH3, RWSCRATCH);   // RWSCRATCH3 = 0x80000000 - fs
-	armAsm->Tst(RWSCRATCH, 0x80000000u);              // test sign bit of original
-	armAsm->Csel(RWSCRATCH, RWSCRATCH3, RWSCRATCH, a64::ne); // if negative, use converted
-	armAsm->Cmp(RWARG3, 0);                           // check saved exponent
-	armAsm->Csel(RWSCRATCH, wzr, RWSCRATCH, a64::eq); // if denormal, result = 0
+	armFpuClampInput(RWSCRATCH, RFSCRATCH0);
 
-	// Load ft and convert to comparison key
-	armAsm->Ldr(RWSCRATCH2, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
-	armAsm->Ubfx(RWARG3, RWSCRATCH2, 23, 8);
-	armAsm->Mov(RWSCRATCH3, 0x80000000u);
-	armAsm->Sub(RWSCRATCH3, RWSCRATCH3, RWSCRATCH2);
-	armAsm->Tst(RWSCRATCH2, 0x80000000u);
-	armAsm->Csel(RWSCRATCH2, RWSCRATCH3, RWSCRATCH2, a64::ne);
-	armAsm->Cmp(RWARG3, 0);
-	armAsm->Csel(RWSCRATCH2, wzr, RWSCRATCH2, a64::eq);
+	// Load and clamp ft → s1
+	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPR_OFFSET(_Ft_cop1_)));
+	armFpuClampInput(RWSCRATCH, RFSCRATCH1);
 
-	// Compare as signed integers and set flag
-	armAsm->Cmp(RWSCRATCH, RWSCRATCH2);
+	// Ordered float compare (no NaN possible after clamp).
+	armAsm->Fcmp(RFSCRATCH0, RFSCRATCH1);
+
+	// Load fprc[31], clear C, OR in Cset(cond) shifted to bit 23.
 	armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, FPRC_OFFSET(31)));
 	armAsm->Bic(RWSCRATCH, RWSCRATCH, PS2_FPU_FLAG_C);
 	armAsm->Cset(RWSCRATCH2, cond);
