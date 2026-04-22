@@ -165,7 +165,11 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 	// v1 must already be loaded with src2
 
 	// vuDouble input clamping (matches interpreter's vuDouble on every operand)
-	if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
+	// Mirrors x86 mVUclamp2 → mVUclamp1 fallthrough (microVU_Clamp.inl:27,50):
+	// clamp when EITHER VU0 sign-overflow OR VU0 overflow is set. Old gate
+	// incorrectly (a) missed the VU_OVERFLOW case and (b) OR'd VU1's flag
+	// into VU0 codegen. VU0 upper ops must check VU0 flags only.
+	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
@@ -196,7 +200,11 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
 	armAsm->Ldr(q5, MemOperand(VU0_BASE_REG, accOff()));
 
 	// vuDouble input clamping (all 3 operands, matching interpreter)
-	if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
+	// Mirrors x86 mVUclamp2 → mVUclamp1 fallthrough (microVU_Clamp.inl:27,50):
+	// clamp when EITHER VU0 sign-overflow OR VU0 overflow is set. Old gate
+	// incorrectly (a) missed the VU_OVERFLOW case and (b) OR'd VU1's flag
+	// into VU0 codegen. VU0 upper ops must check VU0 flags only.
+	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
@@ -405,8 +413,12 @@ static void emitFTOI(int fbits)
 	const u32 xyzw = (VU0.code >> 21) & 0xF;
 	if (ft == 0) return; // VF[0] is read-only (hardwired)
 	armAsm->Ldr(q0, MemOperand(VU0_BASE_REG, vfOff(fs)));
-	// Clamp inf/NaN to ±MAX_FLOAT before converting (matches interpreter's vuDouble on input)
-	if (CHECK_VU_SIGN_OVERFLOW(0))
+	// Clamp inf/NaN to ±MAX_FLOAT before converting. Gated on either VU0
+	// overflow flag — matches x86's mVUclamp2 → mVUclamp1 fallthrough.
+	// (Note: x86 FTOI itself doesn't call mVUclamp2 — it handles overflow
+	// inline via PCMP.GTD + PXOR. The arm64 pre-clamp is a belt-and-braces
+	// layer that keeps FCVTZS out of NaN/INF territory.)
+	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
@@ -466,25 +478,6 @@ static void emitITOF(int fbits)
 //  x0 = VU0_BASE_REG at call time.
 // ============================================================================
 
-// Float clamping — mirrors vuDouble() in VUops.cpp (denormals→±0, inf/NaN→±MAX_FLOAT)
-static float vu0Double(u32 f)
-{
-	switch (f & 0x7f800000)
-	{
-		case 0x0:
-			f &= 0x80000000;
-			return *(float*)&f;
-		case 0x7f800000:
-			if (CHECK_VU_SIGN_OVERFLOW(0))
-			{
-				u32 d = (f & 0x80000000) | 0x7f7fffff;
-				return *(float*)&d;
-			}
-			break;
-	}
-	return *(float*)&f;
-}
-
 // CLIP: update clipflag by comparing |VF[ft].w| against VF[fs].xyz (±)
 // Matches _vuCLIP in VUops.cpp exactly.
 static void vu0_CLIP(VURegs* VU)
@@ -505,33 +498,38 @@ static void vu0_CLIP(VURegs* VU)
 }
 
 // OPMULA: ACC.xyz = cross-like multiply (fs.y*ft.z, fs.z*ft.x, fs.x*ft.y)
-// Matches _vuOPMULA in VUops.cpp. Note: VU_MACw_CLEAR is NOT called (matches interp).
+// x86 microVU (microVU_Upper.inl:422-445) emits raw SSE_MULPS on the shuffled
+// operands with NO mVUclamp2 call. Matches that: read VF.f directly (VU FPCR
+// handles denormal flush via FTZ mode), no vu0Double input clamping.
+// Note: VU_MACw_CLEAR is NOT called (see M-2 audit note).
 static void vu0_OPMULA(VURegs* VU)
 {
 	const u32 fs = (VU->code >> 11) & 0x1F;
 	const u32 ft = (VU->code >> 16) & 0x1F;
-	VU->ACC.i.x = VU_MACx_UPDATE(VU, vu0Double(VU->VF[fs].i.y) * vu0Double(VU->VF[ft].i.z));
-	VU->ACC.i.y = VU_MACy_UPDATE(VU, vu0Double(VU->VF[fs].i.z) * vu0Double(VU->VF[ft].i.x));
-	VU->ACC.i.z = VU_MACz_UPDATE(VU, vu0Double(VU->VF[fs].i.x) * vu0Double(VU->VF[ft].i.y));
+	VU->ACC.i.x = VU_MACx_UPDATE(VU, VU->VF[fs].f.y * VU->VF[ft].f.z);
+	VU->ACC.i.y = VU_MACy_UPDATE(VU, VU->VF[fs].f.z * VU->VF[ft].f.x);
+	VU->ACC.i.z = VU_MACz_UPDATE(VU, VU->VF[fs].f.x * VU->VF[ft].f.y);
 	VU_STAT_UPDATE(VU);
 }
 
 // OPMSUB: VF[fd].xyz = ACC.xyz - cross-like multiply (fs.y*ft.z, fs.z*ft.x, fs.x*ft.y)
-// Matches _vuOPMSUB in VUops.cpp. VF[0] writes are discarded (flags still updated).
+// x86 microVU (microVU_Upper.inl:447-474) emits SSE_MULPS + SSE_SUBPS without
+// mVUclamp2 on operands. Match: read VF.f/ACC.f directly.
+// VF[0] writes are discarded (flags still updated).
 static void vu0_OPMSUB(VURegs* VU)
 {
 	const u32 fs = (VU->code >> 11) & 0x1F;
 	const u32 ft = (VU->code >> 16) & 0x1F;
 	const u32 fd = (VU->code >>  6) & 0x1F;
-	float ftx = vu0Double(VU->VF[ft].i.x);
-	float fty = vu0Double(VU->VF[ft].i.y);
-	float ftz = vu0Double(VU->VF[ft].i.z);
-	float fsx = vu0Double(VU->VF[fs].i.x);
-	float fsy = vu0Double(VU->VF[fs].i.y);
-	float fsz = vu0Double(VU->VF[fs].i.z);
-	u32 rx = VU_MACx_UPDATE(VU, vu0Double(VU->ACC.i.x) - fsy * ftz);
-	u32 ry = VU_MACy_UPDATE(VU, vu0Double(VU->ACC.i.y) - fsz * ftx);
-	u32 rz = VU_MACz_UPDATE(VU, vu0Double(VU->ACC.i.z) - fsx * fty);
+	const float ftx = VU->VF[ft].f.x;
+	const float fty = VU->VF[ft].f.y;
+	const float ftz = VU->VF[ft].f.z;
+	const float fsx = VU->VF[fs].f.x;
+	const float fsy = VU->VF[fs].f.y;
+	const float fsz = VU->VF[fs].f.z;
+	u32 rx = VU_MACx_UPDATE(VU, VU->ACC.f.x - fsy * ftz);
+	u32 ry = VU_MACy_UPDATE(VU, VU->ACC.f.y - fsz * ftx);
+	u32 rz = VU_MACz_UPDATE(VU, VU->ACC.f.z - fsx * fty);
 	if (fd != 0)
 	{
 		VU->VF[fd].i.x = rx;
