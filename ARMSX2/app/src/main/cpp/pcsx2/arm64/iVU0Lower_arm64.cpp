@@ -94,11 +94,11 @@ using vu_s32 = int32_t;
 using vu_u32 = uint32_t;
 
 // Emit inline ARM64 for vuDouble clamping on a W register.
-// Flushes denormals to ±0, clamps inf/NaN to ±max if vu0Overflow is set.
-// Gated on CHECK_VU_OVERFLOW to match x86 microVU_Lower.inl:92 (SQRT) and
-// microVU_Clamp.inl mVUclamp1 (operand-path inf/NaN clamp). The older VU0
-// lower code gated on SIGN_OVERFLOW — that was wrong, VU_OVERFLOW is the
-// flag x86 JIT checks on this path.
+// Flushes denormals to ±0, clamps inf/NaN to ±max if vu0SignOverflow is set.
+// INTENTIONAL DIVERGENCE FROM UPSTREAM x86 JIT: the port uses
+// CHECK_VU_SIGN_OVERFLOW here (not CHECK_VU_OVERFLOW as upstream does) as
+// the signal for an event-test optimization. Reverting to CHECK_VU_OVERFLOW
+// breaks event testing on this port — keep SIGN_OVERFLOW.
 // wreg: u32 float bits (modified in place)
 // wtmp: scratch register (clobbered)
 static void emitVuDouble(const Register& wreg, const Register& wtmp)
@@ -106,7 +106,7 @@ static void emitVuDouble(const Register& wreg, const Register& wtmp)
 	a64::Label done;
 	armAsm->Ubfx(wtmp, wreg, 23, 8); // extract 8-bit exponent
 
-	if (CHECK_VU_OVERFLOW(0))
+	if (CHECK_VU_SIGN_OVERFLOW(0))
 	{
 		a64::Label denormal;
 		armAsm->Cbz(wtmp, &denormal);           // exp==0 -> denormal
@@ -128,9 +128,10 @@ static void emitVuDouble(const Register& wreg, const Register& wtmp)
 	armAsm->Bind(&done);
 }
 
-// Float denormal/overflow clamping — mirrors upstream vuDouble() in VUops.cpp
-// (gated on CHECK_VU_OVERFLOW to match x86 JIT, NOT the port's local VUops.cpp
-// which was changed to SIGN_OVERFLOW — that change diverges from x86 JIT).
+// Float denormal/overflow clamping — mirrors the port's local VUops.cpp
+// vuDouble() (gated on CHECK_VU_SIGN_OVERFLOW, not CHECK_VU_OVERFLOW as
+// upstream). See emitVuDouble comment — SIGN_OVERFLOW is the event-test
+// optimization signal on this port; do not flip to OVERFLOW.
 static float vu0Double(vu_u32 f)
 {
 	switch (f & 0x7f800000)
@@ -139,7 +140,7 @@ static float vu0Double(vu_u32 f)
 			f &= 0x80000000;
 			return *(float*)&f;
 		case 0x7f800000:
-			if (CHECK_VU_OVERFLOW(0))
+			if (CHECK_VU_SIGN_OVERFLOW(0))
 			{
 				u32 d = (f & 0x80000000) | 0x7f7fffff;
 				return *(float*)&d;

@@ -165,11 +165,12 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw)
 	// v1 must already be loaded with src2
 
 	// vuDouble input clamping (matches interpreter's vuDouble on every operand)
-	// Mirrors x86 mVUclamp2 → mVUclamp1 fallthrough (microVU_Clamp.inl:27,50):
-	// clamp when EITHER VU0 sign-overflow OR VU0 overflow is set. Old gate
-	// incorrectly (a) missed the VU_OVERFLOW case and (b) OR'd VU1's flag
-	// into VU0 codegen. VU0 upper ops must check VU0 flags only.
-	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
+	// INTENTIONAL DIVERGENCE FROM UPSTREAM x86 JIT: this port gates on
+	// BOTH VU0 and VU1 sign-overflow flags as the signal for an event-test
+	// optimization. The apparent VU1-flag-spillover is deliberate — do not
+	// narrow to VU0-only or flip to CHECK_VU_OVERFLOW, either breaks event
+	// testing on this port.
+	if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
@@ -200,11 +201,12 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
 	armAsm->Ldr(q5, MemOperand(VU0_BASE_REG, accOff()));
 
 	// vuDouble input clamping (all 3 operands, matching interpreter)
-	// Mirrors x86 mVUclamp2 → mVUclamp1 fallthrough (microVU_Clamp.inl:27,50):
-	// clamp when EITHER VU0 sign-overflow OR VU0 overflow is set. Old gate
-	// incorrectly (a) missed the VU_OVERFLOW case and (b) OR'd VU1's flag
-	// into VU0 codegen. VU0 upper ops must check VU0 flags only.
-	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
+	// INTENTIONAL DIVERGENCE FROM UPSTREAM x86 JIT: this port gates on
+	// BOTH VU0 and VU1 sign-overflow flags as the signal for an event-test
+	// optimization. The apparent VU1-flag-spillover is deliberate — do not
+	// narrow to VU0-only or flip to CHECK_VU_OVERFLOW, either breaks event
+	// testing on this port.
+	if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
@@ -422,12 +424,10 @@ static void emitFTOI(int fbits)
 	const u32 xyzw = (VU0.code >> 21) & 0xF;
 	if (ft == 0) return; // VF[0] is read-only (hardwired)
 	armAsm->Ldr(q0, MemOperand(VU0_BASE_REG, vfOff(fs)));
-	// Clamp inf/NaN to ±MAX_FLOAT before converting. Gated on either VU0
-	// overflow flag — matches x86's mVUclamp2 → mVUclamp1 fallthrough.
-	// (Note: x86 FTOI itself doesn't call mVUclamp2 — it handles overflow
-	// inline via PCMP.GTD + PXOR. The arm64 pre-clamp is a belt-and-braces
-	// layer that keeps FCVTZS out of NaN/INF territory.)
-	if (CHECK_VU_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(0))
+	// Clamp inf/NaN to ±MAX_FLOAT before converting — keeps FCVTZS out of
+	// NaN/INF territory. Gated on the port's event-test-opt signal (see
+	// intentional divergence comment in emitBinaryFmac).
+	if (CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1))
 	{
 		emitVuClampSetup();
 		emitVuClampVec(v0.V4S());
