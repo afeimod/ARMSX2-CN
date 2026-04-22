@@ -126,6 +126,50 @@ static bool armUseFastmem()
 	return CHECK_FASTMEM && !vtlb_IsFaultingPC(pc);
 }
 
+// Force an event test after a load from the EE counter/timer register range
+// (0x10000000..0x10001FFF). Mirrors x86 iR5900LoadStore.cpp:117-119 + 139-143
+// (`iFlushCall(FLUSH_INTERPRETER); g_branch = 2;` — the "ESPN Games" fix). Without
+// this, a tight polling loop on the EE counter can stay in the JIT block long
+// enough to miss interrupt delivery.
+//
+// Flushes the in-flight cycle delta (cpuRegs.cycle = nextEventCycle + RCYCLE),
+// then forces `nextEventCycle = cpuRegs.cycle` so the next iBranchTest at block
+// exit dispatches events. Zeros RCYCLE so the block epilogue's cycle-flush is
+// a no-op (the invariant `cycle = nec + RCYCLE` still holds with RCYCLE=0).
+// Sets g_branch = 2 so the EE compile loop ends the block here.
+static void armForceEventTestAfterRead()
+{
+	// cpuRegs.cycle = nextEventCycle + RCYCLE
+	armAsm->Ldr(a64::x9, a64::MemOperand(RCPUSTATE, NEXT_EVENT_CYCLE_OFFSET));
+	armAsm->Add(a64::x9, a64::x9, RCYCLE);
+	armAsm->Str(a64::x9, a64::MemOperand(RCPUSTATE, CYCLE_OFFSET));
+	// nextEventCycle = cpuRegs.cycle — next iBranchTest fires event dispatch.
+	armAsm->Str(a64::x9, a64::MemOperand(RCPUSTATE, NEXT_EVENT_CYCLE_OFFSET));
+	// RCYCLE = cycle - nec = 0 — preserves the Phase B invariant for the
+	// block epilogue's cycle writeback.
+	armAsm->Mov(RCYCLE, a64::xzr);
+
+	armFlushPC();
+	armFlushCode();
+	armFlushConstRegs();
+
+	g_cpuHasConstReg = 1;
+	g_cpuFlushedConstReg = 1;
+	g_branch = 2;
+}
+
+// Emit the EE counter event test if this load's constant address lands in
+// the 0x10000000..0x10001FFF range. Only valid when _Rs_ is const-tracked
+// (matches x86 which only applies the fix in the const-address path).
+static void armMaybeForceEventTestAfterRead()
+{
+	if (!GPR_IS_CONST1(_Rs_))
+		return;
+	const u32 addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
+	if ((addr & 0xFFFFE000u) == 0x10000000u)
+		armForceEventTestAfterRead();
+}
+
 namespace R5900 {
 namespace Dynarec {
 namespace OpcodeImpl {
@@ -141,7 +185,11 @@ void recLB() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LB); }
 #else
 void recLB()
 {
-	if (!_Rt_) return;
+	// NOTE: No `if (!_Rt_) return;` — PS2 memory reads can have side effects
+	// (hardware FIFO drains, interrupt-on-read registers, counter triggers),
+	// and `LB $0, 0(reg)` is a legitimate way to issue one.  armStoreGPR64
+	// already no-ops on gpr==0, so the read happens and the write is dropped.
+	// Matches x86 recLoad (iR5900LoadStore.cpp:101-137).
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -161,6 +209,8 @@ void recLB()
 		armAsm->Sxtb(a64::x0, a64::w0);
 		armStoreGPR64(a64::x0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -171,7 +221,6 @@ void recLBU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LBU); }
 #else
 void recLBU()
 {
-	if (!_Rt_) return;
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -190,6 +239,8 @@ void recLBU()
 		armEmitReloadCycleAfterCall();
 		armStoreGPR64(a64::x0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -200,7 +251,6 @@ void recLH() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LH); }
 #else
 void recLH()
 {
-	if (!_Rt_) return;
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -220,6 +270,8 @@ void recLH()
 		armAsm->Sxth(a64::x0, a64::w0);
 		armStoreGPR64(a64::x0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -230,7 +282,6 @@ void recLHU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LHU); }
 #else
 void recLHU()
 {
-	if (!_Rt_) return;
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -249,6 +300,8 @@ void recLHU()
 		armEmitReloadCycleAfterCall();
 		armStoreGPR64(a64::x0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -259,7 +312,6 @@ void recLW() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LW); }
 #else
 void recLW()
 {
-	if (!_Rt_) return;
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -278,6 +330,8 @@ void recLW()
 		armEmitReloadCycleAfterCall();
 		armStoreGPR64SignExt32(a64::w0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -288,7 +342,6 @@ void recLWU() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWU); }
 #else
 void recLWU()
 {
-	if (!_Rt_) return;
 	armComputeAddress();
 
 	if (armUseFastmem())
@@ -307,6 +360,8 @@ void recLWU()
 		armEmitReloadCycleAfterCall();
 		armStoreGPR64(a64::x0, _Rt_);
 	}
+
+	armMaybeForceEventTestAfterRead();
 }
 #endif
 
@@ -317,7 +372,8 @@ void recLD() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LD); }
 #else
 void recLD()
 {
-	if (!_Rt_) return;
+	// x86 recLoad doesn't apply the EE-counter event-test fix to 64-bit loads
+	// (`bits <= 32 && needs_flush`), so LD skips armMaybeForceEventTestAfterRead.
 	armComputeAddress();
 
 	if (armUseFastmem())
