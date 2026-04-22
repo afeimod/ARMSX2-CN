@@ -3,10 +3,14 @@
 //
 // ARM64 VU0 Recompiler — Lower Instruction Stubs
 // Integer ALU, load/store, branches, FDIV, flag ops,
-// move/transfer, random, EFU, special (XTOP/XITOP; no XGKICK on VU0)
+// move/transfer, random, special (XTOP/XITOP; no XGKICK, no EFU on VU0)
 //
 // Mirrors iVU1Lower_arm64.cpp exactly; VU0_BASE_REG (x23) points to &VU0.
 // XGKICK/XTOP/XITOP always use the interpreter (VU0 doesn't drive the GIF).
+// EFU ops (ESADD/ERSADD/ELENG/ERLENG/EATANxy/EATANxz/ESUM/ERCPR/ESQRT/
+// ERSQRT/ESIN/EATAN/EEXP) are NOPs on VU0 — VU0 hardware has no EFU, so
+// writing VU0.p is undefined. Matches x86 microVU (pass1 sets isNOP=true
+// when isVU0).
 // ISTUB_VU0_* macros shadow ISTUB_VU_* so both units bisect independently.
 
 #include "Common.h"
@@ -172,20 +176,6 @@ static void vu0AdvanceLFSR(VURegs* VU)
 	VU->VI[REG_R].UL <<= 1;
 	VU->VI[REG_R].UL ^= x ^ y;
 	VU->VI[REG_R].UL = (VU->VI[REG_R].UL & 0x7fffff) | 0x3f800000;
-}
-
-// EATAN polynomial — mirrors _vuCalculateEATAN() in VUops.cpp
-static float vu0CalculateEATAN(float inputvalue)
-{
-	float eatanconst[9] = { 0.999999344348907f, -0.333298563957214f, 0.199465364217758f, -0.13085337519646f,
-							0.096420042216778f, -0.055909886956215f, 0.021861229091883f, -0.004054057877511f,
-							0.785398185253143f };
-	float result = (eatanconst[0] * inputvalue) + (eatanconst[1] * pow(inputvalue, 3)) + (eatanconst[2] * pow(inputvalue, 5))
-					+ (eatanconst[3] * pow(inputvalue, 7)) + (eatanconst[4] * pow(inputvalue, 9)) + (eatanconst[5] * pow(inputvalue, 11))
-					+ (eatanconst[6] * pow(inputvalue, 13)) + (eatanconst[7] * pow(inputvalue, 15));
-	result += eatanconst[8];
-	result = vu0Double(*(u32*)&result);
-	return result;
 }
 
 // ============================================================================
@@ -660,121 +650,11 @@ static void vu0_RXOR(VURegs* VU)
 	VU->VI[REG_R].UL = 0x3F800000 | ((VU->VI[REG_R].UL ^ VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]) & 0x007FFFFF);
 }
 
-// --- EFU wrappers ---
-static void vu0_ESADD(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].i.x) * vu0Double(VU->VF[W_Fs(VU)].i.x)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.y) * vu0Double(VU->VF[W_Fs(VU)].i.y)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.z) * vu0Double(VU->VF[W_Fs(VU)].i.z);
-	VU->p.F = p;
-}
-
-static void vu0_ERSADD(VURegs* VU)
-{
-	float p = (vu0Double(VU->VF[W_Fs(VU)].i.x) * vu0Double(VU->VF[W_Fs(VU)].i.x))
-			+ (vu0Double(VU->VF[W_Fs(VU)].i.y) * vu0Double(VU->VF[W_Fs(VU)].i.y))
-			+ (vu0Double(VU->VF[W_Fs(VU)].i.z) * vu0Double(VU->VF[W_Fs(VU)].i.z));
-	if (p != 0.0) p = 1.0f / p;
-	VU->p.F = p;
-}
-
-static void vu0_ELENG(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].i.x) * vu0Double(VU->VF[W_Fs(VU)].i.x)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.y) * vu0Double(VU->VF[W_Fs(VU)].i.y)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.z) * vu0Double(VU->VF[W_Fs(VU)].i.z);
-	if (p >= 0) p = sqrt(p);
-	VU->p.F = p;
-}
-
-static void vu0_ERLENG(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].i.x) * vu0Double(VU->VF[W_Fs(VU)].i.x)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.y) * vu0Double(VU->VF[W_Fs(VU)].i.y)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.z) * vu0Double(VU->VF[W_Fs(VU)].i.z);
-	if (p >= 0)
-	{
-		p = sqrt(p);
-		if (p != 0) p = 1.0f / p;
-	}
-	VU->p.F = p;
-}
-
-static void vu0_EATANxy(VURegs* VU)
-{
-	float p = 0;
-	if (vu0Double(VU->VF[W_Fs(VU)].i.x) != 0)
-		p = vu0CalculateEATAN(vu0Double(VU->VF[W_Fs(VU)].i.y) / vu0Double(VU->VF[W_Fs(VU)].i.x));
-	VU->p.F = p;
-}
-
-static void vu0_EATANxz(VURegs* VU)
-{
-	float p = 0;
-	if (vu0Double(VU->VF[W_Fs(VU)].i.x) != 0)
-		p = vu0CalculateEATAN(vu0Double(VU->VF[W_Fs(VU)].i.z) / vu0Double(VU->VF[W_Fs(VU)].i.x));
-	VU->p.F = p;
-}
-
-static void vu0_ESUM(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].i.x) + vu0Double(VU->VF[W_Fs(VU)].i.y)
-			+ vu0Double(VU->VF[W_Fs(VU)].i.z) + vu0Double(VU->VF[W_Fs(VU)].i.w);
-	VU->p.F = p;
-}
-
-static void vu0_ERCPR(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]);
-	if (p != 0) p = 1.0f / p;
-	VU->p.F = p;
-}
-
-static void vu0_ESQRT(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]);
-	if (p >= 0) p = sqrt(p);
-	VU->p.F = p;
-}
-
-static void vu0_ERSQRT(VURegs* VU)
-{
-	float p = vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]);
-	if (p >= 0)
-	{
-		p = sqrt(p);
-		if (p) p = 1.0f / p;
-	}
-	VU->p.F = p;
-}
-
-static void vu0_ESIN(VURegs* VU)
-{
-	float sinconsts[5] = {1.0f, -0.166666567325592f, 0.008333025500178f, -0.000198074136279f, 0.000002601886990f};
-	float p = vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]);
-	p = (sinconsts[0] * p) + (sinconsts[1] * pow(p, 3)) + (sinconsts[2] * pow(p, 5))
-		+ (sinconsts[3] * pow(p, 7)) + (sinconsts[4] * pow(p, 9));
-	VU->p.F = vu0Double(*(u32*)&p);
-}
-
-static void vu0_EATAN(VURegs* VU)
-{
-	float p = vu0CalculateEATAN(vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]));
-	VU->p.F = p;
-}
-
-static void vu0_EEXP(VURegs* VU)
-{
-	float consts[6] = {0.249998688697815f, 0.031257584691048f, 0.002591371303424f,
-						0.000171562001924f, 0.000005430199963f, 0.000000690600018f};
-	float p = vu0Double(VU->VF[W_Fs(VU)].UL[W_Fsf(VU)]);
-	p = 1.0f + (consts[0] * p) + (consts[1] * pow(p, 2)) + (consts[2] * pow(p, 3))
-		+ (consts[3] * pow(p, 4)) + (consts[4] * pow(p, 5)) + (consts[5] * pow(p, 6));
-	p = pow(p, 4);
-	p = vu0Double(*(u32*)&p);
-	p = 1 / p;
-	VU->p.F = p;
-}
+// EFU ops (ESADD/ERSADD/ELENG/ERLENG/EATANxy/EATANxz/ESUM/ERCPR/ESQRT/
+// ERSQRT/ESIN/EATAN/EEXP) have no C-wrapper path on VU0 — native emitter
+// below is a NOP matching x86 microVU. If you need to bisect back to
+// computed values, set the ISTUB flag for that op (routes to interp via
+// VU0_LOWER_OPCODE[]).
 
 // ============================================================================
 //  Per-instruction interp stub toggles (1 = interp, 0 = native)
@@ -1624,84 +1504,89 @@ REC_VU0_LOWER_CALL(RXOR)
 
 // ============================================================================
 //  EFU — Elementary Function Unit
+//
+//  VU0 has no EFU hardware. Native path emits no instructions (matches x86
+//  microVU's isNOP=true on isVU0). ISTUB=1 routes to the interpreter, which
+//  will compute the polynomial and update VU0.p — divergent from x86, kept
+//  for bisection only.
 // ============================================================================
 
 #if ISTUB_VU0_ESADD
 REC_VU0_LOWER_INTERP(ESADD)
 #else
-REC_VU0_LOWER_CALL(ESADD)
+void recVU0_ESADD() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ERSADD
 REC_VU0_LOWER_INTERP(ERSADD)
 #else
-REC_VU0_LOWER_CALL(ERSADD)
+void recVU0_ERSADD() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ELENG
 REC_VU0_LOWER_INTERP(ELENG)
 #else
-REC_VU0_LOWER_CALL(ELENG)
+void recVU0_ELENG() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ERLENG
 REC_VU0_LOWER_INTERP(ERLENG)
 #else
-REC_VU0_LOWER_CALL(ERLENG)
+void recVU0_ERLENG() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_EATANxy
 REC_VU0_LOWER_INTERP(EATANxy)
 #else
-REC_VU0_LOWER_CALL(EATANxy)
+void recVU0_EATANxy() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_EATANxz
 REC_VU0_LOWER_INTERP(EATANxz)
 #else
-REC_VU0_LOWER_CALL(EATANxz)
+void recVU0_EATANxz() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ESUM
 REC_VU0_LOWER_INTERP(ESUM)
 #else
-REC_VU0_LOWER_CALL(ESUM)
+void recVU0_ESUM() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ERCPR
 REC_VU0_LOWER_INTERP(ERCPR)
 #else
-REC_VU0_LOWER_CALL(ERCPR)
+void recVU0_ERCPR() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ESQRT_EFU
 REC_VU0_LOWER_INTERP(ESQRT)
 #else
-REC_VU0_LOWER_CALL(ESQRT)
+void recVU0_ESQRT() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ERSQRT
 REC_VU0_LOWER_INTERP(ERSQRT)
 #else
-REC_VU0_LOWER_CALL(ERSQRT)
+void recVU0_ERSQRT() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_ESIN
 REC_VU0_LOWER_INTERP(ESIN)
 #else
-REC_VU0_LOWER_CALL(ESIN)
+void recVU0_ESIN() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_EATAN
 REC_VU0_LOWER_INTERP(EATAN)
 #else
-REC_VU0_LOWER_CALL(EATAN)
+void recVU0_EATAN() { /* NOP — no EFU on VU0 */ }
 #endif
 
 #if ISTUB_VU0_EEXP
 REC_VU0_LOWER_INTERP(EEXP)
 #else
-REC_VU0_LOWER_CALL(EEXP)
+void recVU0_EEXP() { /* NOP — no EFU on VU0 */ }
 #endif
 
 // ============================================================================
