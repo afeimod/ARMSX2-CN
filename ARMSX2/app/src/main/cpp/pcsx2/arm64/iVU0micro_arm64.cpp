@@ -729,20 +729,92 @@ void recArmVU0::Execute(u32 cycles)
 
 void recArmVU0::Clear(u32 addr, u32 size)
 {
-	// Slot-keyed invalidation. An earlier attempt to make this span-aware
-	// (commit 4af448458 "fix: VU0 clear()") caused graphical dropouts and
-	// lag — Clear() is hit frequently (VIF MPG uploads, DMA completions,
-	// CPU memory writes) and scanning all 512 slots per call triggered a
-	// recompile storm. The stale-block bug that fix was chasing (blocks
-	// spanning across the patched range) is audit-speculative — never
-	// confirmed in a real game — so we keep the fast path.
-	const u32 first        = addr / 8;
-	const u32 last         = (addr + size + 7) / 8;
-	const u32 clamped_last = std::min(last, VU0_NUM_SLOTS);
+	// Span-aware invalidation, bounded by max block span. Invalidates any
+	// block whose compiled byte span overlaps [addr, addr+size).
+	//
+	// Prior attempts:
+	//   - Slot-keyed (pre-4af448458): missed blocks whose START was before
+	//     the clear range but whose SPAN reached into it → stale compiled
+	//     code ran after the patch.
+	//   - Full-scan span-aware (commit 4af448458): correct, but iterated all
+	//     VU0_NUM_SLOTS=512 entries per Clear. Clear() hits frequently (VIF
+	//     MPG uploads, SPR/VU0 DMA, CPU stores to VU memory), so the
+	//     unbounded scan caused graphical dropouts and lag in Twinsanity.
+	//
+	// This fix is correctness-equivalent to the full-scan version but bounds
+	// the scan by the maximum possible block span: VU0_MAX_BLOCK_PAIRS*8 =
+	// 128 slots = 1024 bytes. Any block whose span could reach a given slot
+	// must start within 128 slots behind it (or, if the slot is near the
+	// start of memory, near the END of memory via wrap).
+	//
+	// Three scan regions:
+	//   (1) Slots INSIDE the clear range — blocks keyed at those slots.
+	//   (2) Up to 128 slots BEFORE clear_start — blocks that span forward
+	//       into the clear range.
+	//   (3) If clear range touches slots [0, 128): slots [384, 512) —
+	//       wrapping blocks whose wrap_end lands in the clear range.
+	//
+	// Worst case ~256 iterations (typically ~130). Matches full-scan
+	// correctness without the storm.
 
-	if (first >= VU0_NUM_SLOTS)
+	if (addr >= VU0_PROGSIZE || size == 0)
 		return;
 
-	for (u32 i = first; i < clamped_last; i++)
-		s_blocks[i].codeEntry = nullptr;
+	const u32 clear_start = addr;
+	const u32 clear_end   = std::min(addr + size, VU0_PROGSIZE);
+	const u32 first_slot  = clear_start / 8;
+	const u32 last_slot   = std::min((clear_end + 7) / 8, VU0_NUM_SLOTS);
+
+	// (1) Fast path: blocks whose start PC is IN the clear range.
+	for (u32 slot = first_slot; slot < last_slot; slot++)
+		s_blocks[slot].codeEntry = nullptr;
+
+	// (2) Predecessor scan: blocks that start BEFORE the clear range but
+	// span into it. Max block span = 128 slots.
+	const u32 predecessor_start = (first_slot >= VU0_MAX_BLOCK_PAIRS)
+		? first_slot - VU0_MAX_BLOCK_PAIRS
+		: 0;
+	for (u32 slot = predecessor_start; slot < first_slot; slot++)
+	{
+		VU0BlockEntry& blk = s_blocks[slot];
+		if (!blk.codeEntry)
+			continue;
+		const u32 block_start = slot * 8;
+		const u32 block_end   = block_start + blk.numPairs * 8;
+		if (block_end <= VU0_PROGSIZE)
+		{
+			// Non-wrapping: block_start < clear_start by loop bounds, so
+			// overlap iff clear_start < block_end.
+			if (clear_start < block_end)
+				blk.codeEntry = nullptr;
+		}
+		else
+		{
+			// Wrapping block starting before clear_start: its first half
+			// [block_start, VU0_PROGSIZE) always reaches past clear_start
+			// (block_end_unwrapped > VU0_PROGSIZE > clear_start).
+			blk.codeEntry = nullptr;
+		}
+	}
+
+	// (3) Wrap scan: only fires when the clear range touches the first
+	// VU0_MAX_BLOCK_PAIRS slots — otherwise no wrapping block's wrap_end
+	// (bounded by max span) can reach clear_start.
+	if (clear_start < VU0_MAX_BLOCK_PAIRS * 8)
+	{
+		constexpr u32 min_wrap_origin_slot = VU0_NUM_SLOTS - VU0_MAX_BLOCK_PAIRS;
+		for (u32 slot = min_wrap_origin_slot; slot < VU0_NUM_SLOTS; slot++)
+		{
+			VU0BlockEntry& blk = s_blocks[slot];
+			if (!blk.codeEntry)
+				continue;
+			const u32 block_start         = slot * 8;
+			const u32 block_end_unwrapped = block_start + blk.numPairs * 8;
+			if (block_end_unwrapped <= VU0_PROGSIZE)
+				continue; // doesn't wrap
+			const u32 wrap_end = block_end_unwrapped - VU0_PROGSIZE;
+			if (clear_start < wrap_end)
+				blk.codeEntry = nullptr;
+		}
+	}
 }

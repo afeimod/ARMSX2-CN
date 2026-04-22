@@ -1141,22 +1141,25 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	armAsm->Mov(w5, 4);
 	armAsm->Stp(w5, VU1_MACFLAG_REG, MemOperand(x7, f_Cycle));
 
-	// statusflag / clipflag: commit only when this op's flagreg has the
-	// corresponding bit set. _vuFMACflush gates its VI[REG_STATUS_FLAG] /
-	// VI[REG_CLIP_FLAG] stores on the same flagreg bits, so an unset slot
-	// field is never read — skipping the store for plain FMAC arith
-	// (ADD/SUB/MUL/MADD/MSUB/MAX/MINI/ABS: VIwrite==0 → flagregBoth==0)
-	// drops a whole Stp in the common case. CLIP and FSSET are the only
-	// ops that actually set these bits.
-	const bool need_status = (flagregBoth & (1u << REG_STATUS_FLAG)) != 0u;
-	const bool need_clip   = (flagregBoth & (1u << REG_CLIP_FLAG))   != 0u;
-	if (need_status && need_clip)
+	// statusflag: ALWAYS stored. _vuFMACflush (VUops.cpp:59-62) reads
+	// fmac[i].statusflag in BOTH branches of its flagreg-gated if/else —
+	// the else branch ORs fmac[i].statusflag's Z/S bits into
+	// VI[REG_STATUS_FLAG] regardless of whether this op wrote the flag.
+	// Skipping the store leaves stale bits from whatever op previously
+	// occupied this ring slot, which leaks into VI[REG_STATUS_FLAG] on
+	// the next flush → corrupted FSAND/FSEQ/FSOR reads → missing geometry
+	// in Shadow of the Colossus (this was the bug in commit c591194b1).
+	//
+	// clipflag: conditionally stored. _vuFMACflush (VUops.cpp:54-55) reads
+	// fmac[i].clipflag ONLY when flagreg & REG_CLIP_FLAG is set, so
+	// skipping the store for ops whose flagreg doesn't have that bit (the
+	// common case — only the CLIP op sets it) is safe. This was the
+	// correct half of commit c591194b1; keeping that saving.
+	const bool need_clip = (flagregBoth & (1u << REG_CLIP_FLAG)) != 0u;
+	if (need_clip)
 		armAsm->Stp(VU1_STATUSFLAG_REG, VU1_CLIPFLAG_REG, MemOperand(x7, f_statusflag));
-	else if (need_status)
+	else
 		armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(x7, f_statusflag));
-	else if (need_clip)
-		armAsm->Str(VU1_CLIPFLAG_REG,   MemOperand(x7, f_clipflag));
-	// else (typical): both skipped — _vuFMACflush won't read them.
 
 	// fmaccount++
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmaccount_off));
