@@ -2128,6 +2128,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//
 	// Unused when xgkickhack=true — see pre-walk above.
 	bool pending_xgkick_fire = false;
+
+	// Track whether the previous pair executed a branch op — feeds the
+	// "is this pair a branch delay slot?" predicate for D/T bit suppression
+	// at step 11b. Mirrors mVUinfo.isBdelay in x86 microVU_Compile.inl:901.
+	// Same pattern as the VU0 C-4 fix.
+	bool prev_was_branch = false;
+
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
@@ -2257,13 +2264,6 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		{
 			armAsm->Mov(w4, 2u);
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, ebit_off));
-		}
-
-		// 4. D/T bits: depend on VU0 FBRST (runtime). Only emit when actually set.
-		if (dbit_set || tbit_set)
-		{
-			armAsm->Mov(w0, upper);
-			armEmitCall(reinterpret_cast<const void*>(vu1CheckDTBits));
 		}
 
 		// 5. Test upper stalls — compile-time-specialized inline. Most upper
@@ -2420,6 +2420,25 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		if (!ibit)
 			emitLowerNonFMACAdd(lregs);
 
+		// 11b. D/T bits — depend on VU0 FBRST (runtime). Only emit when
+		//      actually set. Runs AFTER the op so the pair's side effects
+		//      on VPU_STAT / VI mem-mapped regs happen before the VPU_STAT
+		//      bit is set, matching x86 microVU_Compile.inl:900-910 which
+		//      calls mVUDoDBit/mVUDoTBit after mVUexecuteInstruction. D/T
+		//      → ebit=1 is picked up by step 13's ebit countdown below in
+		//      the same pair. Same placement as VU0 C-1 fix.
+		//
+		//      Suppressed when the current pair is itself a branch or is in
+		//      a branch delay slot — matches x86's `!mVUinfo.isBdelay &&
+		//      !mVUlow.branch` guard (ISA undefined behavior for D/T in
+		//      these contexts). Same pattern as VU0 C-4 fix.
+		const bool branch_pipe = !ibit && (lregs.pipe == VUPIPE_BRANCH);
+		if ((dbit_set || tbit_set) && !branch_pipe && !prev_was_branch)
+		{
+			armAsm->Mov(w0, upper);
+			armEmitCall(reinterpret_cast<const void*>(vu1CheckDTBits));
+		}
+
 		// 12. Branch countdown (inline).
 		{
 			Label skip_branch;
@@ -2496,6 +2515,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			if (!ibit && isXgkickOp(lower))
 				pending_xgkick_fire = true;
 		}
+
+		// Track branch for next pair's D/T bit suppression (step 11b).
+		// Updated on every pair that emits the native body; hazard-fallback
+		// pairs use `continue` above so they DON'T update this — their
+		// branch-pipe-ness is invisible to the native code. But since the
+		// pair after a hazard-fallback pair is still a valid next-pair
+		// context, leaving prev_was_branch at its stale value is acceptable:
+		// the hazard fallback emitted vu1Exec for the whole pair, and any
+		// D/T bit on the next pair's native path honors the previous
+		// NATIVELY-EMITTED branch correctly.
+		prev_was_branch = branch_pipe;
 
 		pc = (pc + 8) & (VU1_PROGSIZE - 1);
 	}
