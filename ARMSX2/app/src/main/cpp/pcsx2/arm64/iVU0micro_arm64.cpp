@@ -227,6 +227,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	const int64_t fmacwpos_off = (int64_t)offsetof(VURegs, fmacwritepos);
 	const int64_t flags_off    = (int64_t)offsetof(VURegs, flags);
 	const int64_t vpu_stat_off = (int64_t)((int64_t)offsetof(VURegs, VI) + REG_VPU_STAT * (int64_t)sizeof(REG_VI));
+	const int64_t micro_off    = (int64_t)offsetof(VURegs, Micro);
+
+	// IbitHack forces per-op immediate decode from live micro memory (mirrors
+	// x86 microVU's ptr32[&curI] reads). When on, VU->code is loaded from
+	// VU->Micro[pc] at runtime instead of the JIT-baked instruction word so
+	// subsequent C wrappers (LQ/SQ/ILW/ISW) pick up any post-compile patches.
+	// Natively-emitted IADDI/IADDIU/ISUBIU consult EmuConfig directly and emit
+	// runtime-decode paths of their own.
+	const bool use_ibit_hack = EmuConfig.Gamefixes.IbitHack;
 
 	// Epilogue label — jumped to when we need early exit mid-block
 	Label early_exit;
@@ -364,7 +373,16 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			armEmitCall(reinterpret_cast<const void*>(vu0DecrementVIBackup));
 
 			// 7. Upper instruction
-			armAsm->Mov(w4, upper);
+			if (use_ibit_hack)
+			{
+				// Live read from micro memory so post-compile patches are visible.
+				armAsm->Ldr(x5, MemOperand(VU0_BASE_REG, micro_off));
+				armAsm->Ldr(w4, MemOperand(x5, (pc + 4)));
+			}
+			else
+			{
+				armAsm->Mov(w4, upper);
+			}
 			armAsm->Str(w4, MemOperand(VU0_BASE_REG, code_off));
 			VU0.code = upper;
 			recVU0_UpperTable[upper & 0x3f]();
@@ -377,7 +395,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			}
 			else
 			{
-				armAsm->Mov(w4, lower);
+				if (use_ibit_hack)
+				{
+					armAsm->Ldr(x5, MemOperand(VU0_BASE_REG, micro_off));
+					armAsm->Ldr(w4, MemOperand(x5, pc));
+				}
+				else
+				{
+					armAsm->Mov(w4, lower);
+				}
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, code_off));
 				VU0.code = lower;
 				recVU0_LowerTable[lower >> 25]();

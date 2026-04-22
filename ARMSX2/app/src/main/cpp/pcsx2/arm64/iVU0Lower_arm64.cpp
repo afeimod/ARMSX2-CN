@@ -1091,15 +1091,26 @@ void recVU0_IADDI() {
 	const u32 it = (VU0.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU0.code >> 11) & 0xF;
-	// 5-bit signed immediate at bits [10:6], sign-extended.
-	s32 imm = (VU0.code >> 6) & 0x1f;
-	imm = ((imm & 0x10) ? static_cast<s32>(0xfffffff0) : 0) | (imm & 0xf);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU0_BASE_REG, viOff(is)));
-	if (imm > 0)
-		armAsm->Add(w0, w0, imm);
-	else if (imm < 0)
-		armAsm->Sub(w0, w0, static_cast<u32>(-imm));
+	if (EmuConfig.Gamefixes.IbitHack)
+	{
+		// Live 5-bit signed immediate from bits [10:6] of VU->code. Matches
+		// x86 microVU_Lower.inl IADDI (xSHL 21; xSAR 27 = sign-extract [10:6]).
+		armAsm->Ldr(w1, MemOperand(VU0_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Sbfx(w1, w1, 6, 5);
+		armAsm->Add(w0, w0, w1);
+	}
+	else
+	{
+		// 5-bit signed immediate at bits [10:6], sign-extended at JIT time.
+		s32 imm = (VU0.code >> 6) & 0x1f;
+		imm = ((imm & 0x10) ? static_cast<s32>(0xfffffff0) : 0) | (imm & 0xf);
+		if (imm > 0)
+			armAsm->Add(w0, w0, imm);
+		else if (imm < 0)
+			armAsm->Sub(w0, w0, static_cast<u32>(-imm));
+	}
 	armAsm->Strh(w0, MemOperand(VU0_BASE_REG, viOff(it)));
 }
 #endif
@@ -1111,14 +1122,28 @@ void recVU0_IADDIU() {
 	const u32 it = (VU0.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU0.code >> 11) & 0xF;
-	// 15-bit unsigned immediate: bits [24:21] → [14:11], bits [10:0] → [10:0].
-	const u32 imm = ((VU0.code >> 10) & 0x7800) | (VU0.code & 0x7ff);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU0_BASE_REG, viOff(is)));
-	if (imm != 0)
+	if (EmuConfig.Gamefixes.IbitHack)
 	{
-		armAsm->Mov(w1, imm);
+		// Live 15-bit unsigned immediate from VU->code: ((code >> 10) & 0x7800) | (code & 0x7FF).
+		// Mirrors x86 microVU_Lower.inl IADDIU IbitHack path.
+		armAsm->Ldr(w1, MemOperand(VU0_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Lsr(w2, w1, 10);
+		armAsm->And(w2, w2, 0x7800);
+		armAsm->And(w1, w1, 0x7FF);
+		armAsm->Orr(w1, w1, w2);
 		armAsm->Add(w0, w0, w1);
+	}
+	else
+	{
+		// 15-bit unsigned immediate: bits [24:21] → [14:11], bits [10:0] → [10:0].
+		const u32 imm = ((VU0.code >> 10) & 0x7800) | (VU0.code & 0x7ff);
+		if (imm != 0)
+		{
+			armAsm->Mov(w1, imm);
+			armAsm->Add(w0, w0, w1);
+		}
 	}
 	armAsm->Strh(w0, MemOperand(VU0_BASE_REG, viOff(it)));
 }
@@ -1131,13 +1156,25 @@ void recVU0_ISUBIU() {
 	const u32 it = (VU0.code >> 16) & 0xF;
 	if (it == 0) return;
 	const u32 is = (VU0.code >> 11) & 0xF;
-	const u32 imm = ((VU0.code >> 10) & 0x7800) | (VU0.code & 0x7ff);
 	emitBackupVI(it);
 	armAsm->Ldrh(w0, MemOperand(VU0_BASE_REG, viOff(is)));
-	if (imm != 0)
+	if (EmuConfig.Gamefixes.IbitHack)
 	{
-		armAsm->Mov(w1, imm);
+		armAsm->Ldr(w1, MemOperand(VU0_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
+		armAsm->Lsr(w2, w1, 10);
+		armAsm->And(w2, w2, 0x7800);
+		armAsm->And(w1, w1, 0x7FF);
+		armAsm->Orr(w1, w1, w2);
 		armAsm->Sub(w0, w0, w1);
+	}
+	else
+	{
+		const u32 imm = ((VU0.code >> 10) & 0x7800) | (VU0.code & 0x7ff);
+		if (imm != 0)
+		{
+			armAsm->Mov(w1, imm);
+			armAsm->Sub(w0, w0, w1);
+		}
 	}
 	armAsm->Strh(w0, MemOperand(VU0_BASE_REG, viOff(it)));
 }
