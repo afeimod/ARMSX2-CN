@@ -312,7 +312,31 @@ a64::XRegister armGprAlloc(int gpr, bool for_write)
 
 	if (slot.host_code != 0xff)
 	{
-		// Already cached — just hand back the existing host reg.
+		// Coherence with the const tracker.  If GPR_SET_CONST(gpr) was called
+		// after this slot was populated (e.g. LUI/ALU-const-path setting a new
+		// const while an earlier op still has the slot cached with an old
+		// runtime value), the cache is stale — the const is authoritative.
+		// For reads: re-materialise the const into the slot, drop dirty.
+		// For writes: caller is about to overwrite anyway, but we still need
+		// to clear GPR_IS_CONST1 so later readers don't keep preferring the
+		// now-stale const.  Covers both sides of the const/cache sync gap
+		// without requiring every emitter to explicitly invalidate.
+		if (GPR_IS_CONST1(gpr))
+		{
+			if (for_write)
+			{
+				// New runtime value coming — const tracker is about to be stale.
+				GPR_DEL_CONST(gpr);
+			}
+			else
+			{
+				// Read: const value wins over stale cache.
+				armAsm->Mov(a64::XRegister(slot.host_code),
+					static_cast<u64>(g_cpuConstRegs[gpr].SD[0]));
+				slot.dirty = false;
+				slot.sxw = false;
+			}
+		}
 		if (for_write)
 		{
 			slot.dirty = true;
@@ -337,6 +361,15 @@ a64::XRegister armGprAlloc(int gpr, bool for_write)
 		{
 			armAsm->Ldr(reg, a64::MemOperand(RCPUSTATE, GPR_OFFSET(gpr)));
 		}
+	}
+	else if (GPR_IS_CONST1(gpr))
+	{
+		// Writing a new runtime value to a previously-const GPR.  Clear
+		// const tracking so armLoadGPR* readers don't keep returning the
+		// now-stale compile-time value.  Mirrors the explicit armDelConstReg
+		// that well-behaved emitters call before armGprAlloc(for_write) —
+		// this is the belt-and-suspenders safety net when they don't.
+		GPR_DEL_CONST(gpr);
 	}
 	// for_write: caller will store next; no load needed.
 
