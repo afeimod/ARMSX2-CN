@@ -343,13 +343,6 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, flags_off));
 			}
 
-			// 4. D/T bits
-			if (dbit_set || tbit_set)
-			{
-				armAsm->Mov(w0, upper);
-				armEmitCall(reinterpret_cast<const void*>(vu0CheckDTBits));
-			}
-
 			// 5. Upper stalls
 			armAsm->Mov(x0, VU0_BASE_REG);
 			armMoveAddressToReg(x1, &uregs_data[i]);
@@ -427,6 +420,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 				armAsm->Mov(x0, VU0_BASE_REG);
 				armMoveAddressToReg(x1, &lregs_data[i]);
 				armEmitCall(reinterpret_cast<const void*>(_vuAddLowerStalls));
+			}
+
+			// 11b. D/T bits — runs AFTER the op so the pair's side effects
+			// on VPU_STAT/VI mem-mapped regs happen before the VPU_STAT bit
+			// is set, matching x86 microVU_Compile.inl:900-910 which calls
+			// mVUDoDBit/mVUDoTBit after mVUexecuteInstruction. D/T → ebit=1
+			// is picked up by step 13's ebit countdown below in the same pair.
+			if (dbit_set || tbit_set)
+			{
+				armAsm->Mov(w0, upper);
+				armEmitCall(reinterpret_cast<const void*>(vu0CheckDTBits));
 			}
 
 			// 12. Branch countdown
