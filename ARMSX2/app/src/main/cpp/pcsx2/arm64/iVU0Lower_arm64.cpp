@@ -292,9 +292,13 @@ static void vu0_LQ(VURegs* VU)
 static void vu0_LQD(VURegs* VU)
 {
 	vu0BackupVI(VU, W_Is(VU));
-	if (W_Is(VU) != 0) VU->VI[W_Is(VU)].US[0]--;
+	// x86 microVU uses the decremented value for the effective address even
+	// when _Is_==0 (allocGPR+xDEC regardless of register). VI[0] itself stays
+	// hardwired to 0 — only the address calc sees the decrement wrap.
+	const u16 is_new = static_cast<u16>(VU->VI[W_Is(VU)].US[0] - 1);
+	if (W_Is(VU) != 0) VU->VI[W_Is(VU)].US[0] = is_new;
 	if (W_Ft(VU) == 0) return;
-	u32 addr = (VU->VI[W_Is(VU)].US[0] * 16);
+	u32 addr = (is_new * 16);
 	vu0MTVUSyncVU1Reg(addr);
 	u32* ptr = (u32*)GET_VU_MEM(VU, addr);
 	if (W_X(VU)) VU->VF[W_Ft(VU)].UL[0] = ptr[0];
@@ -334,8 +338,14 @@ static void vu0_SQ(VURegs* VU)
 static void vu0_SQD(VURegs* VU)
 {
 	vu0BackupVI(VU, W_It(VU));
-	if (W_Ft(VU) != 0) VU->VI[W_It(VU)].US[0]--;
-	u32 addr = (VU->VI[W_It(VU)].US[0] * 16);
+	// Match x86 microVU: address uses the decremented value regardless of
+	// whether _It_==0. Writeback still guards on _Ft_!=0 (existing semantic
+	// that treats SQD with Ft==0 as a full NOP) AND _It_!=0 (don't corrupt
+	// the VI[0]-is-zero invariant — x86's allocator caches a copy so the
+	// dirty value may never reach memory).
+	const u16 it_new = static_cast<u16>(VU->VI[W_It(VU)].US[0] - 1);
+	if (W_Ft(VU) != 0 && W_It(VU) != 0) VU->VI[W_It(VU)].US[0] = it_new;
+	u32 addr = (it_new * 16);
 	vu0MTVUSyncVU1Reg(addr);
 	u32* ptr = (u32*)GET_VU_MEM(VU, addr);
 	if (W_X(VU)) ptr[0] = VU->VF[W_Fs(VU)].UL[0];
