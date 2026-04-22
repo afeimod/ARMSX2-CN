@@ -252,6 +252,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 	// Mirrors mVUinfo.isBdelay in x86 microVU_Compile.inl:901.
 	bool prev_was_branch = false;
 
+	// Tracks whether the previous pair had its E-bit set — feeds the
+	// "branch in E-bit delay slot?" predicate for branch suppression in
+	// the lower emit path. Mirrors x86 microVU_Compile.inl branchWarning
+	// which sets mVUlow.isNOP when mVUup.eBit && mVUbranch.
+	bool prev_was_ebit = false;
+
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
@@ -393,6 +399,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			recVU0_UpperTable[upper & 0x3f]();
 
 			// 8. Lower instruction
+			// NOP the lower when this pair is a branch AND the previous pair
+			// set E-bit — "branch in E-bit delay slot" is ISA-undefined.
+			// Matches x86 microVU_Compile.inl branchWarning which flags
+			// mVUlow.isNOP when the pair is both in an E-bit delay slot and
+			// contains a branch. Upper still executes; we just skip the
+			// branch rec emission so VU->branch / branchpc stay untouched.
+			const bool suppress_branch = !ibit && branch_pipe && prev_was_ebit;
 			if (ibit)
 			{
 				armAsm->Mov(w4, lower);
@@ -411,7 +424,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 				}
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, code_off));
 				VU0.code = lower;
-				recVU0_LowerTable[lower >> 25]();
+				if (!suppress_branch)
+					recVU0_LowerTable[lower >> 25]();
 			}
 
 			// 9. FMAC clear
@@ -493,6 +507,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 		// Updated regardless of fallback vs native path because the delay
 		// slot's D/T check must be suppressed either way.
 		prev_was_branch = branch_pipe;
+
+		// Track E-bit for next pair's branch suppression (step 8).
+		// Same reasoning: delay-slot context applies regardless of path.
+		prev_was_ebit = ebit_set;
 
 		// After each pair (except last): check VPU_STAT and MFLAGSET
 		if (i < numPairs - 1)
