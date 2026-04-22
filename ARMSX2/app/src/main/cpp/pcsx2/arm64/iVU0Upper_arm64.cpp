@@ -488,21 +488,40 @@ static void emitITOF(int fbits)
 // ============================================================================
 
 // CLIP: update clipflag by comparing |VF[ft].w| against VF[fs].xyz (±)
-// Matches _vuCLIP in VUops.cpp exactly.
+// Matches x86 microVU_Upper.inl:533-575 — denormal handling is on the Fs
+// side (per-lane zero-out if exponent field is 0), NOT on Ft.w. The prior
+// arm64 version substituted Ft.w with 0x007fffff on denormal Ft, which
+// diverged from x86: with Ft.w=denormal and Fs=normal, x86 reads Ft.w
+// threshold as a tiny positive value and clips Fs; prior arm64 reads it as
+// 0x007fffff and also clips Fs — match for the normal-Fs case. With
+// Fs=denormal, x86 zeros Fs before compare (no clip); prior arm64 compared
+// denormal Fs bits against 0x007fffff (possibly clipped). Aligned to x86
+// now.
 static void vu0_CLIP(VURegs* VU)
 {
 	const u32 fs = (VU->code >> 11) & 0x1F;
 	const u32 ft = (VU->code >> 16) & 0x1F;
-	s32 value    = static_cast<s32>(VU->VF[ft].i.w);
-	// Denormal → use max-denormal magnitude so only normals compare above it
-	value = (value & 0x7f800000) ? value & 0x7fffffff : 0x007fffff;
+
+	// |Ft.w| bit pattern. x86: xPAND Ft, absclip. No denormal substitution
+	// here — denormal Ft.w becomes a tiny positive threshold.
+	const s32 value = static_cast<s32>(VU->VF[ft].i.w & 0x7fffffffu);
+
+	// Per-lane Fs: zero out if the exponent field is 0 (denormal or ±0).
+	// Matches x86 xPAND(t1, Fs, exponent) + xPCMP.EQD(t1, 0) + xPANDN(t1, Fs):
+	// t1[i] = (Fs[i] exponent == 0) ? 0 : Fs[i]. Keeps denormal Fs lanes
+	// from appearing "above |Ft.w|" when |Ft.w| is tiny.
+	auto fsLane = [](u32 raw) -> u32 { return (raw & 0x7f800000u) ? raw : 0u; };
+	const u32 fsx = fsLane(VU->VF[fs].i.x);
+	const u32 fsy = fsLane(VU->VF[fs].i.y);
+	const u32 fsz = fsLane(VU->VF[fs].i.z);
+
 	VU->clipflag <<= 6;
-	if (static_cast<s32>(VU->VF[fs].i.x)                    > value) VU->clipflag |= 0x01;
-	if (static_cast<s32>(VU->VF[fs].i.x ^ 0x80000000u)      > value) VU->clipflag |= 0x02;
-	if (static_cast<s32>(VU->VF[fs].i.y)                    > value) VU->clipflag |= 0x04;
-	if (static_cast<s32>(VU->VF[fs].i.y ^ 0x80000000u)      > value) VU->clipflag |= 0x08;
-	if (static_cast<s32>(VU->VF[fs].i.z)                    > value) VU->clipflag |= 0x10;
-	if (static_cast<s32>(VU->VF[fs].i.z ^ 0x80000000u)      > value) VU->clipflag |= 0x20;
+	if (static_cast<s32>(fsx)               > value) VU->clipflag |= 0x01;
+	if (static_cast<s32>(fsx ^ 0x80000000u) > value) VU->clipflag |= 0x02;
+	if (static_cast<s32>(fsy)               > value) VU->clipflag |= 0x04;
+	if (static_cast<s32>(fsy ^ 0x80000000u) > value) VU->clipflag |= 0x08;
+	if (static_cast<s32>(fsz)               > value) VU->clipflag |= 0x10;
+	if (static_cast<s32>(fsz ^ 0x80000000u) > value) VU->clipflag |= 0x20;
 	VU->clipflag &= 0xFFFFFF;
 }
 
