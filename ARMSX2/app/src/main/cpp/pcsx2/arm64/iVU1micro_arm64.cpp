@@ -2135,6 +2135,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// Same pattern as the VU0 C-4 fix.
 	bool prev_was_branch = false;
 
+	// Tracks whether the previous pair had its E-bit set — feeds the
+	// "branch in E-bit delay slot?" predicate for branch suppression in
+	// the lower emit path. Mirrors x86 microVU_Compile.inl branchWarning
+	// which sets mVUlow.isNOP when mVUup.eBit && mVUbranch. Same pattern
+	// as the VU0 C-5 fix.
+	bool prev_was_ebit = false;
+
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
@@ -2146,6 +2153,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		const bool tbit_set = (upper >> 27) & 1;
 		const _VURegsNum& uregs = uregs_data[i];
 		const _VURegsNum& lregs = lregs_data[i];
+
+		// Hoisted up-front — consumed by both step 8 branch-in-ebit-delay
+		// suppression and step 11b D/T branch-context suppression.
+		const bool branch_pipe = !ibit && (lregs.pipe == VUPIPE_BRANCH);
 
 		// Detect every VF/VI hazard that _vu1Exec (VU1microInterp.cpp:108-163)
 		// resolves via save/restore or discard. The native machinery does
@@ -2349,6 +2360,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
 
 		// 8. Lower instruction handling.
+		// NOP the lower when this pair is a branch AND the previous pair
+		// set E-bit — "branch in E-bit delay slot" is ISA-undefined.
+		// Matches x86 microVU_Compile.inl branchWarning which flags
+		// mVUlow.isNOP when the pair is both in an E-bit delay slot and
+		// contains a branch. Upper still executes; we just skip the
+		// branch rec emission so VU->branch / branchpc stay untouched.
+		// Same pattern as VU0 C-5 fix.
+		const bool suppress_branch = !ibit && branch_pipe && prev_was_ebit;
 		if (ibit)
 		{
 			// I-bit: lower field is a float immediate — load into VI[REG_I].
@@ -2401,7 +2420,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				emitFlushCycleReg(cycle_off);
 				emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
 			}
-			emitVU1Lower(lower); // switch dispatch — emits native ARM64 for this op
+			if (!suppress_branch)
+				emitVU1Lower(lower); // switch dispatch — emits native ARM64 for this op
 			if (hack_xgkick_here)
 			{
 				emitReloadCycleReg(cycle_off);
@@ -2432,7 +2452,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//      a branch delay slot — matches x86's `!mVUinfo.isBdelay &&
 		//      !mVUlow.branch` guard (ISA undefined behavior for D/T in
 		//      these contexts). Same pattern as VU0 C-4 fix.
-		const bool branch_pipe = !ibit && (lregs.pipe == VUPIPE_BRANCH);
+		//      `branch_pipe` is computed at the top of the per-pair body
+		//      (needed by the step 8 branch-in-ebit-delay suppression too).
 		if ((dbit_set || tbit_set) && !branch_pipe && !prev_was_branch)
 		{
 			armAsm->Mov(w0, upper);
@@ -2526,6 +2547,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// D/T bit on the next pair's native path honors the previous
 		// NATIVELY-EMITTED branch correctly.
 		prev_was_branch = branch_pipe;
+
+		// Track E-bit for next pair's branch suppression (step 8).
+		// Same reasoning: delay-slot context applies regardless of path.
+		prev_was_ebit = ebit_set;
 
 		pc = (pc + 8) & (VU1_PROGSIZE - 1);
 	}
