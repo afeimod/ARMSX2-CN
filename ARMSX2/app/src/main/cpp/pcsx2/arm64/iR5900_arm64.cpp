@@ -917,6 +917,50 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 
 	g_pCurInstInfo++;
 
+	// Branch-in-delay-slot guard (matches x86 iR5900.cpp:1743-1803 — FlatOut
+	// PR #1783). MIPS UB when a branch sits inside another branch's delay slot;
+	// x86 logs and skips the inner emission so the outer branch does not end
+	// up with a half-built target from the inner branch's g_branch = 1.
+	if (delayslot)
+	{
+		bool check_branch_delay = false;
+		switch (_Opcode_)
+		{
+			case 0: // SPECIAL
+				if (_Funct_ == 8 || _Funct_ == 9) // JR, JALR
+					check_branch_delay = true;
+				break;
+			case 1: // REGIMM
+				if (_Rt_ < 4 || (_Rt_ >= 0x10 && _Rt_ < 0x14))
+					check_branch_delay = true;
+				break;
+			case 2: case 3:                             // J, JAL
+			case 4: case 5: case 6: case 7:             // BEQ, BNE, BLEZ, BGTZ
+			case 0x14: case 0x15: case 0x16: case 0x17: // BEQL, BNEL, BLEZL, BGTZL
+				check_branch_delay = true;
+				break;
+		}
+		if (check_branch_delay)
+		{
+			DevCon.Warning("Branch %x in delay slot!", cpuRegs.code);
+			pc += 4;
+			g_cpuFlushedPC = false;
+			g_cpuFlushedCode = false;
+			if (g_maySignalException)
+			{
+				// Clear BD (Branch Delay) bit in Cause register (CP0 reg 13, bit 31).
+				const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
+				armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+				armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
+				armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+			}
+			g_recompilingDelaySlot = false;
+			cpuRegs.code = old_code;
+			g_pCurInstInfo = old_inst_info;
+			return;
+		}
+	}
+
 	const OPCODE& opcode = GetCurrentInstruction();
 
 	// NOP check
@@ -1134,10 +1178,24 @@ static void recRecompile(const u32 startpc)
 				s_branchTo = _Imm_ * 4 + i + 4;
 				s_nEndBlock = i + 8;
 				goto StartRecomp;
-			case 16: // COP0 — ERET
-				if ((cpuRegs.code & 0x3F) == 24)
+			case 16: // COP0
+				if (_Rs_ == 16) // COP_FUNC
 				{
-					s_nEndBlock = i + 4;
+					if (_Funct_ == 24) // ERET
+					{
+						s_nEndBlock = i + 4;
+						goto StartRecomp;
+					}
+				}
+				// Fall through! COP0's BC0F/BC0T/BC0FL/BC0TL encode at rs=8,
+				// which lines up with COP1's BC1* and COP2's BC2*.
+				[[fallthrough]];
+			case 17: // COP1
+			case 18: // COP2
+				if (_Rs_ == 8) // BC{0,1,2}{F,T,FL,TL}
+				{
+					s_branchTo = _Imm_ * 4 + i + 4;
+					s_nEndBlock = i + 8;
 					goto StartRecomp;
 				}
 				break;
