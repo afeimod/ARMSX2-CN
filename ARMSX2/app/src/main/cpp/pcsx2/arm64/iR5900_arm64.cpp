@@ -904,16 +904,18 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 
 	cpuRegs.code = *(int*)s_pCode;
 
-	if (!delayslot)
-	{
-		pc += 4;
-		g_cpuFlushedPC = false;
-		g_cpuFlushedCode = false;
-	}
-	else
-	{
+	// Pre-increment `pc` unconditionally so armFlushPC / cpuRegs.pc match the
+	// interpreter's post-increment invariant (see execI in Interpreter.cpp:176).
+	// For a delay-slot op this means cpuRegs.pc reads as DS_addr+4 while the op
+	// runs, which cpuException relies on for EPC = pc-4 on the BD path.
+	// Native branch emitters never run in DS mode (the guard below rejects
+	// branches-in-DS), so their pc+4 / (pc & 0xf0000000) math — which expects
+	// pc = branch_addr+4 at entry — is unaffected.
+	pc += 4;
+	g_cpuFlushedPC = false;
+	g_cpuFlushedCode = false;
+	if (delayslot)
 		g_recompilingDelaySlot = true;
-	}
 
 	g_pCurInstInfo++;
 
@@ -943,9 +945,6 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		if (check_branch_delay)
 		{
 			DevCon.Warning("Branch %x in delay slot!", cpuRegs.code);
-			pc += 4;
-			g_cpuFlushedPC = false;
-			g_cpuFlushedCode = false;
 			if (g_maySignalException)
 			{
 				// Clear BD (Branch Delay) bit in Cause register (CP0 reg 13, bit 31).
@@ -991,12 +990,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	}
 
 	if (delayslot)
-	{
-		pc += 4;
-		g_cpuFlushedPC = false;
-		g_cpuFlushedCode = false;
 		g_recompilingDelaySlot = false;
-	}
 
 	cpuRegs.code = old_code;
 	g_pCurInstInfo = old_inst_info;
