@@ -180,6 +180,7 @@ void _hwWrite32( u32 mem, u32 value )
 						psxReset();
 						PSXCLK =  33868800;
 						SPU2::Reset(true);
+						cdvd.Speed = 1;
 						setPs1CDVDSpeed(cdvd.Speed);
 						psxHu32(HW_ICFG) = 0x8;
 						psxHu32(HW_ICTRL) = 1;
