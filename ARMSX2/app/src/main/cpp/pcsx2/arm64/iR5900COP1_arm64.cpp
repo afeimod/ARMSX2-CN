@@ -296,25 +296,25 @@ static void recBC1_Likely_helper(bool branchIfSet)
 }
 
 #if ISTUB_BC1F
-void recBC1F()  { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::BC1F);  pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC1F()  { armBranchInterpWithDSCycles(R5900::Interpreter::OpcodeImpl::COP1::BC1F); }
 #else
 void recBC1F()  { recBC1_helper(false); }
 #endif
 
 #if ISTUB_BC1T
-void recBC1T()  { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::BC1T);  pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC1T()  { armBranchInterpWithDSCycles(R5900::Interpreter::OpcodeImpl::COP1::BC1T); }
 #else
 void recBC1T()  { recBC1_helper(true); }
 #endif
 
 #if ISTUB_BC1FL
-void recBC1FL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::BC1FL); pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC1FL() { armBranchInterpWithDSCycles(R5900::Interpreter::OpcodeImpl::COP1::BC1FL); }
 #else
 void recBC1FL() { recBC1_Likely_helper(false); }
 #endif
 
 #if ISTUB_BC1TL
-void recBC1TL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::COP1::BC1TL); pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC1TL() { armBranchInterpWithDSCycles(R5900::Interpreter::OpcodeImpl::COP1::BC1TL); }
 #else
 void recBC1TL() { recBC1_Likely_helper(true); }
 #endif

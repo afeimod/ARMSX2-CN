@@ -179,6 +179,14 @@ void armCallInterpreter(void (*func)());
 // and sets g_branch = 2.
 void armBranchCallInterpreter(void (*func)());
 
+// Variant of armBranchCallInterpreter that also accounts for the DS cycles.
+// Use for branch ops whose interpreter stub internally runs the DS via
+// _doBranch_shared (BCxF/T/FL/TL on COP0/1/2) — the rec never recompiles the
+// DS so s_nBlockCycles would otherwise miss its cost. Must be called with
+// `pc` pointing at the DS (i.e., from the branch op's recompile function,
+// after recompileNextInstruction's pre-increment).
+void armBranchInterpWithDSCycles(void (*func)());
+
 // Emit code to flush PC to cpuRegs.pc if it hasn't been flushed yet.
 void armFlushPC();
 

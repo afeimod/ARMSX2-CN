@@ -875,25 +875,25 @@ static void recBC2_Likely_helper(bool branchIfSet)
 }
 
 #if ISTUB_BC2F
-void recBC2F()  { armCallInterpreter(::BC2F);  pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC2F()  { armBranchInterpWithDSCycles(::BC2F); }
 #else
 void recBC2F()  { recBC2_helper(false); }
 #endif
 
 #if ISTUB_BC2T
-void recBC2T()  { armCallInterpreter(::BC2T);  pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC2T()  { armBranchInterpWithDSCycles(::BC2T); }
 #else
 void recBC2T()  { recBC2_helper(true); }
 #endif
 
 #if ISTUB_BC2FL
-void recBC2FL() { armCallInterpreter(::BC2FL); pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC2FL() { armBranchInterpWithDSCycles(::BC2FL); }
 #else
 void recBC2FL() { recBC2_Likely_helper(false); }
 #endif
 
 #if ISTUB_BC2TL
-void recBC2TL() { armCallInterpreter(::BC2TL); pc += 4; g_branch = 1; g_cpuFlushedPC = true; }
+void recBC2TL() { armBranchInterpWithDSCycles(::BC2TL); }
 #else
 void recBC2TL() { recBC2_Likely_helper(true); }
 #endif

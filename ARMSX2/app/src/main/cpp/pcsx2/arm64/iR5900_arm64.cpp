@@ -658,6 +658,35 @@ void armBranchCallInterpreter(void (*func)())
 }
 
 // ============================================================================
+//  Branch-interp fallback with DS cycle accounting
+// ============================================================================
+//
+// For branch ops whose interpreter stub internally runs the delay-slot
+// instruction via _doBranch_shared (BC0F/T/FL/TL, BC1F/T/FL/TL, BC2F/T/FL/TL):
+// the rec never recompiles the DS, so s_nBlockCycles misses its cost. The
+// interp DOES consume the cycles into cpuBlockCycles, but that's only flushed
+// to cpuRegs.cycle when Cpu == &intCpu — from the rec's call, it stays
+// pending. Manually account for the DS here using the same formula
+// recompileNextInstruction uses at the top of the function.
+//
+// pc at entry is the DS address (branch_addr + 4), because
+// recompileNextInstruction pre-incremented pc before dispatching the branch op.
+// pc is advanced past the DS on return so s_pCurBlockEx->size covers both the
+// branch and its delay slot — needed for SMC invalidation bounds to match the
+// native branch path (which advances pc via recompileNextInstruction(true)).
+void armBranchInterpWithDSCycles(void (*func)())
+{
+	const u32 ds_code = *(const u32*)PSM(pc);
+	const R5900::OPCODE& ds = R5900::GetInstruction(ds_code);
+	const u32 ds_cycles = (ds_code == 0) ? 9 : ds.cycles;
+	s_nBlockCycles += ds_cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+
+	armBranchCallInterpreter(func);
+
+	pc += 4;
+}
+
+// ============================================================================
 //  Cycle scaling (same algorithm as x86)
 // ============================================================================
 
