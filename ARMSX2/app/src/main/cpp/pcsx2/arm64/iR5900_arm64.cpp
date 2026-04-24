@@ -953,6 +953,18 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		// DS op (native + ISTUB) since native LOAD/STORE can TLB-miss too.
 		armAsm->Mov(RWSCRATCH, 1);
 		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
+
+		// Pre-set CAUSE.BD (CP0 reg 13, bit 31). x86's FLUSH_CAUSE writer
+		// (iR5900.cpp:1236-1242, currently `#if 0`'d) does this on demand;
+		// the arm64 port activates it unconditionally for every DS op since
+		// we have no FLUSH_CAUSE call path. Redundant with cpuException's
+		// own BD-set via cpuRegs.branch but converges on the same state.
+		// Cleared post-DS if no exception fired.
+		const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
+		armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+		armAsm->Orr(RWSCRATCH, RWSCRATCH, 0x80000000u);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+		g_maySignalException = true;
 	}
 
 	g_pCurInstInfo++;
@@ -995,6 +1007,7 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			// inner branch emission entirely, so leave branch=0 at block exit.
 			armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
 			g_recompilingDelaySlot = false;
+			g_maySignalException = false;
 			cpuRegs.code = old_code;
 			g_pCurInstInfo = old_inst_info;
 			return;
@@ -1035,8 +1048,21 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		// Clear cpuRegs.branch after the DS completes so subsequent ops in the
 		// block that raise exceptions are not misattributed to the BD path.
 		armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
+		// Pair of the pre-DS CAUSE.BD set: clear BD if no exception fired.
+		// Mirrors x86 iR5900.cpp:1830-1831 (currently dead there because the
+		// writer is `#if 0`'d; activated here for correctness-by-redundancy).
+		if (g_maySignalException)
+		{
+			const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
+			armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+			armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
+			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
+		}
 		g_recompilingDelaySlot = false;
 	}
+
+	// Reset per-op — matches x86 iR5900.cpp:1835.
+	g_maySignalException = false;
 
 	cpuRegs.code = old_code;
 	g_pCurInstInfo = old_inst_info;
