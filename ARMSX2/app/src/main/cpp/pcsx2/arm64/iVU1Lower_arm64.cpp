@@ -13,6 +13,7 @@
 #include "Gif_Unit.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
+#include "arm64/iVU1micro_arm64.h" // emitVU1InterpBL
 #include "MTVU.h"
 #include <cmath>
 
@@ -908,19 +909,22 @@ void vu1_XGKICK_hack_sync(VURegs* VU, u32 cycles)
 //  The table handles sub-table dispatch (LowerOP, T3_xx) automatically.
 // ============================================================================
 
-// Code-emitter macro: called at block-compile time to emit an ARM64 BL to
-// the specific interpreter function for this lower opcode.
-// VU1.code is set by CompileBlock (both as compile-time variable and as a
-// runtime store) before calling this function.
+// Code-emitter macro: called at block-compile time to emit the pinned-reg
+// flush + BL to interpreter + reload dance. See emitVU1InterpBL comment
+// for the pin-skew rationale. VU1.code is set by CompileBlock (both as
+// compile-time variable and as a runtime store) before calling this
+// function, so VU1_LOWER_OPCODE[VU1.code >> 25] resolves to the correct
+// interp function at emit time and the interpreter reads the correct
+// opcode at runtime.
 #define REC_VU1_LOWER_INTERP(name) \
 	void recVU1_##name() { \
-		armEmitCall(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25])); \
+		emitVU1InterpBL(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25])); \
 	}
 
 // Non-INTERP path (ISTUB=0, no native codegen yet): same emitter as ISTUB=1.
 #define REC_VU1_LOWER_EMIT(name) \
 	void recVU1_##name() { \
-		armEmitCall(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25])); \
+		emitVU1InterpBL(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25])); \
 	}
 
 // ============================================================================
@@ -2612,11 +2616,12 @@ void recVU1_XGKICK()
 // ============================================================================
 //  Generic fallback emitter for unknown / reserved lower opcode slots.
 //  VU1.code is already set; the interpreter will handle the unknown case
-//  (logging / NOP).
+//  (logging / NOP). Routed through emitVU1InterpBL so pinned regs stay
+//  coherent across the call (same rationale as REC_VU1_LOWER_INTERP).
 // ============================================================================
 static void recVU1_Lower_Unknown()
 {
-	armEmitCall(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25]));
+	emitVU1InterpBL(reinterpret_cast<const void*>(VU1_LOWER_OPCODE[VU1.code >> 25]));
 }
 
 // ============================================================================

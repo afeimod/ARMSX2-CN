@@ -33,3 +33,12 @@ public:
 };
 
 extern recArmVU1 CpuArmVU1;
+
+// ISTUB helper — emits flush of all VU1 pinned regs (ACC q16, flags
+// w19/w20/w28, cycle x21, fmac/ialu wpos x24/x25), BL to interp_fn,
+// and reload of the same regs. Called by the REC_VU1_*_INTERP macros in
+// iVU1Upper_arm64.cpp / iVU1Lower_arm64.cpp when any INTERP_VU_* harness
+// flag routes an op to the C interpreter. Keeping this as a single
+// helper prevents the hybrid-harness pin-skew bug (ISTUB emits a bare BL
+// and the interp sees stale state).
+void emitVU1InterpBL(const void* interp_fn);

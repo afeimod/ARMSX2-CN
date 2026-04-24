@@ -12,6 +12,7 @@
 #include "VUflags.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
+#include "arm64/iVU1micro_arm64.h" // emitVU1InterpBL
 
 using namespace vixl::aarch64;
 
@@ -31,13 +32,6 @@ using namespace vixl::aarch64;
 //  the analysis (e.g., direct interpreter execution).
 // ============================================================================
 bool g_vu1NeedsFlags = true;
-
-// Phase-9: compile-time tracker (mirrors g_vu1NeedsFlags). True = VU1_Q_REG
-// holds the current authoritative VI[REG_Q] broadcast; false = next Q
-// reader must reload from memory. Reset to false on each CompileBlock
-// entry and at every point Q memory may have changed (TestPipes with FDIV
-// flush, vu1Exec hazard, vu1EbitDone).
-bool g_vu1QLive = false;
 
 // ============================================================================
 //  Native NEON codegen helpers
@@ -67,26 +61,6 @@ static const auto VU1_CLIPFLAG_REG   = w28;
 //
 // IMPORTANT: must match the alias in iVU1micro_arm64.cpp.
 static const auto VU1_ACC_REG = v16;
-
-// Phase-9 (2026-04-23): pinned VI[REG_Q] broadcast. Held as v17.4S with all
-// four lanes equal to VU->VI[REG_Q].UL — ready to consume as src2 for any
-// Q-using FMAC op (ADDq / MADDq / MULq / SUBq / MSUBq + accum variants).
-// VI[REG_Q] only changes when the FDIV pipe flushes (inside
-// vu1_TestPipes_VU1 or via vu1Exec / vu1EbitDone), so g_vu1QLive tracks
-// whether the pinned reg still reflects memory. CompileBlock invalidates
-// g_vu1QLive at those points and reloads lazily on the next Q reader.
-//
-// Like VU1_ACC_REG, this is caller-saved (q17 is not AAPCS64-preserved),
-// but we don't need to flush it around BLs that may mutate Q — we just
-// invalidate and reload from the updated memory next time Q is read.
-//
-// IMPORTANT: must match the alias in iVU1micro_arm64.cpp.
-static const auto VU1_Q_REG = v17;
-
-// Compile-time tracker mirroring g_vu1NeedsFlags — set by CompileBlock in
-// iVU1micro_arm64.cpp before each pair's upper emit. When false, the next
-// Q-reader must reload VU1_Q_REG from memory before using it.
-extern bool g_vu1QLive;
 
 static constexpr int64_t vfOff(u32 reg)
 {
@@ -443,27 +417,8 @@ static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 }
 
 // Load Q or I register broadcast into v1.4S.
-//
-// Phase-9: Q route uses the pinned VU1_Q_REG (q17) when g_vu1QLive==true
-// (CompileBlock will have emitted a reload if pinning is profitable for
-// this pair). Otherwise it falls back to a direct Ldr+Dup into v1 — same
-// cost as the pre-Phase-9 path, so N=1-Q blocks don't regress. I route is
-// unchanged for now.
 static void emitLoadQI(int64_t vi_off)
 {
-	if (vi_off == viOff(REG_Q))
-	{
-		if (g_vu1QLive)
-		{
-			armAsm->Mov(v1.V16B(), VU1_Q_REG.V16B());
-		}
-		else
-		{
-			armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
-			armAsm->Dup(v1.V4S(), w0);
-		}
-		return;
-	}
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vi_off));
 	armAsm->Dup(v1.V4S(), w0);
 }
@@ -1150,7 +1105,7 @@ static void vu1_OPMSUB(VURegs* VU)
 #define ISTUB_VU_SUBAw   0
 #define ISTUB_VU_SUBAq   0
 #define ISTUB_VU_SUBAi   0
-#define ISTUB_VU_SUBA    0
+#define ISTUB_VU_SUBA    0 //here
 #define ISTUB_VU_MULx    0
 #define ISTUB_VU_MULy    0
 #define ISTUB_VU_MULz    0
@@ -1225,10 +1180,15 @@ static void vu1_OPMSUB(VURegs* VU)
 //  VU1.code is set by CompileBlock before each of these is called.
 // ============================================================================
 
-// INTERP path (ISTUB=1): emit BL to the interpreter function via opcode table.
+// INTERP path (ISTUB=1): emit the full pinned-reg flush / BL-to-interp /
+// reload dance so the C interpreter sees authoritative state and JIT
+// pins pick up any writes the interp made. Without this, Phase-7/8/9
+// pinned regs (macflag/statusflag/clipflag in w19/w20/w28, ACC in q16,
+// VI[REG_Q] broadcast in q17) drift from memory across the call and
+// the hybrid harness produces garbage output.
 #define REC_VU1_UPPER_INTERP(name) \
 	void recVU1_##name() { \
-		armEmitCall(reinterpret_cast<const void*>(VU1_UPPER_OPCODE[VU1.code & 0x3f])); \
+		emitVU1InterpBL(reinterpret_cast<const void*>(VU1_UPPER_OPCODE[VU1.code & 0x3f])); \
 	}
 
 // C-wrapper path (ISTUB=0): emit BL to a vu1_* C helper.
@@ -1994,7 +1954,10 @@ static void recVU1_Upper_FD()
 	if (idx < 12 && table[idx] != nullptr)
 		table[idx]();
 	else
-		armEmitCall(reinterpret_cast<const void*>(VU1_UPPER_OPCODE[VU1.code & 0x3f]));
+		// Reserved/unknown slot — fall back to interp via the flush/reload
+		// helper so pinned regs stay coherent (same rationale as
+		// REC_VU1_UPPER_INTERP).
+		emitVU1InterpBL(reinterpret_cast<const void*>(VU1_UPPER_OPCODE[VU1.code & 0x3f]));
 }
 
 // ============================================================================
