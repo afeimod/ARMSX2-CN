@@ -915,7 +915,16 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	g_cpuFlushedPC = false;
 	g_cpuFlushedCode = false;
 	if (delayslot)
+	{
 		g_recompilingDelaySlot = true;
+		// Emit cpuRegs.branch = 1 so any exception raised during this DS op
+		// (overflow, TLB miss via vtlb helpers, etc.) takes the BD path in
+		// cpuException and produces the correct EPC / CAUSE.BD. Matches the
+		// interpreter's _doBranch_shared (Interpreter.cpp:230). Done for every
+		// DS op (native + ISTUB) since native LOAD/STORE can TLB-miss too.
+		armAsm->Mov(RWSCRATCH, 1);
+		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
+	}
 
 	g_pCurInstInfo++;
 
@@ -953,6 +962,9 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 				armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
 				armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
 			}
+			// Undo the pre-DS cpuRegs.branch = 1 store: we're skipping the
+			// inner branch emission entirely, so leave branch=0 at block exit.
+			armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
 			g_recompilingDelaySlot = false;
 			cpuRegs.code = old_code;
 			g_pCurInstInfo = old_inst_info;
@@ -990,7 +1002,12 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	}
 
 	if (delayslot)
+	{
+		// Clear cpuRegs.branch after the DS completes so subsequent ops in the
+		// block that raise exceptions are not misattributed to the BD path.
+		armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
 		g_recompilingDelaySlot = false;
+	}
 
 	cpuRegs.code = old_code;
 	g_pCurInstInfo = old_inst_info;
