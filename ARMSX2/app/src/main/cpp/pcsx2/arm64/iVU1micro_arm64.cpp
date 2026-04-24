@@ -11,17 +11,22 @@
 // VF/VI hazard pairs fall back to vu1Exec for correctness.
 
 #include "Common.h"
+#include "DebugTools/Debug.h"
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "Memory.h"
 #include "MTVU.h"
 #include "VUmicro.h"
 #include "VUops.h"
+#include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
 #include "arm64/iVU1micro_arm64.h"
 
+#include <algorithm>
 #include <cfenv>
 #include <cstring>
+#include <string>
+#include <vector>
 
 using namespace vixl::aarch64;
 
@@ -249,6 +254,14 @@ struct VU1BlockEntry
 	LinkExit exits[2];
 
 	u32  numPairs;
+
+#ifdef VU1_PROFILE_BLOCKS
+	// Per-block execution counter, bumped at linkEntry by the JIT-emitted
+	// increment. Dumped to logcat on shutdown via DumpTopBlocks(). Guarded
+	// by VU1_PROFILE_BLOCKS (defined in arm64/arm64Emitter.h) so the field
+	// and counter-bump disappear entirely in shipping builds.
+	u64  execCount;
+#endif
 };
 
 static VU1BlockEntry s_blocks[VU1_NUM_SLOTS];
@@ -938,6 +951,26 @@ static const auto VU1_MACFLAG_REG    = w19;
 static const auto VU1_STATUSFLAG_REG = w20;
 static const auto VU1_CLIPFLAG_REG   = w28;
 
+// Phase-8 (2026-04-22): pinned VU->ACC register. Must match the alias in
+// iVU1Upper_arm64.cpp. Loaded at block prologue, flushed at epilogue, and
+// flushed/reloaded around the vu1Exec hazard fallback (the only default-
+// build BL that can mutate ACC). Other BLs (TestPipes, XGKICK helpers,
+// CheckDTBits, EbitDone, HandleDelayBranch, stall probes) all leave ACC
+// untouched.
+//
+// Reg choice: q16. Caller-saved on AAPCS64 (upper half of d8-d15 is caller-
+// saved; q-form gives no callee-save either), so we MUST flush+reload
+// around any BL that could clobber/mutate ACC. Audit above confirms only
+// vu1Exec qualifies on the default build.
+static const auto VU1_ACC_REG = v16;
+
+// Phase-9: pinned VI[REG_Q] broadcast. Held as v17.4S (all lanes = Q).
+// Loaded lazily — CompileBlock primes at prologue if the block has any
+// Q reader, and reloads after any point that may have changed VI[REG_Q]
+// (TestPipes with FDIV flush, vu1Exec, vu1EbitDone). See g_vu1QLive.
+static const auto VU1_Q_REG = v17;
+extern bool g_vu1QLive;
+
 static void emitFlushWposRegs(int64_t fmacwpos_off, int64_t ialuwpos_off)
 {
 	armAsm->Str(VU1_FMAC_WPOS_REG, MemOperand(VU1_BASE_REG, fmacwpos_off));
@@ -964,6 +997,28 @@ static void emitReloadFlagRegs(int64_t macflag_off, int64_t statusflag_off, int6
 	armAsm->Ldr(VU1_MACFLAG_REG,    MemOperand(VU1_BASE_REG, macflag_off));
 	armAsm->Ldr(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, statusflag_off));
 	armAsm->Ldr(VU1_CLIPFLAG_REG,   MemOperand(VU1_BASE_REG, clipflag_off));
+}
+
+// Phase-8: pinned ACC register flush/reload. Called at block prologue/
+// epilogue and around vu1Exec (hazard fallback).
+static void emitFlushAccReg(int64_t acc_off)
+{
+	armAsm->Str(VU1_ACC_REG.Q(), MemOperand(VU1_BASE_REG, acc_off));
+}
+
+static void emitReloadAccReg(int64_t acc_off)
+{
+	armAsm->Ldr(VU1_ACC_REG.Q(), MemOperand(VU1_BASE_REG, acc_off));
+}
+
+// Phase-9: Q-broadcast reload — Ldr w4 + Dup v17.4S. Scratch w4 is a caller-
+// saved temporary that the JIT freely clobbers in per-pair scaffolding
+// (see emitDecrementVIBackup, emitFMACAddPair, etc.), so using it here
+// is safe in every context we emit the reload from.
+static void emitReloadQReg(int64_t q_off)
+{
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, q_off));
+	armAsm->Dup(VU1_Q_REG.V4S(), w4);
 }
 
 // ============================================================================
@@ -1406,6 +1461,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	bool block_has_dbit_or_tbit   = false;
 	bool block_has_ibxx           = false;
 	bool block_has_vi_backup_set  = false;
+	// Phase-9: Q broadcast pin. Set if any pair's upper reads VI[REG_Q]
+	// (ADDq / MADDq / MULq / SUBq / MSUBq + accum variants). The existing
+	// upper VIregs decoder populates VIread with the REG_Q bit for these
+	// ops, so we just OR across the block.
+	bool block_has_q_reader       = false;
 	{
 		u32 pc = startPC;
 		for (u32 i = 0; i < numPairs; i++)
@@ -1434,6 +1494,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 					block_has_vi_backup_set = true;
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
+
+			if (uregs_data[i].VIread & (1u << REG_Q))
+				block_has_q_reader = true;
 
 			block_has_ebit         |= ((upper >> 30) & 1) != 0;
 			block_has_dbit_or_tbit |= ((upper >> 28) & 1) != 0;
@@ -1585,6 +1648,29 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	};
 	PerPairSkip skip_info[VU1_MAX_BLOCK_PAIRS] = {};
 
+	// Phase-9: per-pair "may dirty Q" flag. True if pair i's step-6 TestPipes
+	// may cause VI[REG_Q] to change — i.e., TestPipes is not elided AND either
+	//   (a) fdiv carry-in hasn't been proven retired (ct_cycle <= 12), so an
+	//       unknown carry-in FDIV slot could flush at this pair, OR
+	//   (b) our CT model tracked an in-block FDIV slot that matures at this
+	//       pair (ct_fdiv_pending transitions true→false).
+	// The emit walk uses this to invalidate g_vu1QLive after each TestPipes
+	// call, so adjacent Q readers (e.g., back-to-back MULq) don't reload
+	// redundantly when no FDIV flush happened between them.
+	bool pair_may_dirty_q[VU1_MAX_BLOCK_PAIRS] = {};
+
+	// Phase-9: "pinning is profitable at this pair" flag. True if pair i has
+	// an upper Q reader AND at least one later pair j > i in the block also
+	// reads Q AND no pair_may_dirty_q[k] fires for i < k <= j (so the pin
+	// survives from i's upper emit through j's upper emit).
+	//
+	// When true: the lazy reload is worth 3 insns (Ldr+Dup+Mov) because the
+	//   second reader gets to use Mov (1 insn) vs 2 insns Ldr+Dup — saving
+	//   (N-1) insns across N consecutive readers (net save = N-2).
+	// When false (N=1): skip the reload, let emitLoadQI do Ldr+Dup direct
+	//   into v1 — same cost as the pre-Phase-9 baseline. No regression.
+	bool pair_q_benefits_from_pin[VU1_MAX_BLOCK_PAIRS] = {};
+
 	// Stage A+B pre-walk (re-enabled after root-causing the Crazy Taxi bug
 	// from commit 9a68eba8).
 	//
@@ -1721,6 +1807,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				&& !ct_efu_pending   && efu_carry_safe
 				&& ct_ialu_count == 0 && ialu_carry_safe;
 
+			// Phase-9: compute Q-dirty flag BEFORE the retirement step below.
+			// Capture pre-retire ct_fdiv_pending; we'll compare against the
+			// post-retire value to detect in-block FDIV flushing at this pair.
+			const bool pre_retire_fdiv_pending = ct_fdiv_pending;
+
 			// Retire mature slots in the CT model.
 			while (ct_fmac_count > 0)
 			{
@@ -1744,6 +1835,18 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				ct_fdiv_pending = false;
 			if (ct_efu_pending && (ct_cycle - ct_efu_sCycle) >= ct_efu_cycles)
 				ct_efu_pending = false;
+
+			// Phase-9: VI[REG_Q] changes only when runtime TestPipes runs and
+			// the FDIV pipe flushes. Mark this pair as a Q-dirty point when:
+			//   1. Our step-6 TestPipes isn't elided (runtime BL fires), AND
+			//   2. Either carry-in FDIV isn't proven retired (fdiv_carry_safe
+			//      false — some unknown prior-block slot could still flush)
+			//      OR our in-block FDIV slot matures at this pair (pending
+			//      transitioned true→false in the retire step above).
+			pair_may_dirty_q[i] =
+				!skip_info[i].skipTestPipes
+				&& (!fdiv_carry_safe
+				    || (pre_retire_fdiv_pending && !ct_fdiv_pending));
 
 			// step 11 adds
 			{
@@ -1806,6 +1909,33 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		}
 	}
 
+	// Phase-9: reverse pass — compute pair_q_benefits_from_pin[]. A Q reader
+	// at pair i profits from pinning ONLY when another Q reader exists at
+	// some pair j > i with no pair_may_dirty_q[k] firing between them
+	// (inclusive of j, exclusive of i itself since pair i's TestPipes fires
+	// BEFORE pair i's upper emit).
+	//
+	// reachable = "there's a future Q reader we haven't been separated from
+	//              by an invalidation" — tracked reverse.
+	{
+		bool reachable = false;
+		for (int i = (int)numPairs - 1; i >= 0; i--)
+		{
+			// Pair i's TestPipes fires at step 6, BEFORE pair i's upper at
+			// step 7. So an invalidation at pair i DOES cut off reuse for
+			// any Q reader at pair i itself (it would be emitted with a
+			// fresh pin) — but more importantly, it cuts off propagation
+			// back to earlier pairs.
+			if (pair_may_dirty_q[i])
+				reachable = false;
+
+			pair_q_benefits_from_pin[i] = reachable;
+
+			if (uregs_data[i].VIread & (1u << REG_Q))
+				reachable = true;
+		}
+	}
+
 	// Code section starts after data, 4-byte aligned.
 	u8* code_start = data_base + data_size;
 	code_start = reinterpret_cast<u8*>((reinterpret_cast<uintptr_t>(code_start) + 3) & ~3ULL);
@@ -1864,6 +1994,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	const int64_t macflag_off    = (int64_t)offsetof(VURegs, macflag);
 	const int64_t statusflag_off = (int64_t)offsetof(VURegs, statusflag);
 	const int64_t clipflag_off   = (int64_t)offsetof(VURegs, clipflag);
+	const int64_t acc_off        = (int64_t)offsetof(VURegs, ACC);
+	const int64_t q_off          = (int64_t)((int64_t)offsetof(VURegs, VI) + REG_Q * (int64_t)sizeof(REG_VI));
 	const int64_t micro_off      = (int64_t)offsetof(VURegs, Micro);
 
 	// IbitHack forces per-op immediate decode from live micro memory (mirrors
@@ -1893,11 +2025,40 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// them — all now routed through pinned regs instead of memory.
 	emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
 
+	// Phase-8: prime the pinned ACC register from memory. Every FMAC
+	// transform chain reads+writes ACC 4× — pinning gives us 1 Ldr here
+	// and 1 Str at epilogue instead of 8 memory ops per chain.
+	emitReloadAccReg(acc_off);
+
+	// Phase-9: do NOT prime Q at prologue. Early-block TestPipes invocations
+	// (pairs 0..~11, before fdiv_carry_safe clears) almost always invalidate
+	// a prologue prime before the first Q reader fires, so the prime would
+	// be wasted work in the typical case. Instead, emit reloads lazily —
+	// and only when the reverse-pass analysis proved multiple Q readers
+	// will share the pin. See pair_q_benefits_from_pin[] above.
+	g_vu1QLive = false;
+
 	// Block-linking (Phase 1+): record the address of the first instruction
 	// past the prologue. Linked predecessors B here directly, skipping the
 	// prologue. At this point x21/x23/x24/x25 are live — caller's regs
 	// trusted (same ABI as the fall-through from codeEntry above).
 	out_block->linkEntry = armGetCurrentCodePointer();
+
+	// VU1_PROFILE_BLOCKS: bump per-block exec counter. Placed at linkEntry so
+	// both the prologue fall-through (first dispatch) and direct-linked
+	// predecessor B's get counted. x4/x5 are scratch here — the entry gate
+	// below uses x5, so we pick the same pair (both are caller-saved and
+	// unused across the gate's Ldr/Cmp/B sequence).
+	// Guarded by the VU1_PROFILE_BLOCKS #define in arm64/InterpFlags.h — the
+	// entire emit disappears in shipping builds.
+#ifdef VU1_PROFILE_BLOCKS
+	{
+		armMoveAddressToReg(x4, &out_block->execCount);
+		armAsm->Ldr(x5, MemOperand(x4));
+		armAsm->Add(x5, x5, 1);
+		armAsm->Str(x5, MemOperand(x4));
+	}
+#endif
 
 	// Entry-gate checks (Phase 3 + Phase 5). Every block entry — whether
 	// via the codeEntry fall-through after prologue, or via a direct `B`
@@ -2277,14 +2438,23 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// (via VU_MAC_UPDATE / VU_STAT_UPDATE) and VU->clipflag (if a CLIP
 			// upper is being interpreted), so flush+reload the pinned flag
 			// regs (w19/w20/w28) around the BL too.
+			// Phase-8: the interp pair may read AND write VU->ACC (any FMAC
+			// upper running through interp will update it), so flush q16 in
+			// and reload q16 out across the BL.
 			emitFlushCycleReg(cycle_off);
 			emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
 			emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitFlushAccReg(acc_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu1Exec));
 			emitReloadCycleReg(cycle_off);
 			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
 			emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitReloadAccReg(acc_off);
+			// Phase-9: interp pair may have run FDIV/SQRT/RSQRT or flushed
+			// the FDIV pipe — VI[REG_Q] could be anything now. Invalidate
+			// and let the next Q reader reload on demand.
+			g_vu1QLive = false;
 			// Non-hack path only: honor pending XGKICK fire from prior pair
 			// and translate interp-captured XGKICK state into the JIT's
 			// scratch. Under xgkickhack, VU1.xgkick* is managed by both
@@ -2392,6 +2562,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			emitFlushCycleReg(cycle_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+
+			// Phase-9: TestPipes may have flushed an FDIV slot, writing a
+			// new value into VI[REG_Q]. Invalidate our pinned Q broadcast
+			// so the next Q reader reloads from memory. Gated on the
+			// CT-model's "could FDIV have matured here?" — otherwise we'd
+			// pessimistically invalidate every TestPipes and lose the
+			// adjacent-Q-reader benefit (e.g., block #2's two MULq pairs).
+			if (pair_may_dirty_q[i])
+				g_vu1QLive = false;
 		}
 
 		// 6b. Decrement VIBackupCycles (needed for correct VI backup reads
@@ -2439,6 +2618,20 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 		VU1.code = upper; // compile-time context for the rec emitter
 		g_vu1NeedsFlags = pair_needs_flags[i]; // flag-deferral hint for FMAC emitters
+
+		// Phase-9: adaptive Q-broadcast pin. Only reload into VU1_Q_REG
+		// when (a) this pair reads Q, (b) the pin is currently stale, AND
+		// (c) the reverse-pass analysis proved another Q reader in the
+		// same q-live window will amortize the reload cost. Otherwise
+		// emitLoadQI falls back to a direct Ldr+Dup into v1 — same cost
+		// as the pre-Phase-9 baseline for N=1 reader windows.
+		if ((uregs.VIread & (1u << REG_Q)) && !g_vu1QLive
+			&& pair_q_benefits_from_pin[i])
+		{
+			emitReloadQReg(q_off);
+			g_vu1QLive = true;
+		}
+
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
 
 		// 8. Lower instruction handling.
@@ -2594,6 +2787,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armEmitCall(reinterpret_cast<const void*>(vu1EbitDone));
 			emitReloadCycleReg(cycle_off);
 			armAsm->Bind(&skip_ebit);
+			// Phase-9: vu1EbitDone calls _vuFlushAll which drains FDIV/EFU
+			// and may write VI[REG_Q] (via _vuFDIVflush). Conservatively
+			// invalidate the pinned Q broadcast. In practice the ebit-
+			// triggered BL fires only at the block's terminal delay slot,
+			// so any subsequent Q reader is in a later block whose
+			// prologue re-primes Q anyway — the invalidation here costs
+			// nothing in the common case.
+			g_vu1QLive = false;
 		}
 
 		// 14. FMAC write-position advance (wraps mod 4). Stage C3: hoisted
@@ -2821,6 +3022,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
 	// Phase-7: flush the cached flag regs before restoring x19/x20/x28.
 	emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
+	// Phase-8: flush the pinned ACC reg to memory before Ret. q16 is
+	// caller-saved so no stack restore is needed — the block-scope
+	// contract is "ACC memory-authoritative outside compiled blocks".
+	emitFlushAccReg(acc_off);
 
 	// --- Epilogue (96-byte frame; mirrors the prologue layout above) ---
 	armAsm->Ldp(x20, x28, MemOperand(sp, 80));
@@ -2859,8 +3064,103 @@ void recArmVU1::Reserve()
 	std::memset(s_blocks, 0, sizeof(s_blocks));
 }
 
+#ifdef VU1_PROFILE_BLOCKS
+static void DumpTopBlocks()
+{
+	struct BlockStat { u32 pc; u32 pairs; u64 execs; };
+	std::vector<BlockStat> stats;
+	stats.reserve(64);
+
+	u64 total_execs = 0;
+	u64 total_pair_execs = 0;
+	u32 active_blocks = 0;
+	for (u32 i = 0; i < VU1_NUM_SLOTS; i++)
+	{
+		const VU1BlockEntry& blk = s_blocks[i];
+		if (blk.execCount == 0)
+			continue;
+		active_blocks++;
+		total_execs += blk.execCount;
+		total_pair_execs += static_cast<u64>(blk.execCount) * blk.numPairs;
+		stats.push_back(BlockStat{ i * 8u, blk.numPairs, blk.execCount });
+	}
+
+	if (stats.empty())
+	{
+		INFO_LOG("VU1 JIT profile: no blocks executed since last reset");
+		return;
+	}
+
+	std::sort(stats.begin(), stats.end(),
+		[](const BlockStat& a, const BlockStat& b) {
+			// Sort by pair-execs (pairs * execs — a rough proxy for time spent).
+			const u64 ka = static_cast<u64>(a.execs) * a.pairs;
+			const u64 kb = static_cast<u64>(b.execs) * b.pairs;
+			if (ka != kb)
+				return ka > kb;
+			return a.execs > b.execs;
+		});
+
+	INFO_LOG("VU1 JIT top-5 hottest blocks (of {} active, total entries={}, total pair-execs={})",
+		active_blocks, total_execs, total_pair_execs);
+	const size_t limit = std::min<size_t>(5, stats.size());
+	for (size_t i = 0; i < limit; i++)
+	{
+		const BlockStat& s = stats[i];
+		const u64 pair_execs = static_cast<u64>(s.execs) * s.pairs;
+		const double pct = total_pair_execs > 0
+			? (100.0 * static_cast<double>(pair_execs) / static_cast<double>(total_pair_execs))
+			: 0.0;
+		INFO_LOG("  #{}: pc=0x{:04x} pairs={:3} execs={:12} pair-execs={:14} ({:5.2f}%)",
+			i + 1, s.pc, s.pairs, s.execs, pair_execs, pct);
+
+		// Disassemble each pair. disVU1MicroUF / disVU1MicroLF return a pointer
+		// into a shared static buffer (DisVU1Micro.cpp:7 `static char ostr`),
+		// so the upper disassembly must be copied into a std::string before
+		// calling the lower disassembly — otherwise the second call
+		// overwrites the first's result.
+		u32 pc = s.pc;
+		for (u32 p = 0; p < s.pairs; p++)
+		{
+			const u32 upper = *reinterpret_cast<const u32*>(VU1.Micro + pc + 4);
+			const u32 lower = *reinterpret_cast<const u32*>(VU1.Micro + pc);
+			const bool ibit = (upper >> 31) & 1;
+			const bool ebit = (upper >> 30) & 1;
+
+			// Flag suffix: compact marker for E/I bits so the reader can
+			// spot program-end and immediate-slot pairs at a glance.
+			const char* flag_suffix =
+				(ibit && ebit) ? " [EI]" :
+				 ibit          ? " [I]"  :
+				 ebit          ? " [E]"  : "";
+
+			const std::string upper_s = disVU1MicroUF(upper, pc);
+			if (ibit)
+			{
+				// I-bit: lower field is a 32-bit float immediate, not an opcode.
+				float imm_f;
+				std::memcpy(&imm_f, &lower, sizeof(imm_f));
+				INFO_LOG("      [0x{:04x}] {:32} | IMM={:g} (0x{:08x}){}",
+					pc, upper_s, imm_f, lower, flag_suffix);
+			}
+			else
+			{
+				const std::string lower_s = disVU1MicroLF(lower, pc);
+				INFO_LOG("      [0x{:04x}] {:32} | {}{}",
+					pc, upper_s, lower_s, flag_suffix);
+			}
+
+			pc = (pc + 8) & (VU1_PROGSIZE - 1);
+		}
+	}
+}
+#endif // VU1_PROFILE_BLOCKS
+
 void recArmVU1::Shutdown()
 {
+#ifdef VU1_PROFILE_BLOCKS
+	DumpTopBlocks();
+#endif
 	s_pool.Destroy();
 	s_code_base  = nullptr;
 	s_code_write = nullptr;
@@ -3009,6 +3309,9 @@ void recArmVU1::Clear(u32 addr, u32 size)
 		blk.linkEntry  = nullptr;
 		blk.returnExit = nullptr;
 		blk.num_exits  = 0;
+#ifdef VU1_PROFILE_BLOCKS
+		blk.execCount  = 0;
+#endif
 		for (u32 e = 0; e < 2; e++)
 		{
 			blk.exits[e].target_pc      = LINK_TARGET_NONE;
