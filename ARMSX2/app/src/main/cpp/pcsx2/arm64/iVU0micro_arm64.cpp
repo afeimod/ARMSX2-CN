@@ -175,6 +175,10 @@ static bool PairHasBranch(u32 pc)
 		return false;
 	const u32 lower = *reinterpret_cast<const u32*>(VU0.Micro + pc);
 	_VURegsNum lregs{};
+	// Sub-table dispatchers (e.g. LowerOP) read VU0.code internally, so the
+	// global must be primed — otherwise the LowerOP index selects from stale
+	// state and can hit the Unknown slot (which pxFail-aborts in debug).
+	VU0.code = lower;
 	VU0regs_LOWER_OPCODE[lower >> 25](&lregs);
 	return lregs.pipe == VUPIPE_BRANCH;
 }

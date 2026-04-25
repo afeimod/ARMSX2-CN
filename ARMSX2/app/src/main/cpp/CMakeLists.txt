@@ -70,6 +70,7 @@ if(ANDROID)
 	)
 	target_link_libraries(emucore PRIVATE
 		PCSX2
+		PCSX2_FLAGS
 		common
 		imgui
 		gtest
@@ -78,11 +79,11 @@ if(ANDROID)
 		shaderc
 		android
 		log
+		vixl
 	)
 	target_include_directories(emucore PRIVATE
 		"${CMAKE_SOURCE_DIR}"
 		"${CMAKE_SOURCE_DIR}/pcsx2"
-		"${CMAKE_SOURCE_DIR}/3rdparty/vixl/include"
 	)
 endif()
 
@@ -98,11 +99,11 @@ if(NOT ANDROID AND UNIX AND NOT APPLE)
 		libzip::zip
 		SDL3::SDL3
 		simpleini
+		vixl
 	)
 	target_include_directories(armsx2 PRIVATE
 		"${CMAKE_SOURCE_DIR}"
 		"${CMAKE_SOURCE_DIR}/pcsx2"
-		"${CMAKE_SOURCE_DIR}/3rdparty/vixl/include"
 	)
 	target_compile_definitions(armsx2 PRIVATE
 		ARMSX2_SOURCE_DIR="${CMAKE_SOURCE_DIR}"

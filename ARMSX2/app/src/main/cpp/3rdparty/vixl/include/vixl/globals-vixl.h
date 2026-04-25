@@ -120,6 +120,34 @@ struct Unsigned<64> {
     }                                                        \
   } while (false)
 #else
+#ifdef __ANDROID__
+// On Android, printf output goes to /dev/null — vixl aborts become
+// unsearchable in logcat. Route through __android_log_print so the
+// assert file/line/condition show up alongside every other log line.
+#include <android/log.h>
+#define VIXL_ABORT()                                                   \
+  do {                                                                 \
+    __android_log_print(ANDROID_LOG_FATAL, "vixl",                     \
+                        "Aborting in %s, line %i", __FILE__, __LINE__);\
+    abort();                                                           \
+  } while (false)
+#define VIXL_ABORT_WITH_MSG(msg)                                       \
+  do {                                                                 \
+    __android_log_print(ANDROID_LOG_FATAL, "vixl",                     \
+                        "%sin %s, line %i",                            \
+                        (msg), __FILE__, __LINE__);                    \
+    abort();                                                           \
+  } while (false)
+#define VIXL_CHECK(condition)                                          \
+  do {                                                                 \
+    if (!(condition)) {                                                \
+      __android_log_print(ANDROID_LOG_FATAL, "vixl",                   \
+                          "Assertion failed (%s)\nin %s, line %i",     \
+                          #condition, __FILE__, __LINE__);             \
+      abort();                                                         \
+    }                                                                  \
+  } while (false)
+#else
 #define VIXL_ABORT()                                         \
   do {                                                       \
     printf("Aborting in %s, line %i\n", __FILE__, __LINE__); \
@@ -140,6 +168,7 @@ struct Unsigned<64> {
       abort();                                          \
     }                                                   \
   } while (false)
+#endif
 #endif
 #ifdef VIXL_DEBUG
 #define VIXL_ASSERT(condition) VIXL_CHECK(condition)

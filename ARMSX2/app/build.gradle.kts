@@ -41,6 +41,33 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DANDROID=true"
+                    arguments += "-DANDROID_STL=c++_static"
+                    arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g -ffp-contract=off"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g -ffp-contract=off"
+                }
+            }
+        }
+        debug {
+            // Keep PCSX2_DEBUG/VIXL_DEBUG defines (via CMAKE_BUILD_TYPE=Debug)
+            // but compile at -O3 to match release's
+            // codegen. -O0 was exposing a JIT-adjacent crash in MGS2 that
+            // -O3 release didn't hit, which narrows the cause to stack/
+            // uninitialised-local fragility rather than the debug defines.
+            // -ffp-contract=off is kept because the VU1 JIT's bit-exact
+            // float semantics depend on separate FMUL+FADD (not fused FMA).
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DANDROID=true"
+                    arguments += "-DANDROID_STL=c++_static"
+                    arguments += "-DCMAKE_BUILD_TYPE=Debug"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g -ffp-contract=off"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g -ffp-contract=off"
+                }
+            }
         }
     }
     compileOptions {

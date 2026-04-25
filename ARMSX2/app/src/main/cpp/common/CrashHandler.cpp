@@ -386,12 +386,36 @@ void CrashHandler::CrashSignalHandler(int signal, siginfo_t* siginfo, void* ctx)
 {
 #ifdef __ANDROID__
 	void* pc = nullptr;
+	u32 instr = 0;
+	u64 regs_x[31] = {};
+	u64 regs_sp = 0;
 #ifdef __aarch64__
 	if (ctx)
-		pc = reinterpret_cast<void*>(static_cast<ucontext_t*>(ctx)->uc_mcontext.pc);
+	{
+		auto* uc = static_cast<ucontext_t*>(ctx);
+		pc = reinterpret_cast<void*>(uc->uc_mcontext.pc);
+		if (pc)
+			instr = *reinterpret_cast<const u32*>(pc);
+		for (int i = 0; i < 31; i++)
+			regs_x[i] = uc->uc_mcontext.regs[i];
+		regs_sp = uc->uc_mcontext.sp;
+	}
 #endif
 	__android_log_print(ANDROID_LOG_FATAL, "PASX2-CRASH",
-		"Signal %d at PC=%p, fault_addr=%p", signal, pc, siginfo ? siginfo->si_addr : nullptr);
+		"Signal %d at PC=%p, fault_addr=%p, instr=0x%08X",
+		signal, pc, siginfo ? siginfo->si_addr : nullptr, instr);
+	// Dump GPRs so we can trace which register held the bad address.
+	for (int i = 0; i < 31; i += 4)
+	{
+		__android_log_print(ANDROID_LOG_FATAL, "PASX2-CRASH",
+			"  x%-2d=0x%016llX  x%-2d=0x%016llX  x%-2d=0x%016llX  x%-2d=0x%016llX",
+			i,   (unsigned long long)regs_x[i],
+			i+1, (unsigned long long)(i+1 < 31 ? regs_x[i+1] : 0),
+			i+2, (unsigned long long)(i+2 < 31 ? regs_x[i+2] : 0),
+			i+3, (unsigned long long)(i+3 < 31 ? regs_x[i+3] : 0));
+	}
+	__android_log_print(ANDROID_LOG_FATAL, "PASX2-CRASH", "  sp=0x%016llX",
+		(unsigned long long)regs_sp);
 #endif
 	// We can't continue from here. Just bail out and dump core.
 	std::fputs("Aborting application.\n", stderr);

@@ -3875,7 +3875,6 @@ void RunVuJitTests()
     }
 
     mVU0_TestInit();
-
     // ── Integer ops ──────────────────────────────────────────────
     test_iaddi_pos(); test_iaddi_neg(); test_iaddi_self(); test_iaddi_zero_imm();
     test_iadd(); test_iadd_src0();
