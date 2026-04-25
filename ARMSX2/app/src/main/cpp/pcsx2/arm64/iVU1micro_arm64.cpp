@@ -1207,7 +1207,7 @@ static void emitReloadAccReg(int64_t acc_off)
 }
 
 // ============================================================================
-//  VF register cache (Phase 1: read-side, write-through with invalidation)
+//  VF register cache (Phase 2: deferred writes + per-lane dirty tracking)
 // ============================================================================
 //
 // Mirrors the cross-pair VF residency design from the old port-in-place at
@@ -1215,33 +1215,37 @@ static void emitReloadAccReg(int64_t acc_off)
 // Str's VF[fs]/VF[ft]/VF[fd] for every FMAC pair (~3 memory ops/op); this
 // cache keeps recently-read VFs in NEON regs across pairs, so a matrix-
 // transform chain reading the same vertex VF four times pays one Ldr instead
-// of four.
+// of four. Phase 2 extends with deferred writes — store results into the
+// cache slot, defer the actual memory Str to block-end / BL / hazard.
 //
-// Phase 1 scope:
-//   - Read-side cache: vfCacheLoadInto(vfreg, scratch) emits Mov scratch <-
-//     cached if vfreg is resident, else Ldr into a free slot + Mov to scratch.
-//   - Write-through: VF stores still go straight to memory; the helper
-//     vfCacheInvalidate(vfreg) drops any cached copy so the next read reloads.
-//   - No deferred writes — Phase 2.
-//   - No partial-lane (xyzw) tracking — Phase 2. Treats every VF as full-128.
+// Slot fields:
+//   vfreg       : -1 = empty, else 0..31 (the VF index resident in this slot)
+//   last_use    : monotonic counter for LRU eviction
+//   valid_lanes : bitmask of lanes (bit 3=X, 2=Y, 1=Z, 0=W) holding the
+//                 authoritative value. Always 0 (empty) or 0xF (full) — we
+//                 force-load the full VF before any partial write so reads
+//                 always see a complete value. Simplifies read paths.
+//   dirty_lanes : subset of valid_lanes that are unflushed. Flush emits a
+//                 partial-lane Str matching this mask, then clears it.
 //
 // Slot pool: v17..v24 (8 slots). v16 is ACC (pinned). v0..v15 are FMAC scratch.
-// All NEON regs are caller-saved across BL on AAPCS64 (low halves of v8..v15
-// are preserved but our cache holds full Q-regs), so every BL site MUST call
-// vfCacheInvalidateAll() — see the BL-flush wiring in CompileBlock.
+// All NEON regs are caller-saved across BL on AAPCS64, so every BL site MUST
+// flush dirty + invalidate — see emitVu1Call / emitVU1InterpBL wiring.
 //
 // Compile-time only — these helpers track state during emit, not at runtime.
 // vfCacheReset() emits no code; it just zeroes the tracker. The emitted code
-// path naturally arrives at the same NEON state because emit-side Ldr/Mov
-// decisions are deterministic given the tracker.
+// path naturally arrives at the same NEON state because emit-side Ldr/Mov/
+// Str decisions are deterministic given the tracker.
 
 static constexpr int kVfCacheSize = 8;
 static constexpr int kVfCacheBaseReg = 17; // v17..v24
 
 struct VfCacheSlot
 {
-	int  vfreg;     // -1 = empty, else 0..31 (the VF index resident in this slot)
-	u32  last_use;  // monotonic counter for LRU eviction
+	int  vfreg;        // -1 = empty
+	u32  last_use;
+	u8   valid_lanes;  // 0 or 0xF (we force full-load on miss before partial writes)
+	u8   dirty_lanes;  // subset of valid_lanes
 };
 
 static VfCacheSlot s_vfCache[kVfCacheSize];
@@ -1257,13 +1261,17 @@ static constexpr int64_t vfCacheOffsetOf(int vfreg)
 }
 
 // Reset the compile-time tracker. Emits no code. Call at block prologue
-// (cache cold) and after any BL (caller-saved NEON state is gone).
+// (cache cold). NOT safe to call mid-block if any slot has dirty_lanes
+// without flushing first — that would silently drop deferred writes. Use
+// vfCacheFlushAndInvalidate() in that case.
 void vfCacheReset()
 {
 	for (int i = 0; i < kVfCacheSize; i++)
 	{
 		s_vfCache[i].vfreg = -1;
 		s_vfCache[i].last_use = 0;
+		s_vfCache[i].valid_lanes = 0;
+		s_vfCache[i].dirty_lanes = 0;
 	}
 	s_vfCacheClock = 0;
 }
@@ -1279,9 +1287,13 @@ static int vfCacheFind(int vfreg)
 	return -1;
 }
 
+// Forward-declare the partial-lane store emitter — used by the eviction
+// path to flush dirty lanes of an LRU victim before reusing its slot.
+static void vfCacheEmitPartialLaneStore(int slot, int vfreg, u8 lanes);
+
 // Pick a slot to allocate for vfreg. Returns slot index. Prefers empty
-// slots; falls back to LRU eviction (no Str needed in Phase 1 since slots
-// are never dirty under write-through).
+// slots; falls back to LRU eviction. If the LRU victim has dirty lanes,
+// emit a partial-lane Str to flush them before reusing the slot.
 static int vfCacheAllocSlot(int vfreg)
 {
 	int empty = -1;
@@ -1298,7 +1310,14 @@ static int vfCacheAllocSlot(int vfreg)
 		}
 	}
 	const int slot = (empty >= 0) ? empty : lru;
+	if (s_vfCache[slot].dirty_lanes != 0)
+	{
+		vfCacheEmitPartialLaneStore(slot, s_vfCache[slot].vfreg,
+			s_vfCache[slot].dirty_lanes);
+	}
 	s_vfCache[slot].vfreg = vfreg;
+	s_vfCache[slot].valid_lanes = 0;
+	s_vfCache[slot].dirty_lanes = 0;
 	s_vfCache[slot].last_use = ++s_vfCacheClock;
 	return slot;
 }
@@ -1309,13 +1328,88 @@ static int vfCacheSlotReg(int slot)
 	return kVfCacheBaseReg + slot;
 }
 
-// Emit code to materialize VF[vfreg] into `scratch`. Cache hit → Mov from the
-// resident slot. Cache miss → Ldr from VU1.VF[vfreg] memory into a slot, then
-// Mov to scratch. Returns the emitted instruction count savings vs a plain
-// Ldr (negative = miss-with-extra-Mov, positive = hit-Mov-replaces-Ldr).
+// Emit partial-lane Str for the slot's dirty lanes back to VU1.VF[vfreg].
+// Mirrors emitPartialLaneStore in iVU1Upper_arm64.cpp but operates on the
+// cache slot reg directly instead of v5. Used by allocSlot's LRU eviction
+// and the bulk vfCacheFlushDirty path.
 //
-// `vfreg` of 0 short-circuits to the same plain Ldr the existing code emits
-// (VF0 holds the constant {0,0,0,1}; not worth reserving a slot to cache it).
+// Special-cases the all-lanes (0xF) full Str since it's a single insn.
+// Other masks fall back to lane-by-lane stores via Mov-to-scratch + Str s.
+// This is correct but not optimal — the FMAC path's emitPartialLaneStore
+// has more peephole patterns (Str d for adjacent dual lanes, etc.); we
+// could mirror those if profiling shows it matters.
+static void vfCacheEmitPartialLaneStore(int slot, int vfreg, u8 lanes)
+{
+	if (vfreg <= 0 || lanes == 0)
+		return;
+	const int64_t base = vfCacheOffsetOf(vfreg);
+	const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+
+	if (lanes == 0xF)
+	{
+		armAsm->Str(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, base));
+		return;
+	}
+
+	// Adjacent dual-lane fast paths.
+	if (lanes == 0xC)
+	{
+		armAsm->Str(slotReg.D(), a64::MemOperand(VU1_BASE_REG, base + 0));
+		return;
+	}
+	if (lanes == 0x3)
+	{
+		// Rotate high-64 of slot into v2 low-64 then Str d2 at +8.
+		armAsm->Ext(a64::v2.V16B(), slotReg.V16B(), slotReg.V16B(), 8);
+		armAsm->Str(a64::d2, a64::MemOperand(VU1_BASE_REG, base + 8));
+		return;
+	}
+
+	// Single-lane and triple-lane fall to per-lane stores via v2 scratch.
+	auto emitLaneS = [&](int lane) {
+		if (lane == 0)
+		{
+			armAsm->Str(slotReg.S(), a64::MemOperand(VU1_BASE_REG, base + 0));
+		}
+		else
+		{
+			armAsm->Mov(a64::v2.V4S(), 0, slotReg.V4S(), lane);
+			armAsm->Str(a64::s2, a64::MemOperand(VU1_BASE_REG, base + lane * 4));
+		}
+	};
+
+	if (lanes & 0x8) emitLaneS(0); // X
+	if (lanes & 0x4) emitLaneS(1); // Y
+	if (lanes & 0x2) emitLaneS(2); // Z
+	if (lanes & 0x1) emitLaneS(3); // W
+}
+
+// Internal: ensure a slot for vfreg is loaded with all 4 lanes valid.
+// Returns the slot index. Allocates and Ldrs from memory on miss; on hit,
+// just bumps the LRU clock. The returned slot has valid_lanes == 0xF;
+// dirty_lanes are unchanged (a hit on a partially-dirty slot keeps that).
+static int vfCacheEnsureLoaded(int vfreg)
+{
+	int slot = vfCacheFind(vfreg);
+	if (slot < 0)
+	{
+		slot = vfCacheAllocSlot(vfreg);
+		const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+		armAsm->Ldr(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(vfreg)));
+		s_vfCache[slot].valid_lanes = 0xF;
+	}
+	else
+	{
+		s_vfCache[slot].last_use = ++s_vfCacheClock;
+	}
+	return slot;
+}
+
+// Emit code to materialize VF[vfreg] into `scratch`. Cache hit → Mov from the
+// resident slot. Cache miss → Ldr into a slot, then Mov to scratch.
+//
+// `vfreg` of 0 short-circuits to a plain Ldr (VF0 holds the constant
+// {0,0,0,1}; not worth reserving a slot to cache it).
 void vfCacheLoadInto(int vfreg, const a64::VRegister& scratch)
 {
 	if (vfreg == 0)
@@ -1323,17 +1417,7 @@ void vfCacheLoadInto(int vfreg, const a64::VRegister& scratch)
 		armAsm->Ldr(scratch.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(0)));
 		return;
 	}
-	int slot = vfCacheFind(vfreg);
-	if (slot < 0)
-	{
-		slot = vfCacheAllocSlot(vfreg);
-		const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
-		armAsm->Ldr(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(vfreg)));
-	}
-	else
-	{
-		s_vfCache[slot].last_use = ++s_vfCacheClock;
-	}
+	const int slot = vfCacheEnsureLoaded(vfreg);
 	const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
 	if (slotReg.GetCode() != scratch.GetCode())
 		armAsm->Mov(scratch.Q(), slotReg.Q());
@@ -1344,22 +1428,139 @@ void vfCacheLoadInto(int vfreg, const a64::VRegister& scratch)
 // the returned register — it's the cache's authoritative copy.
 a64::VRegister vfCacheLoadResident(int vfreg)
 {
+	const int slot = vfCacheEnsureLoaded(vfreg);
+	return a64::VRegister(vfCacheSlotReg(slot), 128);
+}
+
+// Phase 2.5 (write-through): merge `src_reg`'s `xyzw_mask` lanes into
+// VF[vfreg], updating the cache slot AND immediately storing to memory.
+// dirty_lanes stays at 0 — slot is always clean, just holds the up-to-date
+// value so subsequent reads of vfreg in this block hit cache instead of
+// reloading from memory.
+//
+// Why write-through instead of deferred writes:
+//   The deferred-write Phase 2 design dropped graphics in GoW2 — the
+//   suspected cause is a coherence path (cross-block, BL fallback, or
+//   pipeline ring slot) that reads VF memory directly without going
+//   through the cache flush machinery. Rather than chase every such path,
+//   write-through guarantees memory is always coherent at the cost of
+//   one extra Str per FMAC writeback. Read-side cache wins (the dominant
+//   perf benefit per the old port comparison) are preserved.
+//
+// xyzw_mask uses the FMAC convention: bit 3 = X, bit 2 = Y, bit 1 = Z,
+// bit 0 = W. Lane indices in NEON `Mov v_dst.s[lane], v_src.s[lane]` are
+// 0..3 (X..W), so lane = 3 - bit_position when iterating high to low.
+//
+// vfreg == 0 is a no-op: VF0 is hardwired to {0,0,0,1} and the interpreter
+// silently drops writes to it.
+void vfCacheStore(int vfreg, const a64::VRegister& src_reg, u8 xyzw_mask)
+{
+	if (vfreg <= 0 || xyzw_mask == 0)
+		return;
+
 	int slot = vfCacheFind(vfreg);
 	if (slot < 0)
 	{
 		slot = vfCacheAllocSlot(vfreg);
-		const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+	}
+
+	const a64::VRegister slotReg(vfCacheSlotReg(slot), 128);
+
+	// Force-load if partial write and slot doesn't have all lanes valid —
+	// preserves unmodified lanes when subsequent reads come from cache.
+	if (xyzw_mask != 0xF && s_vfCache[slot].valid_lanes != 0xF)
+	{
 		armAsm->Ldr(slotReg.Q(), a64::MemOperand(VU1_BASE_REG, vfCacheOffsetOf(vfreg)));
+	}
+	s_vfCache[slot].valid_lanes = 0xF;
+
+	// Merge result lanes into slotReg.
+	if (xyzw_mask == 0xF)
+	{
+		if (slotReg.GetCode() != src_reg.GetCode())
+			armAsm->Mov(slotReg.V16B(), src_reg.V16B());
 	}
 	else
 	{
-		s_vfCache[slot].last_use = ++s_vfCacheClock;
+		if (xyzw_mask & 0x8) armAsm->Mov(slotReg.V4S(), 0, src_reg.V4S(), 0);
+		if (xyzw_mask & 0x4) armAsm->Mov(slotReg.V4S(), 1, src_reg.V4S(), 1);
+		if (xyzw_mask & 0x2) armAsm->Mov(slotReg.V4S(), 2, src_reg.V4S(), 2);
+		if (xyzw_mask & 0x1) armAsm->Mov(slotReg.V4S(), 3, src_reg.V4S(), 3);
 	}
-	return a64::VRegister(vfCacheSlotReg(slot), 128);
+
+	// Phase 2.5: write through to memory immediately. Pass xyzw_mask, not
+	// any accumulated dirty_lanes — only the just-modified lanes need to
+	// hit memory; force-load already wrote unmodified lanes back to
+	// matching memory values. dirty_lanes stays 0.
+	vfCacheEmitPartialLaneStore(slot, vfreg, xyzw_mask);
+	s_vfCache[slot].last_use = ++s_vfCacheClock;
 }
 
-// Drop the cached copy of `vfreg`, if any. Call right after a Str writes
-// VF[vfreg] to memory so the next read reloads the new value.
+// Flush every dirty slot to memory. Slots stay loaded (valid_lanes intact)
+// so subsequent reads still hit the cache. Used at sites where memory must
+// be coherent but NEON state is preserved (e.g., before a BL that READS but
+// doesn't clobber NEON — rare; most use vfCacheFlushAndInvalidate instead).
+void vfCacheFlushDirty()
+{
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		if (s_vfCache[i].dirty_lanes == 0)
+			continue;
+		vfCacheEmitPartialLaneStore(i, s_vfCache[i].vfreg, s_vfCache[i].dirty_lanes);
+		s_vfCache[i].dirty_lanes = 0;
+	}
+}
+
+// Phase 2: flush dirty lanes of a single VF, then drop its slot. Used by
+// op emitters that bypass the cache (inline Ldr/Str on VF memory) to keep
+// memory coherent with deferred writes for that one VF, without losing
+// the cache state of every other VF.
+void vfCacheFlushOne(int vfreg)
+{
+	if (vfreg <= 0)
+		return;
+	const int slot = vfCacheFind(vfreg);
+	if (slot < 0)
+		return;
+	if (s_vfCache[slot].dirty_lanes != 0)
+	{
+		vfCacheEmitPartialLaneStore(slot, s_vfCache[slot].vfreg,
+			s_vfCache[slot].dirty_lanes);
+	}
+	s_vfCache[slot].vfreg = -1;
+	s_vfCache[slot].valid_lanes = 0;
+	s_vfCache[slot].dirty_lanes = 0;
+	s_vfCache[slot].last_use = 0;
+}
+
+// Flush dirty slots, then drop all tracker state. Used at every BL (NEON
+// is caller-saved) and at block epilogue (linked successors don't share
+// our compile-time slot map).
+void vfCacheFlushAndInvalidate()
+{
+	for (int i = 0; i < kVfCacheSize; i++)
+	{
+		if (s_vfCache[i].dirty_lanes != 0)
+		{
+			vfCacheEmitPartialLaneStore(i, s_vfCache[i].vfreg,
+				s_vfCache[i].dirty_lanes);
+		}
+		s_vfCache[i].vfreg = -1;
+		s_vfCache[i].valid_lanes = 0;
+		s_vfCache[i].dirty_lanes = 0;
+		s_vfCache[i].last_use = 0;
+	}
+	s_vfCacheClock = 0;
+}
+
+// Drop the cached copy of `vfreg`, if any. Call when external code (e.g., a
+// BL helper that doesn't go through emitVu1Call) has just modified VU1.VF[
+// vfreg] memory — the cache must drop the now-stale slot. If the slot is
+// dirty when this is called, the deferred writes are silently dropped:
+// callers must flush first if they care about losing the deferred values.
+// In practice this should only be called when the external code FULLY
+// overwrites VF[vfreg] (so dropping deferred writes is moot — they'd have
+// been overwritten anyway).
 void vfCacheInvalidate(int vfreg)
 {
 	if (vfreg <= 0)
@@ -1368,30 +1569,279 @@ void vfCacheInvalidate(int vfreg)
 	if (slot >= 0)
 	{
 		s_vfCache[slot].vfreg = -1;
+		s_vfCache[slot].valid_lanes = 0;
+		s_vfCache[slot].dirty_lanes = 0;
 		s_vfCache[slot].last_use = 0;
 	}
 }
 
-// Drop every cached entry. Call before any BL — caller-saved NEON state is
-// lost. Cache cold-restarts; next reads reload from memory.
+// Drop every cached entry without flushing. Phase 1 used this around BLs
+// (write-through meant nothing was dirty); Phase 2 should NOT call this on
+// a hot block path because deferred writes would silently disappear. Use
+// vfCacheFlushAndInvalidate instead. This entry point is preserved for
+// emergency-reset cases (e.g., compile-time errors, code-buffer reset).
 void vfCacheInvalidateAll()
 {
 	for (int i = 0; i < kVfCacheSize; i++)
 	{
 		s_vfCache[i].vfreg = -1;
+		s_vfCache[i].valid_lanes = 0;
+		s_vfCache[i].dirty_lanes = 0;
 		s_vfCache[i].last_use = 0;
 	}
 	s_vfCacheClock = 0;
 }
 
-// Wrapper for armEmitCall that drops the VF cache tracker first. Use for
-// every BL in the VU1 emit path — AAPCS64 caller-saves all NEON regs, so
-// the cache state must be considered lost across any helper call. Phase 1
-// is write-through (slots are never dirty), so the only work here is
-// resetting the compile-time tracker.
+// ============================================================================
+//  VI register cache (write-through, mirrors VF cache architecture)
+// ============================================================================
+//
+// The current arm64 VU JIT re-loads/stores every VI to memory per op (Ldrh +
+// arith + Strh = 3 memory ops per IALU op). The old port-in-place of x86
+// microVU at ARMSX2-master kept VIs resident in callee-saved x86 GPRs across
+// pairs via microRegAlloc::allocGPR. This cache mirrors the design but uses
+// caller-saved arm64 GPRs (w9..w15, 7 slots) — same as the VF cache, with
+// flush+invalidate around every BL.
+//
+// VI registers are 16-bit on PS2 (low halfword of REG_VI). The cache stores
+// them zero-extended in 32-bit w-regs. Sign extension on reads is the
+// consumer's job (Sxth from cached w-reg). Writes Strh the low 16 bits.
+//
+// Write-through (no deferred writes):
+//   - vfCache had a deferred-write attempt (Phase 2) that broke graphics in
+//     GoW2; we shipped Phase 2.5 write-through instead. Apply the same lesson
+//     here — VIbackup and the interpreter-helper paths read VI memory
+//     directly, and any deferred-write coherence gap would silently corrupt
+//     branch targets / memory addresses.
+//
+// VI[0] is hardwired to 0: reads short-circuit to wzr, writes are dropped.
+//
+// Pool: w9..w15. These are caller-saved on AAPCS64 and unused by the VU1
+// emit's per-op scratch (which uses w4..w6 / x5-x7) and by VU1's pinned
+// state regs (w19, w20, x21-x28). vixl's macro-assembler reserves IP0/IP1
+// (x16/x17), so this pool is also safe from internal vixl spills.
+//
+// Compile-time only — these helpers track state during emit, not at runtime.
+
+static constexpr int kViCacheSize = 7;
+static constexpr int kViCacheBaseReg = 9; // w9..w15
+
+struct ViCacheSlot
+{
+	int  vireg;     // -1 = empty, else 1..15 (vireg 0 is hardwired-zero, never cached)
+	u32  last_use;  // monotonic counter for LRU eviction
+};
+
+static ViCacheSlot s_viCache[kViCacheSize];
+static u32 s_viCacheClock;
+
+// Byte offset of VI[reg] from VU1_BASE_REG. REG_VI is 16 bytes; the 16-bit
+// VI value lives in the low halfword (matches Ldrh/Strh access).
+static constexpr int64_t viCacheOffsetOf(int vireg)
+{
+	return static_cast<int64_t>(offsetof(VURegs, VI))
+		+ static_cast<int64_t>(vireg) * static_cast<int64_t>(sizeof(REG_VI));
+}
+
+void viCacheReset()
+{
+	for (int i = 0; i < kViCacheSize; i++)
+	{
+		s_viCache[i].vireg = -1;
+		s_viCache[i].last_use = 0;
+	}
+	s_viCacheClock = 0;
+}
+
+static int viCacheFind(int vireg)
+{
+	for (int i = 0; i < kViCacheSize; i++)
+	{
+		if (s_viCache[i].vireg == vireg)
+			return i;
+	}
+	return -1;
+}
+
+static int viCacheSlotReg(int slot)
+{
+	return kViCacheBaseReg + slot;
+}
+
+// Pick a slot to allocate for vireg. Prefer empty, fall back to LRU. Write-
+// through means slots are never dirty; eviction is a pure tracker reset.
+static int viCacheAllocSlot(int vireg)
+{
+	int empty = -1;
+	int lru = 0;
+	u32 lru_stamp = ~0u;
+	for (int i = 0; i < kViCacheSize; i++)
+	{
+		if (s_viCache[i].vireg < 0 && empty < 0)
+			empty = i;
+		if (s_viCache[i].last_use < lru_stamp)
+		{
+			lru_stamp = s_viCache[i].last_use;
+			lru = i;
+		}
+	}
+	const int slot = (empty >= 0) ? empty : lru;
+	s_viCache[slot].vireg = vireg;
+	s_viCache[slot].last_use = ++s_viCacheClock;
+	return slot;
+}
+
+// Helper: build a 32-bit (w-form) Register for slot N. vixl globals like w9
+// are of type `Register`, not `WRegister`; the latter is just a constructor
+// alias that returns a Register. Use Register(code, 32) to mirror that.
+static a64::Register viCacheSlotWReg(int slot)
+{
+	return a64::Register(viCacheSlotReg(slot), 32);
+}
+
+// Internal: ensure a slot is loaded with VI[vireg] zero-extended in its
+// w-reg. Returns the slot index.
+static int viCacheEnsureLoaded(int vireg)
+{
+	int slot = viCacheFind(vireg);
+	if (slot < 0)
+	{
+		slot = viCacheAllocSlot(vireg);
+		const a64::Register slotReg = viCacheSlotWReg(slot);
+		armAsm->Ldrh(slotReg, a64::MemOperand(VU1_BASE_REG, viCacheOffsetOf(vireg)));
+	}
+	else
+	{
+		s_viCache[slot].last_use = ++s_viCacheClock;
+	}
+	return slot;
+}
+
+// Materialize VI[vireg] into `scratch`. Cache hit → Mov from cached w-reg;
+// miss → Ldrh into a slot, then Mov to scratch. vireg == 0 → Mov scratch, wzr.
+void viCacheLoadInto(int vireg, const a64::Register& scratch)
+{
+	if (vireg == 0)
+	{
+		armAsm->Mov(scratch, a64::wzr);
+		return;
+	}
+	const int slot = viCacheEnsureLoaded(vireg);
+	const a64::Register slotReg = viCacheSlotWReg(slot);
+	if (slotReg.GetCode() != scratch.GetCode())
+		armAsm->Mov(scratch, slotReg);
+}
+
+// Like viCacheLoadInto but returns the resident w-reg directly. Caller must
+// NOT modify it — it's the cache's authoritative copy. Returns wzr for VI[0].
+//
+// NOTE: vixl rejects wzr as a source for some extend instructions
+// (Sxth/Sxtb/Sxtw/Uxth/Uxtb assert !rn.IsZero()). Callers that need a
+// sign-extended read MUST go through viCacheLoadSignedInto, which handles
+// the vireg==0 special case. Callers that only do simple Mov / Add / Lsl /
+// And / Orr / Sub / Cmp on the result are fine — those accept wzr.
+a64::Register viCacheLoadResident(int vireg)
+{
+	if (vireg == 0)
+		return a64::wzr;
+	const int slot = viCacheEnsureLoaded(vireg);
+	return viCacheSlotWReg(slot);
+}
+
+// Materialize VI[vireg] sign-extended into `dest`. Used by consumers that
+// need signed semantics (IBxx hazard reads, MFIR broadcast, LQ/SQ index
+// computation). Special-cases vireg==0 to `Mov dest, wzr` because vixl's
+// Sxth asserts on wzr source.
+void viCacheLoadSignedInto(int vireg, const a64::Register& dest)
+{
+	if (vireg == 0)
+	{
+		armAsm->Mov(dest, a64::wzr);
+		return;
+	}
+	const int slot = viCacheEnsureLoaded(vireg);
+	armAsm->Sxth(dest, viCacheSlotWReg(slot));
+}
+
+// Write-through: copy `src_reg` (low 16 bits) into the cache slot AND Strh
+// to VI[vireg] memory. dirty tracking unused (always clean). vireg == 0 is
+// silently dropped (VI[0] hardwired).
+void viCacheStore(int vireg, const a64::Register& src_reg)
+{
+	if (vireg <= 0)
+		return;
+
+	int slot = viCacheFind(vireg);
+	if (slot < 0)
+		slot = viCacheAllocSlot(vireg);
+
+	const a64::Register slotReg = viCacheSlotWReg(slot);
+
+	// Cache slot: copy src into the slot reg (zero-extend the low 16 bits).
+	// vixl's Uxth asserts !rn.IsZero(), so route wzr-source through Mov which
+	// already produces a zero-extended zero in the slot.
+	if (src_reg.IsZero())
+		armAsm->Mov(slotReg, a64::wzr);
+	else if (slotReg.GetCode() != src_reg.GetCode())
+		armAsm->Uxth(slotReg, src_reg);
+	else
+		armAsm->Uxth(slotReg, slotReg); // self-truncate: in-place 16-bit clamp
+
+	// Memory: Strh the low 16 bits.
+	armAsm->Strh(slotReg, a64::MemOperand(VU1_BASE_REG, viCacheOffsetOf(vireg)));
+
+	s_viCache[slot].last_use = ++s_viCacheClock;
+}
+
+// Drop any cached copy of `vireg`. Call after external code (e.g., a BL) has
+// modified VI memory and the slot mapping is stale. Write-through means there
+// are no dirty bits to flush — this is purely a tracker reset.
+void viCacheInvalidate(int vireg)
+{
+	if (vireg <= 0)
+		return;
+	const int slot = viCacheFind(vireg);
+	if (slot >= 0)
+	{
+		s_viCache[slot].vireg = -1;
+		s_viCache[slot].last_use = 0;
+	}
+}
+
+void viCacheInvalidateAll()
+{
+	for (int i = 0; i < kViCacheSize; i++)
+	{
+		s_viCache[i].vireg = -1;
+		s_viCache[i].last_use = 0;
+	}
+	s_viCacheClock = 0;
+}
+
+// Convenience alias matching the VF cache naming. Write-through means no
+// flush emit is ever needed — this is functionally identical to invalidate.
+void viCacheFlushOne(int vireg)
+{
+	viCacheInvalidate(vireg);
+}
+
+void viCacheFlushAndInvalidate()
+{
+	viCacheInvalidateAll();
+}
+
+// Wrapper for armEmitCall that flushes deferred VF writes and drops the
+// cache tracker. Use for every BL in the VU1 emit path — AAPCS64 caller-
+// saves all NEON regs, AND the helper may read VF memory and would see
+// stale values without the flush. Phase 2 emits Strs for any dirty lanes
+// here, then resets the tracker.
+//
+// Also drops the VI cache tracker — the cache's GPR pool (w9..w15) is
+// caller-saved and clobbered by any BL.
 void emitVu1Call(const void* fn)
 {
-	vfCacheInvalidateAll();
+	vfCacheFlushAndInvalidate();
+	viCacheInvalidateAll();
 	armEmitCall(fn);
 }
 
@@ -1425,10 +1875,14 @@ void emitVU1InterpBL(const void* interp_fn)
 	emitFlushFmaccountReg(fmaccount_off);
 	emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
 	emitFlushAccReg(acc_off);
-	// VF cache slot mappings are compile-time only — no Str needed (Phase 1
-	// is write-through). The BL clobbers all NEON state, so the tracker
-	// must drop every entry; subsequent reads reload from memory.
-	vfCacheInvalidateAll();
+	// Phase 2: emit Strs for any deferred VF writes before the BL — the
+	// interpreter reads VF memory and would see stale values otherwise.
+	// Then drop the tracker since BL clobbers caller-saved NEON.
+	vfCacheFlushAndInvalidate();
+	// VI cache tracker drop: w9..w15 are caller-saved, clobbered by BL.
+	// Write-through means memory is already coherent; just reset the
+	// tracker so post-BL emits don't reference stale slot mappings.
+	viCacheInvalidateAll();
 	armEmitCall(interp_fn);
 	emitReloadCycleReg(cycle_off);
 	emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
@@ -1859,6 +2313,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// thinking some VF was already resident, but the runtime NEON state of
 	// the new block has none of that.
 	vfCacheReset();
+	// VI cache: same lifecycle as VF cache — empty at every block compile.
+	viCacheReset();
 
 	// --- Size check ---
 	const size_t data_size    = numPairs * 2 * sizeof(_VURegsNum);
@@ -3317,6 +3773,29 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		out_block->exits[e].current_target = nullptr;
 	}
 
+	// Phase 2 CRITICAL: emit the VF cache flush HERE, before the patch_site
+	// B is written, so the runtime flush runs in BOTH the unlinked path
+	// (B falls through to flushes-local → budget_exceeded_exit) AND the
+	// linked path (B patched to successor's linkEntry, which SKIPS the
+	// budget_exceeded_exit flush entirely). The successor block's compile-
+	// time tracker is independent of ours; it expects to find any deferred
+	// writes already in VU1.VF[] memory at entry. Without this pre-link
+	// flush, every linked exit silently drops dirty cache slots — visible
+	// as missing geometry uploads (XGKICK transfers stale VU memory) while
+	// VU itself runs at 100% (the work happens, the writes vanish).
+	//
+	// VI cache: write-through so nothing to flush — but invalidate the
+	// tracker so the LRU clock resets cleanly (defensive; not strictly
+	// required since the next block compile resets on entry).
+	//
+	// Indirect (JR/JALR) goes through emitVu1Call(vu1_indirect_dispatch),
+	// which already flushes inside the wrapper — no extra work here.
+	if (link_info.num_exits > 0 || link_info.indirect)
+	{
+		vfCacheFlushAndInvalidate();
+		viCacheInvalidateAll();
+	}
+
 	if (link_info.num_exits == 1)
 	{
 		u8* patch = armGetCurrentCodePointer();
@@ -3401,6 +3880,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// skipping both the per-pair loop body and the exit selector. Falls
 	// straight into the flush+epilogue+Ret path below.
 	armAsm->Bind(&budget_exceeded_exit);
+
+	// Phase 2: flush deferred VF writes to memory before the epilogue. The
+	// next block (entered via Execute's outer loop or a linked B from
+	// elsewhere) won't share our compile-time slot map, so any cached-but-
+	// unflushed values must hit VU1.VF[] now. Drops tracker afterwards.
+	vfCacheFlushAndInvalidate();
+	// VI cache: write-through so nothing to flush; just reset the tracker.
+	viCacheInvalidateAll();
 
 	// Stage C2: flush the cached cycle register to memory before restoring
 	// the caller's x21. From here on VU->cycle is authoritative again.

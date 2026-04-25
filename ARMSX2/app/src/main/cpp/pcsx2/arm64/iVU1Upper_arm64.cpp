@@ -82,19 +82,16 @@ static constexpr int64_t accOff()
 // `dst != &VU->VF[0]` check.
 static constexpr int64_t vfOffStatic0 = static_cast<int64_t>(offsetof(VURegs, VF));
 
-// VF cache write-coherence: the writeback helpers receive an int64_t dst_off
-// that's either accOff() or vfOff(fd). When fd >= 0, any cached copy of that
-// VF in the read-side cache must be dropped so the next read reloads the new
-// value. Phase 1 invalidates on ANY write (full or partial); Phase 2 will
-// track per-lane dirty bits to keep partial writes coherent without losing
-// the cached copy.
-static inline void vfCacheInvalidateDstOff(int64_t dst_off)
+// Phase 2: writeback helpers receive an int64_t dst_off that's either
+// accOff() or vfOff(fd). For VF writes, we defer the Str into the cache
+// (vfCacheStore); for ACC writes, the existing pinned-VU1_ACC_REG path
+// applies. This helper extracts the VF index, returning -1 if dst_off
+// targets ACC or another field.
+static inline int vfIndexFromDstOff(int64_t dst_off)
 {
 	if (dst_off >= vfOffStatic0 && dst_off < vfOffStatic0 + 32 * static_cast<int64_t>(sizeof(VECTOR)))
-	{
-		const int vf = static_cast<int>((dst_off - vfOffStatic0) / static_cast<int64_t>(sizeof(VECTOR)));
-		vfCacheInvalidate(vf);
-	}
+		return static_cast<int>((dst_off - vfOffStatic0) / static_cast<int64_t>(sizeof(VECTOR)));
+	return -1;
 }
 
 // ============================================================================
@@ -259,12 +256,6 @@ static void emitPartialLaneStore(int64_t base_off, u32 xyzw)
 
 static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode mode)
 {
-	// Drop any cached copy of the destination VF — Phase 1 write-through.
-	// Done up front so all writeback paths through this function are covered
-	// (the wrapper emitFmacWriteback also calls vfCacheInvalidateDstOff,
-	// which is idempotent — the second call is a no-op).
-	vfCacheInvalidateDstOff(dst_off);
-
 	const bool  skip_dst_write   = (dst_off == vfOffStatic0); // VF[0] hardwired
 	const bool  overflow_clamp   = CHECK_VU_OVERFLOW(1);
 	const bool  opm_mode         = (mode == FmacWritebackMode::OpmXYZ);
@@ -411,17 +402,14 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 
 	const bool to_acc = (dst_off == accOff());
 
-	if (eff_xyzw == 0xFu)
-	{
-		if (to_acc)
-			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
-		else
-			armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
-		return;
-	}
-
 	if (to_acc)
 	{
+		// ACC stays pinned in v16 — Mov lanes in place, no cache or memory.
+		if (eff_xyzw == 0xFu)
+		{
+			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
+			return;
+		}
 		if (eff_xyzw & 8) armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0);
 		if (eff_xyzw & 4) armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1);
 		if (eff_xyzw & 2) armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2);
@@ -429,7 +417,13 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 		return;
 	}
 
-	emitPartialLaneStore(dst_off, eff_xyzw);
+	// Phase 2: defer the VF[fd] Str into the cache slot. The actual memory
+	// store fires at block end / hazard / BL via vfCacheFlushAndInvalidate.
+	const int dst_vf = vfIndexFromDstOff(dst_off);
+	if (dst_vf > 0)
+		vfCacheStore(dst_vf, v5, static_cast<u8>(eff_xyzw));
+	else
+		emitPartialLaneStore(dst_off, eff_xyzw); // fallback for unrecognized dst
 }
 
 // Generic FMAC writeback — result must be in v5.4S.
@@ -437,7 +431,6 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 static void emitFmacWriteback(int64_t dst_off, u32 xyzw)
 {
 	emitFmacInlineWriteback(dst_off, xyzw, FmacWritebackMode::GenericFmac);
-	vfCacheInvalidateDstOff(dst_off);
 }
 
 // Store v5 to dst_off with xyzw mask, used by the flag-skipping fast path.
@@ -452,35 +445,35 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 	if (dst_off == vfOffStatic0)
 		return;
 
-	// Drop any cached copy of the destination VF before the store — Phase 1
-	// is write-through, so the next read must reload from the freshly-stored
-	// memory rather than return the stale cached copy.
-	vfCacheInvalidateDstOff(dst_off);
-
 	// Phase-8: ACC is pinned in VU1_ACC_REG (q16). Redirect stores to the
-	// pinned register instead of memory.
+	// pinned register — no cache, no memory round-trip.
 	const bool to_acc = (dst_off == accOff());
-
-	if (xyzw == 0xF)
-	{
-		if (to_acc)
-			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
-		else
-			armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
-		return;
-	}
-
 	if (to_acc)
 	{
-		// Partial-lane write into the pinned ACC reg — merge v5's selected
-		// lanes in place, no memory round-trip.
-		if (xyzw & 8) armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0); // x
-		if (xyzw & 4) armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1); // y
-		if (xyzw & 2) armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2); // z
-		if (xyzw & 1) armAsm->Mov(VU1_ACC_REG.V4S(), 3, v5.V4S(), 3); // w
+		if (xyzw == 0xF)
+		{
+			armAsm->Mov(VU1_ACC_REG.V16B(), v5.V16B());
+			return;
+		}
+		if (xyzw & 8) armAsm->Mov(VU1_ACC_REG.V4S(), 0, v5.V4S(), 0);
+		if (xyzw & 4) armAsm->Mov(VU1_ACC_REG.V4S(), 1, v5.V4S(), 1);
+		if (xyzw & 2) armAsm->Mov(VU1_ACC_REG.V4S(), 2, v5.V4S(), 2);
+		if (xyzw & 1) armAsm->Mov(VU1_ACC_REG.V4S(), 3, v5.V4S(), 3);
 		return;
 	}
 
+	// Phase 2: defer the VF[fd] write into the cache. The Str fires at
+	// block end / hazard / BL via vfCacheFlushAndInvalidate.
+	const int dst_vf = vfIndexFromDstOff(dst_off);
+	if (dst_vf > 0)
+	{
+		vfCacheStore(dst_vf, v5, static_cast<u8>(xyzw));
+		return;
+	}
+
+	// Fallback for any dst that isn't VF[1..31] or ACC — keep the direct
+	// store path. Shouldn't trigger in practice (writebacks are always
+	// either ACC or VF), but preserved for safety.
 	emitPartialLaneStore(dst_off, xyzw);
 }
 
@@ -498,17 +491,9 @@ static void emitFmacStoreMasked(int64_t dst_off, u32 xyzw)
 static void emitNoFlagWriteback(u32 fd, u32 xyzw)
 {
 	if (fd == 0) return; // VF[0] hardwired; interpreter no-ops the whole insn
-	const int64_t dst_off = vfOff(fd);
-	vfCacheInvalidate(static_cast<int>(fd));
-
-	if (xyzw == 0xF)
-	{
-		armAsm->Str(q5, MemOperand(VU1_BASE_REG, dst_off));
-		return;
-	}
-
-	// Partial write via peephole: direct indexed stores, no load-merge-store.
-	emitPartialLaneStore(dst_off, xyzw);
+	// Phase 2: defer the write into the cache. Memory store fires at the
+	// next flush point. Mirrors emitFmacStoreMasked's VF path.
+	vfCacheStore(static_cast<int>(fd), v5, static_cast<u8>(xyzw));
 }
 
 // ============================================================================
@@ -982,7 +967,7 @@ static void emitFTOI(int fbits)
 	const u32 fs   = (VU1.code >> 11) & 0x1F;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
 	if (ft == 0) return;
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
+	vfCacheLoadInto(static_cast<int>(fs), v0);
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(1);
 	if (clampInputs)
 	{
@@ -1019,19 +1004,11 @@ static void emitFTOI(int fbits)
 		armAsm->Bit(v1.V16B(), v3.V16B(), v2.V16B()); // blend: NaN lanes ← v3
 	}
 
-	if (xyzw == 0xF)
-	{
-		armAsm->Str(q1, MemOperand(VU1_BASE_REG, vfOff(ft)));
-	}
-	else
-	{
-		armAsm->Ldr(q5, MemOperand(VU1_BASE_REG, vfOff(ft)));
-		if (xyzw & 8) armAsm->Mov(v5.V4S(), 0, v1.V4S(), 0);
-		if (xyzw & 4) armAsm->Mov(v5.V4S(), 1, v1.V4S(), 1);
-		if (xyzw & 2) armAsm->Mov(v5.V4S(), 2, v1.V4S(), 2);
-		if (xyzw & 1) armAsm->Mov(v5.V4S(), 3, v1.V4S(), 3);
-		armAsm->Str(q5, MemOperand(VU1_BASE_REG, vfOff(ft)));
-	}
+	// Phase 2: defer the write through the cache. vfCacheStore handles the
+	// xyzw mask internally — full-mask path skips the load-merge, partial-
+	// mask path force-loads the slot and Mov-merges. Replaces the prior
+	// hand-rolled Ldr q5 + lane Movs + Str q5 sequence.
+	vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
 }
 
 static void emitITOF(int fbits)
@@ -1040,24 +1017,12 @@ static void emitITOF(int fbits)
 	const u32 fs   = (VU1.code >> 11) & 0x1F;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
 	if (ft == 0) return;
-	armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(fs)));
+	vfCacheLoadInto(static_cast<int>(fs), v0);
 	if (fbits > 0)
 		armAsm->Scvtf(v1.V4S(), v0.V4S(), fbits);
 	else
 		armAsm->Scvtf(v1.V4S(), v0.V4S());
-	if (xyzw == 0xF)
-	{
-		armAsm->Str(q1, MemOperand(VU1_BASE_REG, vfOff(ft)));
-	}
-	else
-	{
-		armAsm->Ldr(q5, MemOperand(VU1_BASE_REG, vfOff(ft)));
-		if (xyzw & 8) armAsm->Mov(v5.V4S(), 0, v1.V4S(), 0);
-		if (xyzw & 4) armAsm->Mov(v5.V4S(), 1, v1.V4S(), 1);
-		if (xyzw & 2) armAsm->Mov(v5.V4S(), 2, v1.V4S(), 2);
-		if (xyzw & 1) armAsm->Mov(v5.V4S(), 3, v1.V4S(), 3);
-		armAsm->Str(q5, MemOperand(VU1_BASE_REG, vfOff(ft)));
-	}
+	vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
 }
 
 // ============================================================================
@@ -1899,6 +1864,13 @@ REC_VU1_UPPER_INTERP(CLIP)
 void recVU1_CLIP() {
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 ft = (VU1.code >> 16) & 0x1F;
+
+	// Phase 2: CLIP reads VF[ft].w and VF[fs].xyz via direct 32-bit Ldrs.
+	// Flush deferred dirty lanes for both VFs before the reads. (Drops the
+	// cache slots — CLIP isn't usually adjacent to FMACs reading the same
+	// VFs, so the loss is small.)
+	vfCacheFlushOne(static_cast<int>(ft));
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	// value = raw ft.w
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));

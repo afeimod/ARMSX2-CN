@@ -941,6 +941,11 @@ void recVU1_DIV() {
 	const u32 fsf = (VU1.code >> 21) & 0x3;
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
 
+	// Phase 2: this emitter reads VF[ft] / VF[fs] memory directly via Ldr w.
+	// Flush any deferred dirty lanes to memory first so the reads are coherent.
+	vfCacheFlushOne(static_cast<int>(ft));
+	vfCacheFlushOne(static_cast<int>(fs));
+
 	// Load raw u32 float bits
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + ftf * 4));
 	armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
@@ -1004,6 +1009,9 @@ void recVU1_SQRT() {
 	const u32 ftf = (VU1.code >> 23) & 0x3;
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
 
+	// Phase 2: flush deferred ft writes before the direct memory Ldr.
+	vfCacheFlushOne(static_cast<int>(ft));
+
 	// Load and clamp ft
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + ftf * 4));
 	emitVuDouble(w0, w2);
@@ -1036,6 +1044,10 @@ void recVU1_RSQRT() {
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 fsf = (VU1.code >> 21) & 0x3;
 	const int64_t q_off  = static_cast<int64_t>(offsetof(VURegs, q));
+
+	// Phase 2: flush deferred ft/fs writes before the direct memory Ldrs.
+	vfCacheFlushOne(static_cast<int>(ft));
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	// Load raw bits
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + ftf * 4));
@@ -1131,10 +1143,10 @@ void recVU1_IADD() {
 	const u32 is = (VU1.code >> 11) & 0xF;
 	const u32 it = (VU1.code >> 16) & 0xF;
 	emitBackupVI(id);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(it)));
-	armAsm->Add(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(id)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	armAsm->Add(w0, regS, regT);
+	viCacheStore(static_cast<int>(id), w0);
 }
 #endif
 
@@ -1147,10 +1159,10 @@ void recVU1_ISUB() {
 	const u32 is = (VU1.code >> 11) & 0xF;
 	const u32 it = (VU1.code >> 16) & 0xF;
 	emitBackupVI(id);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(it)));
-	armAsm->Sub(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(id)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	armAsm->Sub(w0, regS, regT);
+	viCacheStore(static_cast<int>(id), w0);
 }
 #endif
 
@@ -1162,14 +1174,14 @@ void recVU1_IADDI() {
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
 	emitBackupVI(it);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		// Live 5-bit signed immediate from bits [10:6] of VU->code. Matches
 		// x86 microVU_Lower.inl IADDI IbitHack path (xSHL 21; xSAR 27).
 		armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
 		armAsm->Sbfx(w1, w1, 6, 5);
-		armAsm->Add(w0, w0, w1);
+		armAsm->Add(w0, regS, w1);
 	}
 	else
 	{
@@ -1177,11 +1189,13 @@ void recVU1_IADDI() {
 		s32 imm = (VU1.code >> 6) & 0x1f;
 		imm = ((imm & 0x10) ? static_cast<s32>(0xfffffff0) : 0) | (imm & 0xf);
 		if (imm > 0)
-			armAsm->Add(w0, w0, imm);
+			armAsm->Add(w0, regS, imm);
 		else if (imm < 0)
-			armAsm->Sub(w0, w0, static_cast<u32>(-imm));
+			armAsm->Sub(w0, regS, static_cast<u32>(-imm));
+		else
+			armAsm->Mov(w0, regS);
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -1193,7 +1207,7 @@ void recVU1_IADDIU() {
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
 	emitBackupVI(it);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		// Live 15-bit unsigned immediate from VU->code: ((code >> 10) & 0x7800) | (code & 0x7FF).
@@ -1203,7 +1217,7 @@ void recVU1_IADDIU() {
 		armAsm->And(w2, w2, 0x7800);
 		armAsm->And(w1, w1, 0x7FF);
 		armAsm->Orr(w1, w1, w2);
-		armAsm->Add(w0, w0, w1);
+		armAsm->Add(w0, regS, w1);
 	}
 	else
 	{
@@ -1212,10 +1226,14 @@ void recVU1_IADDIU() {
 		if (imm != 0)
 		{
 			armAsm->Mov(w1, imm);
-			armAsm->Add(w0, w0, w1);
+			armAsm->Add(w0, regS, w1);
+		}
+		else
+		{
+			armAsm->Mov(w0, regS);
 		}
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -1227,7 +1245,7 @@ void recVU1_ISUBIU() {
 	if (it == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
 	emitBackupVI(it);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
 	if (EmuConfig.Gamefixes.IbitHack)
 	{
 		armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, static_cast<int64_t>(offsetof(VURegs, code))));
@@ -1235,7 +1253,7 @@ void recVU1_ISUBIU() {
 		armAsm->And(w2, w2, 0x7800);
 		armAsm->And(w1, w1, 0x7FF);
 		armAsm->Orr(w1, w1, w2);
-		armAsm->Sub(w0, w0, w1);
+		armAsm->Sub(w0, regS, w1);
 	}
 	else
 	{
@@ -1243,10 +1261,14 @@ void recVU1_ISUBIU() {
 		if (imm != 0)
 		{
 			armAsm->Mov(w1, imm);
-			armAsm->Sub(w0, w0, w1);
+			armAsm->Sub(w0, regS, w1);
+		}
+		else
+		{
+			armAsm->Mov(w0, regS);
 		}
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -1259,10 +1281,10 @@ void recVU1_IAND() {
 	const u32 is = (VU1.code >> 11) & 0xF;
 	const u32 it = (VU1.code >> 16) & 0xF;
 	emitBackupVI(id);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(it)));
-	armAsm->And(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(id)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	armAsm->And(w0, regS, regT);
+	viCacheStore(static_cast<int>(id), w0);
 }
 #endif
 
@@ -1275,10 +1297,10 @@ void recVU1_IOR() {
 	const u32 is = (VU1.code >> 11) & 0xF;
 	const u32 it = (VU1.code >> 16) & 0xF;
 	emitBackupVI(id);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(it)));
-	armAsm->Orr(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(id)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	armAsm->Orr(w0, regS, regT);
+	viCacheStore(static_cast<int>(id), w0);
 }
 #endif
 
@@ -1297,9 +1319,14 @@ static inline s32 decodeVuImm10(u32 code)
 // masked to 14 bits with 16-byte alignment (matches u16 cast + & 0x3FFF).
 // Result: w0 = 14-bit masked offset (and x0 holds the zero-extended version).
 // Clobbers w0.
+//
+// VI cache: source VI loaded via viCacheLoadSignedInto so vireg==0 routes
+// to `Mov w0, wzr` (vixl's Sxth rejects wzr-source). One extra insn vs the
+// old direct Ldrsh on cache miss; saves the entire load on subsequent uses
+// of the same VI in the block.
 static void emitComputeVuMemOffset(u32 is_reg, s32 imm)
 {
-	armAsm->Ldrsh(w0, MemOperand(VU1_BASE_REG, viOff(is_reg)));
+	viCacheLoadSignedInto(static_cast<int>(is_reg), w0);
 	if (imm > 0)
 		armAsm->Add(w0, w0, imm);
 	else if (imm < 0)
@@ -1326,6 +1353,11 @@ void recVU1_LQ() {
 	const u32 xyzw = W_XYZW(&VU1);
 	const s32 imm = decodeVuImm10(VU1.code);
 	const int64_t mem_off = static_cast<int64_t>(offsetof(VURegs, Mem));
+
+	// Phase 2: this emitter writes VU1.VF[ft] memory directly. Drop any
+	// cached copy of ft (after flushing dirty lanes that LQ won't overwrite)
+	// so next reads reload from the freshly-stored memory.
+	vfCacheFlushOne(static_cast<int>(ft));
 
 	emitComputeVuMemOffset(is, imm);
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
@@ -1363,12 +1395,18 @@ void recVU1_LQD() {
 	// VI[0]=0, DECs it, and uses (u16)-1 * 16 = 0x3FF0 (post-mask) as the
 	// address. Writeback to VI[is] is still gated on is != 0 so the VI[0]
 	// hardwired-zero invariant is preserved in memory.
-	armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Sub(w2, w2, 1);
+	{
+		const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+		armAsm->Sub(w2, srcVi, 1);
+	}
 	if (is != 0)
-		armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
+		viCacheStore(static_cast<int>(is), w2);
 
 	if (ft == 0) return;
+
+	// Phase 2: drop any cached copy of ft — the inline Str writes memory
+	// directly. Flushes dirty lanes that LQD won't overwrite.
+	vfCacheFlushOne(static_cast<int>(ft));
 
 	// Address = w2 * 16 masked to 14 bits (interpreter uses US[0] unsigned,
 	// but the final & 0x3FF0 mask makes sign irrelevant).
@@ -1407,6 +1445,9 @@ void recVU1_LQI() {
 	// Load uses VI[is] pre-increment.
 	if (ft != 0)
 	{
+		// Phase 2: drop any cached copy of ft — inline Str writes memory.
+		vfCacheFlushOne(static_cast<int>(ft));
+
 		emitComputeVuMemOffset(is, 0);
 		armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
 		armAsm->Add(x1, x1, x0);
@@ -1428,9 +1469,9 @@ void recVU1_LQI() {
 	// Post-increment — interpreter gates on fs != 0, not is != 0.
 	if (fs != 0)
 	{
-		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
-		armAsm->Add(w2, w2, 1);
-		armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(is)));
+		const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+		armAsm->Add(w2, srcVi, 1);
+		viCacheStore(static_cast<int>(is), w2);
 	}
 }
 #endif
@@ -1450,6 +1491,13 @@ void recVU1_SQ() {
 	const u32 xyzw = W_XYZW(&VU1);
 	const s32 imm = decodeVuImm10(VU1.code);
 	const int64_t mem_off = static_cast<int64_t>(offsetof(VURegs, Mem));
+
+	// Phase 2: SQ reads VF[fs] from memory directly. Flush any deferred
+	// dirty lanes of fs so the inline Ldrs see coherent data. Drops the
+	// cache slot — fs is unlikely to be read again (typical SQ pattern is
+	// "transform → SQ → next vertex"). If kept-cached SQ becomes a hot
+	// pattern, switch to a flush-without-invalidate variant.
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	emitComputeVuMemOffset(it, imm);
 	armAsm->Ldr(x1, MemOperand(VU1_BASE_REG, mem_off));
@@ -1480,6 +1528,9 @@ void recVU1_SQD() {
 	const u32 xyzw = W_XYZW(&VU1);
 	const int64_t mem_off = static_cast<int64_t>(offsetof(VURegs, Mem));
 
+	// Phase 2: SQD reads VF[fs] from memory. Flush any deferred fs writes.
+	vfCacheFlushOne(static_cast<int>(fs));
+
 	emitBackupVI(it);
 
 	// L-1 fix (parallels VU0 D-4): decrement path uses the decremented value
@@ -1490,10 +1541,10 @@ void recVU1_SQD() {
 	// value for the address (matches interp — SQD Ft==0 still stores).
 	if (ft != 0)
 	{
-		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
-		armAsm->Sub(w2, w2, 1);
+		const auto srcVi = viCacheLoadResident(static_cast<int>(it));
+		armAsm->Sub(w2, srcVi, 1);
 		if (it != 0)
-			armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
+			viCacheStore(static_cast<int>(it), w2);
 		armAsm->Lsl(w0, w2, 4);
 		armAsm->And(w0, w0, 0x3FF0);
 	}
@@ -1529,6 +1580,9 @@ void recVU1_SQI() {
 	const u32 xyzw = W_XYZW(&VU1);
 	const int64_t mem_off = static_cast<int64_t>(offsetof(VURegs, Mem));
 
+	// Phase 2: SQI reads VF[fs] from memory. Flush any deferred fs writes.
+	vfCacheFlushOne(static_cast<int>(fs));
+
 	emitBackupVI(it);
 
 	emitComputeVuMemOffset(it, 0);
@@ -1553,9 +1607,9 @@ void recVU1_SQI() {
 	// is preserved (matches the L-1 fix pattern for SQD).
 	if (ft != 0 && it != 0)
 	{
-		armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
-		armAsm->Add(w2, w2, 1);
-		armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
+		const auto srcVi = viCacheLoadResident(static_cast<int>(it));
+		armAsm->Add(w2, srcVi, 1);
+		viCacheStore(static_cast<int>(it), w2);
 	}
 }
 #endif
@@ -1585,10 +1639,10 @@ void recVU1_ILW() {
 	// selection (_X ? 0 : _Y ? 4 : _Z ? 8 : 12). Only diverges from the
 	// previous last-set-wins sequential-if order when multiple lane bits
 	// are set (invalid encoding). Fixes L-2 / D-5 parallel.
-	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); viCacheStore(static_cast<int>(it), w2); }
 }
 #endif
 
@@ -1614,11 +1668,11 @@ void recVU1_ISW() {
 
 	// Source is VI[it].US[0] zero-extended; wrapper stores the u16 then zeros
 	// the next u16, which equals a 32-bit store of the zero-extended value.
-	armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
-	if (xyzw & 8) armAsm->Str(w2, MemOperand(x1,  0));
-	if (xyzw & 4) armAsm->Str(w2, MemOperand(x1,  4));
-	if (xyzw & 2) armAsm->Str(w2, MemOperand(x1,  8));
-	if (xyzw & 1) armAsm->Str(w2, MemOperand(x1, 12));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	if (xyzw & 8) armAsm->Str(regT, MemOperand(x1,  0));
+	if (xyzw & 4) armAsm->Str(regT, MemOperand(x1,  4));
+	if (xyzw & 2) armAsm->Str(regT, MemOperand(x1,  8));
+	if (xyzw & 1) armAsm->Str(regT, MemOperand(x1, 12));
 }
 #endif
 
@@ -1639,10 +1693,10 @@ void recVU1_ILWR() {
 	armAsm->Add(x1, x1, x0);
 
 	// First-set-wins priority (X>Y>Z>W) — matches x86 microVU's offsetSS.
-	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
-	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); armAsm->Strh(w2, MemOperand(VU1_BASE_REG, viOff(it))); }
+	if      (xyzw & 8) { armAsm->Ldrh(w2, MemOperand(x1,  0)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 4) { armAsm->Ldrh(w2, MemOperand(x1,  4)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 2) { armAsm->Ldrh(w2, MemOperand(x1,  8)); viCacheStore(static_cast<int>(it), w2); }
+	else if (xyzw & 1) { armAsm->Ldrh(w2, MemOperand(x1, 12)); viCacheStore(static_cast<int>(it), w2); }
 }
 #endif
 
@@ -1661,11 +1715,11 @@ void recVU1_ISWR() {
 
 	// Source is VI[it].US[0] zero-extended to 32 bits (interpreter stores the
 	// u16 then zeros the adjacent u16 — equivalent to a 32-bit zero-extended store).
-	armAsm->Ldrh(w2, MemOperand(VU1_BASE_REG, viOff(it)));
-	if (xyzw & 8) armAsm->Str(w2, MemOperand(x1,  0));
-	if (xyzw & 4) armAsm->Str(w2, MemOperand(x1,  4));
-	if (xyzw & 2) armAsm->Str(w2, MemOperand(x1,  8));
-	if (xyzw & 1) armAsm->Str(w2, MemOperand(x1, 12));
+	const auto regT = viCacheLoadResident(static_cast<int>(it));
+	if (xyzw & 8) armAsm->Str(regT, MemOperand(x1,  0));
+	if (xyzw & 4) armAsm->Str(regT, MemOperand(x1,  4));
+	if (xyzw & 2) armAsm->Str(regT, MemOperand(x1,  8));
+	if (xyzw & 1) armAsm->Str(regT, MemOperand(x1, 12));
 }
 #endif
 
@@ -1718,10 +1772,21 @@ static void emitHazardVIRead(const Register& dest, u32 reg, bool signed_read, co
 	const int64_t viregnum_off = static_cast<int64_t>(offsetof(VURegs, VIRegNumber));
 	const int64_t violdval_off = static_cast<int64_t>(offsetof(VURegs, VIOldValue));
 
+	// VI cache: under write-through, memory and the cached slot are coherent.
+	// Use the cached value when available. The signed path goes through
+	// viCacheLoadSignedInto so vireg==0 routes to Mov-wzr (vixl's Sxth
+	// rejects wzr-source); the unsigned path uses LoadResident directly
+	// since wzr is a valid source for Mov.
 	if (signed_read)
-		armAsm->Ldrsh(dest, MemOperand(VU1_BASE_REG, viOff(reg)));
+	{
+		viCacheLoadSignedInto(static_cast<int>(reg), dest);
+	}
 	else
-		armAsm->Ldrh(dest, MemOperand(VU1_BASE_REG, viOff(reg)));
+	{
+		const auto srcVi = viCacheLoadResident(static_cast<int>(reg));
+		if (dest.GetCode() != srcVi.GetCode())
+			armAsm->Mov(dest, srcVi);
+	}
 
 	a64::Label done;
 	armAsm->Ldrb(w_tmp, MemOperand(VU1_BASE_REG, vibackup_off));
@@ -1801,7 +1866,7 @@ static void emitBranchLinkWrite(u32 it)
 
 	// Normal link: (TPC+8)/8 — compile-time constant
 	armAsm->Mov(w5, link_normal);
-	armAsm->Strh(w5, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w5);
 	armAsm->B(&done);
 
 	// In-delay-slot link: (branchpc+8)/8 — runtime
@@ -1809,7 +1874,7 @@ static void emitBranchLinkWrite(u32 it)
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, branchpc_off));
 	armAsm->Add(w4, w4, 8);
 	armAsm->Lsr(w4, w4, 3);
-	armAsm->Strh(w4, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w4);
 
 	armAsm->Bind(&done);
 }
@@ -1841,8 +1906,8 @@ REC_VU1_LOWER_INTERP(JR)
 void recVU1_JR() {
 	const u32 is = W_Is(&VU1);
 	// bpc = VI[is].US[0] * 8  (interpreter does no hazard check here)
-	armAsm->Ldrh(w3, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Lsl(w3, w3, 3);
+	const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+	armAsm->Lsl(w3, srcVi, 3);
 	emitInlineSetBranch(w3);
 }
 #endif
@@ -1854,8 +1919,8 @@ void recVU1_JALR() {
 	const u32 is = W_Is(&VU1);
 	const u32 it = W_It(&VU1);
 	// Compute bpc into w3 first (preserved across link write — which only touches w4/w5)
-	armAsm->Ldrh(w3, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Lsl(w3, w3, 3);
+	const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+	armAsm->Lsl(w3, srcVi, 3);
 	if (it != 0)
 		emitBranchLinkWrite(it);
 	emitInlineSetBranch(w3);
@@ -1968,10 +2033,20 @@ void recVU1_MOVE() {
 	if (ft == 0) return;
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
-	if (xyzw & 8) { armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));  armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 0));  }
-	if (xyzw & 4) { armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));  armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 4));  }
-	if (xyzw & 2) { armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));  armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 8));  }
-	if (xyzw & 1) { armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 12)); armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12)); }
+	// Phase 2: route through the VF cache. Read fs into a resident NEON
+	// reg, defer-write into ft's cache slot. fs == ft is handled correctly
+	// — vfCacheStore detects same-slot and skips the redundant Mov when
+	// xyzw == 0xF (no-op), or merges into self for partial masks.
+	if (fs == 0)
+	{
+		// VF0 is hardwired {0,0,0,1} — load directly into a scratch then
+		// route through the cache for ft so the write is still deferred.
+		armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(0)));
+		vfCacheStore(static_cast<int>(ft), v0, static_cast<u8>(xyzw));
+		return;
+	}
+	const auto src = vfCacheLoadResident(static_cast<int>(fs));
+	vfCacheStore(static_cast<int>(ft), src, static_cast<u8>(xyzw));
 }
 #endif
 
@@ -1983,23 +2058,19 @@ void recVU1_MR32() {
 	if (ft == 0) return;
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
-	// Save VF[fs].x — needed for W component (W receives the original X).
-	armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
-	if (xyzw & 8) { // X = fs.y
-		armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));
-		armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 0));
+	// Phase 2: NEON rotate via Ext. MR32 maps {x,y,z,w} → {y,z,w,x}, which
+	// is exactly Ext v_out, v_in, v_in, #4 (rotate left by 4 bytes = 1 lane).
+	// Then write through the cache so subsequent reads of ft hit the slot.
+	if (fs == 0)
+	{
+		armAsm->Ldr(q0, MemOperand(VU1_BASE_REG, vfOff(0)));
+		armAsm->Ext(v1.V16B(), v0.V16B(), v0.V16B(), 4);
+		vfCacheStore(static_cast<int>(ft), v1, static_cast<u8>(xyzw));
+		return;
 	}
-	if (xyzw & 4) { // Y = fs.z
-		armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));
-		armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 4));
-	}
-	if (xyzw & 2) { // Z = fs.w
-		armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 12));
-		armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 8));
-	}
-	if (xyzw & 1) { // W = saved fs.x
-		armAsm->Str(w1, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
-	}
+	const auto src = vfCacheLoadResident(static_cast<int>(fs));
+	armAsm->Ext(v0.V16B(), src.V16B(), src.V16B(), 4);
+	vfCacheStore(static_cast<int>(ft), v0, static_cast<u8>(xyzw));
 }
 #endif
 
@@ -2011,12 +2082,12 @@ void recVU1_MFIR() {
 	if (ft == 0) return;
 	const u32 is = (VU1.code >> 11) & 0xF;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
-	// Sign-extend VI[is].SS[0] to 32 bits, broadcast to selected VF components.
-	armAsm->Ldrsh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
-	if (xyzw & 8) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 0));
-	if (xyzw & 4) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 4));
-	if (xyzw & 2) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 8));
-	if (xyzw & 1) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
+	// VI cache: read VI[is] sign-extended into w0, then Dup-broadcast to
+	// NEON for the VF write. viCacheLoadSignedInto handles vireg==0 (vixl's
+	// Sxth rejects wzr-source).
+	viCacheLoadSignedInto(static_cast<int>(is), w0);
+	armAsm->Dup(v0.V4S(), w0);
+	vfCacheStore(static_cast<int>(ft), v0, static_cast<u8>(xyzw));
 }
 #endif
 
@@ -2029,9 +2100,20 @@ void recVU1_MTIR() {
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 fsf = (VU1.code >> 21) & 0x3; // 0=x, 1=y, 2=z, 3=w
 	emitBackupVI(it);
-	// Load lower 16 bits of VF[fs].F[fsf] into VI[it].
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	// Phase 2: pull the lane from VF cache if VF[fs] is resident; otherwise
+	// fall back to the original Ldrh from memory. fs == 0 is the constant
+	// {0,0,0,1} — the original direct-Ldrh is fine.
+	if (fs == 0)
+	{
+		armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
+	}
+	else
+	{
+		const auto src = vfCacheLoadResident(static_cast<int>(fs));
+		armAsm->Umov(w0, src.V4S(), fsf);
+	}
+	// VI cache: write-through store of the extracted lane into VI[it].
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2042,12 +2124,10 @@ void recVU1_MFP() {
 	const u32 ft = (VU1.code >> 16) & 0x1F;
 	if (ft == 0) return;
 	const u32 xyzw = (VU1.code >> 21) & 0xF;
-	// Load P register (32-bit, stored as VI[REG_P].UL).
+	// Phase 2: load P, broadcast to NEON, defer-write through cache.
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, viOff(REG_P)));
-	if (xyzw & 8) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 0));
-	if (xyzw & 4) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 4));
-	if (xyzw & 2) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 8));
-	if (xyzw & 1) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
+	armAsm->Dup(v0.V4S(), w0);
+	vfCacheStore(static_cast<int>(ft), v0, static_cast<u8>(xyzw));
 }
 #endif
 
@@ -2076,7 +2156,7 @@ void recVU1_FSAND() {
 		armAsm->Mov(w1, imm);
 		armAsm->And(w0, w0, w1);
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2092,7 +2172,7 @@ void recVU1_FSEQ() {
 	armAsm->Mov(w1, imm);
 	armAsm->Cmp(w0, w1);
 	armAsm->Cset(w0, a64::eq);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2110,7 +2190,7 @@ void recVU1_FSOR() {
 		armAsm->Mov(w1, imm);
 		armAsm->Orr(w0, w0, w1);
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2137,10 +2217,10 @@ void recVU1_FMAND() {
 	const u32 it = W_It(&VU1);
 	if (it == 0) return;
 	const u32 is = W_Is(&VU1);
-	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(is)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
 	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(REG_MAC_FLAG)));
-	armAsm->And(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	armAsm->And(w0, regS, w1);
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2152,10 +2232,10 @@ void recVU1_FMEQ() {
 	if (it == 0) return;
 	const u32 is = W_Is(&VU1);
 	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(REG_MAC_FLAG)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Cmp(w0, w1);
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	armAsm->Cmp(w0, regS);
 	armAsm->Cset(w0, a64::eq);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2167,9 +2247,9 @@ void recVU1_FMOR() {
 	if (it == 0) return;
 	const u32 is = W_Is(&VU1);
 	armAsm->Ldrh(w0, MemOperand(VU1_BASE_REG, viOff(REG_MAC_FLAG)));
-	armAsm->Ldrh(w1, MemOperand(VU1_BASE_REG, viOff(is)));
-	armAsm->Orr(w0, w0, w1);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	const auto regS = viCacheLoadResident(static_cast<int>(is));
+	armAsm->Orr(w0, w0, regS);
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2187,7 +2267,7 @@ void recVU1_FCAND() {
 		armAsm->Tst(w0, w1);
 		armAsm->Cset(w0, a64::ne);
 	}
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(1)));
+	viCacheStore(1, w0);
 }
 #endif
 
@@ -2207,7 +2287,7 @@ void recVU1_FCEQ() {
 	armAsm->Mov(w1, imm);
 	armAsm->Cmp(w0, w1);
 	armAsm->Cset(w0, a64::eq);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(1)));
+	viCacheStore(1, w0);
 }
 #endif
 
@@ -2226,7 +2306,7 @@ void recVU1_FCOR() {
 	armAsm->Mov(w1, 0xFFFFFFu);
 	armAsm->Cmp(w0, w1);
 	armAsm->Cset(w0, a64::eq);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(1)));
+	viCacheStore(1, w0);
 }
 #endif
 
@@ -2251,7 +2331,7 @@ void recVU1_FCGET() {
 	if (it == 0) return;
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, viOff(REG_CLIP_FLAG)));
 	armAsm->And(w0, w0, 0xFFF);
-	armAsm->Strh(w0, MemOperand(VU1_BASE_REG, viOff(it)));
+	viCacheStore(static_cast<int>(it), w0);
 }
 #endif
 
@@ -2265,6 +2345,7 @@ REC_VU1_LOWER_INTERP(RINIT)
 void recVU1_RINIT() {
 	const u32 fs  = W_Fs(&VU1);
 	const u32 fsf = W_Fsf(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 	// VI[REG_R].UL = 0x3F800000 | (VF[fs].UL[fsf] & 0x007FFFFF)
 	armAsm->Mov(w0, 0x3F800000u);
 	armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
@@ -2280,6 +2361,8 @@ void recVU1_RGET() {
 	const u32 ft = W_Ft(&VU1);
 	if (ft == 0) return;
 	const u32 xyzw = W_XYZW(&VU1);
+	// Phase 2: drop any cached ft — direct Strs will overwrite memory.
+	vfCacheFlushOne(static_cast<int>(ft));
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, viOff(REG_R)));
 	if (xyzw & 8) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 0));
 	if (xyzw & 4) armAsm->Str(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 4));
@@ -2295,6 +2378,8 @@ void recVU1_RNEXT() {
 	const u32 ft = W_Ft(&VU1);
 	if (ft == 0) return;
 	const u32 xyzw = W_XYZW(&VU1);
+	// Phase 2: drop any cached ft — direct Strs will overwrite memory.
+	vfCacheFlushOne(static_cast<int>(ft));
 	// LFSR advance (mirrors AdvanceLFSR in VUops.cpp):
 	//   x = (R >> 4) & 1
 	//   y = (R >> 22) & 1
@@ -2322,6 +2407,7 @@ REC_VU1_LOWER_INTERP(RXOR)
 void recVU1_RXOR() {
 	const u32 fs  = W_Fs(&VU1);
 	const u32 fsf = W_Fsf(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 	// VI[REG_R].UL = 0x3F800000 | ((VI[REG_R].UL ^ VF[fs].UL[fsf]) & 0x007FFFFF)
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, viOff(REG_R)));
 	armAsm->Ldr(w1, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
@@ -2353,6 +2439,8 @@ void recVU1_RXOR() {
 // Clobbers w0/w1 (integer scratch) and s0/s1/s2 (FP scratch).
 static void emitEFUSumSquaresXYZ(u32 fs)
 {
+	// Phase 2: flush deferred fs writes — direct Ldr w of three lanes.
+	vfCacheFlushOne(static_cast<int>(fs));
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
 	emitVuDouble(w0, w1);
 	armAsm->Fmov(s0, w0);
@@ -2467,6 +2555,7 @@ REC_VU1_LOWER_INTERP(ESUM)
 void recVU1_ESUM() {
 	// p = fs.x + fs.y + fs.z + fs.w
 	const u32 fs = W_Fs(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
 	emitVuDouble(w0, w1);
@@ -2498,6 +2587,7 @@ void recVU1_ERCPR() {
 	// p = vuDouble(fs[fsf]); if (p != 0) p = 1/p
 	const u32 fs  = W_Fs(&VU1);
 	const u32 fsf = W_Fsf(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
 	emitVuDouble(w0, w1);
@@ -2520,6 +2610,7 @@ void recVU1_ESQRT() {
 	// p = vuDouble(fs[fsf]); if (p >= 0) p = sqrt(p)
 	const u32 fs  = W_Fs(&VU1);
 	const u32 fsf = W_Fsf(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
 	emitVuDouble(w0, w1);
@@ -2542,6 +2633,7 @@ void recVU1_ERSQRT() {
 	// if (p >= 0) { p = sqrt(p); if (p != 0) p = 1/p; }
 	const u32 fs  = W_Fs(&VU1);
 	const u32 fsf = W_Fsf(&VU1);
+	vfCacheFlushOne(static_cast<int>(fs));
 
 	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(fs) + fsf * 4));
 	emitVuDouble(w0, w1);

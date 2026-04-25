@@ -58,6 +58,59 @@ void vfCacheInvalidateAll();
 void vfCacheLoadInto(int vfreg, const vixl::aarch64::VRegister& scratch);
 vixl::aarch64::VRegister vfCacheLoadResident(int vfreg);
 
-// Wrapper for armEmitCall that invalidates the VF cache tracker first. Every
-// BL clobbers caller-saved NEON state, so the tracker must drop entries.
+// Phase 2: defer a write of `src_reg`'s `xyzw_mask` lanes into VF[vfreg].
+// The slot is force-loaded from memory if not fully valid. Result lanes
+// merge into the slot via per-lane Mov; the actual Str is deferred to
+// vfCacheFlushDirty / vfCacheFlushAndInvalidate.
+void vfCacheStore(int vfreg, const vixl::aarch64::VRegister& src_reg, u8 xyzw_mask);
+
+// Phase 2: emit Strs for every dirty slot's dirty lanes, then clear dirty
+// bits. Slots stay loaded so subsequent reads still hit. Used at sites
+// where memory must be coherent but NEON state is preserved.
+void vfCacheFlushDirty();
+
+// Phase 2: flush dirty lanes of one VF and drop its slot. Use around op
+// emitters that inline Ldr/Str VF memory directly (LQ/SQ family).
+void vfCacheFlushOne(int vfreg);
+
+// Phase 2: flush dirty lanes, then drop all tracker state. Used at BL sites
+// (NEON caller-saved) and at block epilogue (linked successors don't share
+// our compile-time slot map).
+void vfCacheFlushAndInvalidate();
+
+// Wrapper for armEmitCall that flushes deferred VF writes and drops the
+// cache tracker. Every BL clobbers caller-saved NEON state, AND the helper
+// may read VF memory directly.
 void emitVu1Call(const void* fn);
+
+// ============================================================================
+//  VI register cache (write-through, mirrors VF cache architecture)
+// ============================================================================
+// 7-slot GPR cache mapped to w9..w15. Caches VI registers across pairs to
+// eliminate redundant Ldrh/Strh memory traffic for IALU-heavy code (IADD,
+// IBxx, ILW, IADDI, etc.). Write-through — every store updates the slot AND
+// hits memory immediately. VI[0] is hardwired to 0; reads return wzr,
+// writes are dropped.
+//
+// All callers and BL paths must invalidate the tracker around BLs (the pool
+// is caller-saved). emitVu1Call already does this. Block start runs
+// viCacheReset; block end / pre-link runs viCacheInvalidateAll.
+
+namespace vixl::aarch64 { class Register; }
+
+void viCacheReset();
+void viCacheInvalidate(int vireg);
+void viCacheInvalidateAll();
+void viCacheFlushOne(int vireg);
+void viCacheFlushAndInvalidate();
+// Register parameters here are the universal vixl Register type configured
+// 32-bit (w-form). Globals like `w0`, `wzr` are of type `Register`, not
+// `WRegister` (vixl's WRegister/XRegister are constructor-only helpers; the
+// real register-object class is Register). All callers pass `wN` directly.
+void viCacheLoadInto(int vireg, const vixl::aarch64::Register& scratch);
+vixl::aarch64::Register viCacheLoadResident(int vireg);
+// Sign-extended read into `dest`. Use this when the consumer needs signed
+// semantics — vixl's Sxth asserts on wzr-source, so callers must NOT do
+// `Sxth(dest, viCacheLoadResident(reg))` directly when reg can be 0.
+void viCacheLoadSignedInto(int vireg, const vixl::aarch64::Register& dest);
+void viCacheStore(int vireg, const vixl::aarch64::Register& src_reg);
