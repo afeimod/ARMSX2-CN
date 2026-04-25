@@ -21,6 +21,7 @@
 #include "arm64/arm64Emitter.h"
 #include "arm64/AsmHelpers.h"
 #include "arm64/iVU1micro_arm64.h"
+#include "arm64/iVU1IR_arm64.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -153,6 +154,218 @@ static inline bool isVU1LowerNOP(u32 lower)
 	const u32 idx = (lower >> 6) & 0x1fu;
 	return idx == 0x0Eu || idx == 0x1Eu;
 }
+
+// ============================================================================
+//  microIR Pass 1 — analyze
+// ============================================================================
+//
+// See iVU1IR_arm64.h for the design rationale. This populates the per-pair
+// `microOp` overlay from the already-filled `_VURegsNum` arrays + raw
+// instruction words, plus the block-level summary flags. Cheap walk: O(N)
+// over numPairs (max 256), no BL emission, no allocation.
+//
+// Branch classification mirrors the LOWER_OPCODE[128] table in VUops.cpp:
+//   B    = 0x20, BAL  = 0x21
+//   JR   = 0x24, JALR = 0x25
+//   IBEQ = 0x28, IBNE = 0x29
+//   IBLTZ= 0x2C, IBGTZ= 0x2D, IBLEZ= 0x2E, IBGEZ= 0x2F
+//
+// Flag-reader ops (drive swapOps): all in the 0x10..0x1F range:
+//   FCEQ=0x10, FCAND=0x12, FCOR=0x13
+//   FSEQ=0x14, FSAND=0x16, FSOR=0x17
+//   FMEQ=0x18, FMAND=0x1A, FMOR=0x1B
+//   FCGET=0x1C
+// FCSET (0x11) and FSSET (0x15) are flag WRITERS, not readers — excluded
+// from the swapOps gate (the old port's mVUanalyzeSflag didn't set swapOps
+// for FSSET; it has its own isFSSET path).
+namespace armvu1ir
+{
+
+static inline BranchKind classifyBranch(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	switch (top7)
+	{
+		case 0x20u: return BR_B;
+		case 0x21u: return BR_BAL;
+		case 0x24u: return BR_JR;
+		case 0x25u: return BR_JALR;
+		case 0x28u: return BR_IBEQ;
+		case 0x29u: return BR_IBNE;
+		case 0x2Cu: return BR_IBLTZ;
+		case 0x2Du: return BR_IBGTZ;
+		case 0x2Eu: return BR_IBLEZ;
+		case 0x2Fu: return BR_IBGEZ;
+		default:    return BR_NONE;
+	}
+}
+
+// FSAND/FSEQ/FSOR/FMAND/FMEQ/FMOR/FCAND/FCEQ/FCOR/FCGET — the lower-pipe
+// flag-reader ops the old port marks with swapOps. FCSET / FSSET are flag
+// WRITERS and intentionally excluded; they don't have the same flag-instance
+// read hazard against an upper-side flag write.
+static inline bool isFlagReaderOp(u32 lower)
+{
+	const u32 top7 = lower >> 25;
+	switch (top7)
+	{
+		case 0x10u: // FCEQ
+		case 0x12u: // FCAND
+		case 0x13u: // FCOR
+		case 0x14u: // FSEQ
+		case 0x16u: // FSAND
+		case 0x17u: // FSOR
+		case 0x18u: // FMEQ
+		case 0x1Au: // FMAND
+		case 0x1Bu: // FMOR
+		case 0x1Cu: // FCGET
+			return true;
+		default:
+			return false;
+	}
+}
+
+static inline bool isFSSETOp(u32 lower)
+{
+	return (lower >> 25) == 0x15u;
+}
+
+void mvu1AnalyzeBlock(
+	u32 startPC,
+	u32 numPairs,
+	const _VURegsNum* uregs_data,
+	const _VURegsNum* lregs_data,
+	microIR& ir)
+{
+	ir.count   = numPairs;
+	ir.startPC = startPC;
+	ir.has_ebit          = false;
+	ir.has_branch        = false;
+	ir.has_dbit_or_tbit  = false;
+	ir.has_ibxx          = false;
+	ir.has_vi_backup_set = false;
+	ir.has_xgkick        = false;
+
+	// First sweep: per-pair classification + branch/EOB detection.
+	u32 pc = startPC;
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		const u32 upper = *reinterpret_cast<const u32*>(VU1.Micro + pc + 4);
+		const u32 lower = *reinterpret_cast<const u32*>(VU1.Micro + pc);
+		const _VURegsNum& uregs = uregs_data[i];
+		const _VURegsNum& lregs = lregs_data[i];
+
+		microOp& mo = ir.info[i];
+		mo.upper   = upper;
+		mo.lower   = lower;
+		mo.pc      = pc;
+
+		mo.iBit = ((upper >> 31) & 1) != 0;
+		mo.eBit = ((upper >> 30) & 1) != 0;
+		mo.dBit = ((upper >> 28) & 1) != 0;
+		mo.tBit = ((upper >> 27) & 1) != 0;
+		mo.mBit = ((upper >> 29) & 1) != 0;
+
+		mo.isEOB    = false;  // patched in below
+		mo.isBdelay = false;  // patched in below
+
+		// I-bit pairs have no lower instruction — keep all lower-derived
+		// flags zero. The CompileBlock pre-walk already left lregs_data[i]
+		// zeroed for these.
+		if (mo.iBit)
+		{
+			mo.branch              = BR_NONE;
+			mo.isNOP               = true;
+			mo.isFSSET             = false;
+			mo.isFlagRead          = false;
+			mo.isMemWrite          = false;
+			mo.isKick              = false;
+			mo.vf_write_collision  = false;
+			mo.vf_read_after_write = false;
+			mo.clip_write_collision  = false;
+			mo.clip_read_after_write = false;
+			mo.swapOps             = false;
+			mo.noWriteVF           = false;
+			mo.backupVF            = false;
+		}
+		else
+		{
+			mo.branch     = classifyBranch(lower);
+			mo.isFlagRead = isFlagReaderOp(lower);
+			mo.isFSSET    = isFSSETOp(lower);
+			mo.isMemWrite = isMemWriteOp(lower);
+			mo.isKick     = isXgkickOp(lower);
+			mo.isNOP      = isVU1LowerNOP(lower);
+
+			// VF hazard summary — matches the existing vf_hazard expression
+			// in CompileBlock around line 3270. uregs.VFwrite==0 means the
+			// upper isn't writing a VF; without that, no read-after-write
+			// or write-write conflict on VFs is possible.
+			const bool uWritesVF = (uregs.VFwrite != 0);
+			mo.vf_write_collision = uWritesVF && (lregs.VFwrite == uregs.VFwrite);
+			mo.vf_read_after_write = uWritesVF &&
+				(lregs.VFread0 == uregs.VFwrite || lregs.VFread1 == uregs.VFwrite);
+
+			// CLIP hazard summary — matches the vi_hazard expression.
+			const bool uWritesClip = (uregs.VIwrite & (1u << REG_CLIP_FLAG)) != 0;
+			mo.clip_write_collision  = uWritesClip && (lregs.VIwrite & (1u << REG_CLIP_FLAG));
+			mo.clip_read_after_write = uWritesClip && (lregs.VIread  & (1u << REG_CLIP_FLAG));
+
+			// swapOps mirrors mVUanalyzeS/M/Cflag: set when the lower is a
+			// flag-reader writing a non-zero VI target. The old port also
+			// gates this on `It != 0` (otherwise the op is folded to NOP);
+			// detect "non-zero VI target" via VIwrite bits, since for
+			// FCAND/FCOR/FCEQ the target is fixed to VI[1] (always non-zero
+			// in the VI-bitmask sense) and for FSAND/FMAND/FCGET the target
+			// is encoded in `_It_` and zero would zero out the VIwrite mask.
+			mo.swapOps = mo.isFlagRead && (lregs.VIwrite != 0);
+
+			// Reserved — not yet computed natively. Will be filled in when
+			// the doSwapOp / VF backup native fast-path lands.
+			mo.noWriteVF = false;
+			mo.backupVF  = false;
+
+			// Block-level summary updates.
+			if (mo.branch != BR_NONE)
+				ir.has_branch = true;
+			const u32 lopc = lower >> 25;
+			const bool is_IBxx =
+				lopc == 0x28u || lopc == 0x29u ||           // IBEQ, IBNE
+				(lopc >= 0x2Cu && lopc <= 0x2Fu);            // IBLTZ/GTZ/LEZ/GEZ
+			if (is_IBxx)
+				ir.has_ibxx = true;
+			if (mo.isKick)
+				ir.has_xgkick = true;
+			// Mirrors the block_has_vi_backup_set heuristic in CompileBlock:
+			// any lower writing VI[0..15] with a non-BRANCH pipe could call
+			// emitBackupVI. Overapproximated, soundness-safe.
+			if ((lregs.VIwrite & 0xFFFFu) != 0u && lregs.pipe != VUPIPE_BRANCH)
+				ir.has_vi_backup_set = true;
+		}
+
+		if (mo.eBit) ir.has_ebit         = true;
+		if (mo.dBit) ir.has_dbit_or_tbit = true;
+		if (mo.tBit) ir.has_dbit_or_tbit = true;
+
+		pc = (pc + 8) & (VU1_PROGSIZE - 1);
+	}
+
+	// Second sweep: mark isBdelay (the pair following any branch) and
+	// isEOB (the last pair in the block, plus the pair after a branch's
+	// delay slot if the delay also has an E-bit). The arm64 compiler
+	// terminates the block at the delay slot of a branch or at an E-bit
+	// pair, so isEOB is just `i == numPairs - 1`.
+	if (numPairs > 0)
+		ir.info[numPairs - 1].isEOB = true;
+
+	for (u32 i = 0; i + 1 < numPairs; i++)
+	{
+		if (ir.info[i].branch != BR_NONE)
+			ir.info[i + 1].isBdelay = true;
+	}
+}
+
+} // namespace armvu1ir
 
 // ============================================================================
 //  Rec emitter dispatch entry points (defined in iVU1Upper/Lower_arm64.cpp).
@@ -2344,42 +2557,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// zeroing the whole array.
 	std::memset(data_base, 0, data_size);
 
-	// Block-level flags driving per-emit gating below. All zero-cost to
-	// accumulate here — we already read `upper` / decode `lregs` for the
-	// regs pre-walk.
-	//   block_has_ebit         / block_has_dbit_or_tbit : step 13 countdown.
-	//   block_has_branch       : step 12 countdown. Mirrors the step-13 gate
-	//                            shape — VU1 has no per-pair budget abort,
-	//                            so any branch set in a prior block was
-	//                            countdowned to 0 in that same block before
-	//                            exit. "VU->branch == 0 at entry" therefore
-	//                            holds for any block whose own pre-walk sees
-	//                            no VUPIPE_BRANCH lower. Hazard fallback is
-	//                            invariant-preserving: vu1Exec interprets
-	//                            the whole pair (countdown included), so the
-	//                            native body resumes with coherent state.
-	//   block_has_ibxx         : only IBxx reads VIBackupCycles via
-	//                            emitHazardVIRead (JR/JALR skip the hazard
-	//                            path despite `VIread != 0`). Opcodes per
-	//                            VUops.cpp LOWER_OPCODE[128]: IBEQ=0x28,
-	//                            IBNE=0x29, IBLTZ=0x2C, IBGTZ=0x2D,
-	//                            IBLEZ=0x2E, IBGEZ=0x2F.
-	//   block_has_vi_backup_set: any lower whose emitter calls emitBackupVI
-	//                            (IADD/ISUB/IALU-imm/IAND/IOR/LQD/LQI/SQD/
-	//                            SQI/ILWR/MTIR). Overapproximated as
-	//                            "writes VI[0..15] and pipe != BRANCH" —
-	//                            that includes FSAND/FMAND/FCAND/FCGET
-	//                            (flag-test ops that write VI but never
-	//                            touch VIBackupCycles). False positives
-	//                            only keep step 6b's decrement emits, so
-	//                            the overapproximation is soundness-safe.
-	//                            BAL/JALR are the intentional exclusions
-	//                            (write VI without emitBackupVI).
-	bool block_has_ebit           = false;
-	bool block_has_dbit_or_tbit   = false;
-	bool block_has_branch         = false;
-	bool block_has_ibxx           = false;
-	bool block_has_vi_backup_set  = false;
+	// _VURegsNum pre-walk: decode each pair's upper/lower into the data
+	// section so subsequent passes have field-level operand info without
+	// re-decoding. This walk used to also accumulate block_has_* flags
+	// inline; that work has moved into microIR Pass 1 below (single source
+	// of truth — see iVU1IR_arm64.h).
 	{
 		u32 pc = startPC;
 		for (u32 i = 0; i < numPairs; i++)
@@ -2396,39 +2578,53 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				// Non-I-bit: lower field is an instruction.
 				VU1.code = lower;
 				VU1regs_LOWER_OPCODE[lower >> 25](&lregs_data[i]);
-
-				const u32 lopc = lower >> 25;
-				const bool is_IBxx =
-					lopc == 0x28u || lopc == 0x29u ||          // IBEQ, IBNE
-					(lopc >= 0x2Cu && lopc <= 0x2Fu);           // IBLTZ/GTZ/LEZ/GEZ
-				block_has_ibxx |= is_IBxx;
-
-				const _VURegsNum& lregs_i = lregs_data[i];
-				if ((lregs_i.VIwrite & 0xFFFFu) != 0u && lregs_i.pipe != VUPIPE_BRANCH)
-					block_has_vi_backup_set = true;
-
-				// Matches the per-pair `branch_pipe` test (line ~2521):
-				// !ibit && lregs.pipe == VUPIPE_BRANCH. The !ibit clause is
-				// implicit here — we're inside the `if (!ibit)` arm.
-				if (lregs_i.pipe == VUPIPE_BRANCH)
-					block_has_branch = true;
 			}
 			// I-bit pairs: lregs_data[i] stays zeroed (no lower instruction).
-
-			block_has_ebit         |= ((upper >> 30) & 1) != 0;
-			block_has_dbit_or_tbit |= ((upper >> 28) & 1) != 0;
-			block_has_dbit_or_tbit |= ((upper >> 27) & 1) != 0;
 
 			pc = (pc + 8) & (VU1_PROGSIZE - 1);
 		}
 	}
+
+	// microIR Pass 1 — derive per-pair `microOp` overlay from the just-
+	// populated _VURegsNum arrays. Also computes block-level summary flags
+	// (ir.has_ebit / has_branch / has_dbit_or_tbit / has_ibxx / has_vi_backup_set
+	// / has_xgkick) that were previously accumulated inline in the pre-walk
+	// above. Single source of truth for both per-pair and block-level
+	// derived state.
+	//
+	// Block-level flags drive per-emit gating below:
+	//   has_ebit / has_dbit_or_tbit : step 13 countdown.
+	//   has_branch : step 12 countdown. Mirrors the step-13 gate shape — VU1
+	//                has no per-pair budget abort, so any branch set in a
+	//                prior block was countdowned to 0 in that same block
+	//                before exit. "VU->branch == 0 at entry" therefore holds
+	//                for any block whose own pre-walk sees no VUPIPE_BRANCH
+	//                lower. Hazard fallback is invariant-preserving: vu1Exec
+	//                interprets the whole pair (countdown included), so the
+	//                native body resumes with coherent state.
+	//   has_ibxx : only IBxx reads VIBackupCycles via emitHazardVIRead
+	//              (JR/JALR skip the hazard path despite `VIread != 0`).
+	//              Opcodes per VUops.cpp LOWER_OPCODE[128]: IBEQ=0x28,
+	//              IBNE=0x29, IBLTZ=0x2C, IBGTZ=0x2D, IBLEZ=0x2E, IBGEZ=0x2F.
+	//   has_vi_backup_set : any lower whose emitter calls emitBackupVI
+	//              (IADD/ISUB/IALU-imm/IAND/IOR/LQD/LQI/SQD/SQI/ILWR/MTIR).
+	//              Overapproximated as "writes VI[0..15] and pipe != BRANCH"
+	//              — that includes FSAND/FMAND/FCAND/FCGET (flag-test ops
+	//              that write VI but never touch VIBackupCycles). False
+	//              positives only keep step 6b's decrement emits, so the
+	//              overapproximation is soundness-safe. BAL/JALR are the
+	//              intentional exclusions (write VI without emitBackupVI).
+	armvu1ir::microOp ir_info[VU1_MAX_BLOCK_PAIRS];
+	armvu1ir::microIR ir;
+	ir.info = ir_info;
+	armvu1ir::mvu1AnalyzeBlock(startPC, numPairs, uregs_data, lregs_data, ir);
 
 	// Step 6b (VIBackupCycles decrement) is observable only when some pair
 	// in the block reads VIBackupCycles — i.e., has an IBxx. If no IBxx,
 	// the per-pair decrement is dead within this block; the only concern
 	// is cross-block state leaking. Two cases:
 	//
-	//   (1) !block_has_ibxx && !block_has_vi_backup_set:
+	//   (1) !ir.has_ibxx && !ir.has_vi_backup_set:
 	//       No writes in this block either. Entry VIBackupCycles is at most
 	//       2 (max value set by emitBackupVI). numPairs >= 2 (AnalyzeBlock
 	//       always includes a delay-slot pair, and stalls can only increase
@@ -2437,13 +2633,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	//       decrements and clamping VIBackupCycles to 0 at block end is
 	//       equivalent behavior for any downstream block.
 	//
-	//   (2) !block_has_ibxx && block_has_vi_backup_set:
+	//   (2) !ir.has_ibxx && ir.has_vi_backup_set:
 	//       In-block write sets VIBackupCycles=2 at some pair. A clamp-to-0
 	//       at exit would drop a still-live hazard for the next block's
 	//       IBxx. Keep the per-pair decrement.
 	//
 	// So we elide only in case (1).
-	const bool skip_vibackup_decrement = !block_has_ibxx && !block_has_vi_backup_set;
+	const bool skip_vibackup_decrement = !ir.has_ibxx && !ir.has_vi_backup_set;
 
 	// --- Flag-deferral analysis ---
 	// For each FMAC pair, determine whether its MAC/STATUS flag updates are
@@ -3239,18 +3435,27 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	u32 pc = startPC;
 	for (u32 i = 0; i < numPairs; i++)
 	{
-		const u32 upper     = *reinterpret_cast<const u32*>(VU1.Micro + pc + 4);
-		const u32 lower     = *reinterpret_cast<const u32*>(VU1.Micro + pc);
-		const bool ibit     = (upper >> 31) & 1;
-		const bool ebit_set = (upper >> 30) & 1;
-		const bool dbit_set = (upper >> 28) & 1;
-		const bool tbit_set = (upper >> 27) & 1;
+		// Per-pair info is now sourced from microIR Pass 1: `ir_op` is the
+		// authoritative pre-decoded view of this pair (raw upper/lower words,
+		// e/i/m/t/d bits, branch kind, hazard summaries). The `upper` /
+		// `lower` / `ibit` / etc. locals below alias into ir_op so the
+		// existing emit body doesn't need to be retouched line-by-line.
+		const armvu1ir::microOp& ir_op = ir.info[i];
+		const u32  upper    = ir_op.upper;
+		const u32  lower    = ir_op.lower;
+		const bool ibit     = ir_op.iBit;
+		const bool ebit_set = ir_op.eBit;
+		const bool dbit_set = ir_op.dBit;
+		const bool tbit_set = ir_op.tBit;
 		const _VURegsNum& uregs = uregs_data[i];
 		const _VURegsNum& lregs = lregs_data[i];
 
 		// Hoisted up-front — consumed by both step 8 branch-in-ebit-delay
-		// suppression and step 11b D/T branch-context suppression.
-		const bool branch_pipe = !ibit && (lregs.pipe == VUPIPE_BRANCH);
+		// suppression and step 11b D/T branch-context suppression. Equivalent
+		// to the original `!ibit && (lregs.pipe == VUPIPE_BRANCH)` test:
+		// Pass 1's classifyBranch returns BR_NONE for any I-bit pair (which
+		// has no lower instruction) and for non-branch lower opcodes.
+		const bool branch_pipe = ir_op.branch != armvu1ir::BR_NONE;
 
 		// Detect every VF/VI hazard that _vu1Exec (VU1microInterp.cpp:108-163)
 		// resolves via save/restore or discard. The native machinery does
@@ -3267,14 +3472,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// Without the discard cases, the JIT runs upper then lower
 		// sequentially and lower's write silently clobbers upper's FMAC
 		// result whenever both target the same VF.
-		const bool vf_hazard = !ibit && uregs.VFwrite != 0 &&
-			(lregs.VFwrite == uregs.VFwrite ||
-			 lregs.VFread0 == uregs.VFwrite ||
-			 lregs.VFread1 == uregs.VFwrite);
-		const bool vi_hazard = !ibit &&
-			(uregs.VIwrite & (1u << REG_CLIP_FLAG)) &&
-			((lregs.VIwrite & (1u << REG_CLIP_FLAG)) ||
-			 (lregs.VIread  & (1u << REG_CLIP_FLAG)));
+		//
+		// Hazard detection moved to microIR Pass 1 (mvu1AnalyzeBlock). The
+		// expressions below are equivalent to the inline version they replaced
+		// — Pass 1 guards each flag with `!iBit`, so the I-bit short-circuit
+		// is implicit. Single source of truth lets follow-on optimizations
+		// (e.g., XYZW-aware refinement, doSwapOp native fast-path) land at
+		// the IR layer instead of duplicating the gate here.
+		const bool vf_hazard = ir_op.vf_write_collision || ir_op.vf_read_after_write;
+		const bool vi_hazard = ir_op.clip_write_collision || ir_op.clip_read_after_write;
 
 		if (vf_hazard || vi_hazard)
 		{
@@ -3340,7 +3546,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				// The actual kick fires one pair later via step 15 (or
 				// step 8a on back-to-back), matching the 1-pair delay
 				// semantics used by the normal XGKICK capture path.
-				if (isXgkickOp(lower))
+				if (ir_op.isKick)
 				{
 					armAsm->Mov(x0, VU1_BASE_REG);
 					emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_capture_from_interp));
@@ -3500,7 +3706,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			//     pending store. Under xgkickhack the scratch is unused
 			//     (hack path writes VU1.xgkick* directly and the capture
 			//     helper flushes prior via _vuXGKICKTransfer(0, true) itself).
-			if (!xgkickhack && pending_xgkick_fire && isXgkickOp(lower))
+			if (!xgkickhack && pending_xgkick_fire && ir_op.isKick)
 			{
 				armAsm->Mov(x0, VU1_BASE_REG);
 				emitVu1Call(reinterpret_cast<const void*>(vu1_XGKICK_fire_deferred));
@@ -3529,7 +3735,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// flush x21/x24/x25 before the BL and reload after. Non-hack
 			// XGKICK (vu1_XGKICK) only writes s_vu1_pending_xgkick_addr,
 			// so no flush is needed there.
-			const bool hack_xgkick_here = xgkickhack && isXgkickOp(lower);
+			const bool hack_xgkick_here = xgkickhack && ir_op.isKick;
 			if (hack_xgkick_here)
 			{
 				emitFlushCycleReg(cycle_off);
@@ -3582,12 +3788,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 
 		// 12. Branch countdown (inline).
 		//
-		// Gated on block_has_branch: if no pair in this block has a
+		// Gated on ir.has_branch: if no pair in this block has a
 		// VUPIPE_BRANCH lower, VU->branch is never written here, and any
 		// prior block's branch was countdowned to 0 in that block (VU1 has
 		// no per-pair budget abort; every block runs to natural completion).
 		// Same correctness shape as step 13's ebit gate.
-		if (block_has_branch)
+		if (ir.has_branch)
 		{
 			Label skip_branch;
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, branch_off));
@@ -3619,7 +3825,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// catches termination before reaching this per-pair body. So
 		// "ebit=0 at block entry" holds for any block that actually
 		// executes its per-pair loop.
-		if (block_has_ebit || block_has_dbit_or_tbit)
+		if (ir.has_ebit || ir.has_dbit_or_tbit)
 		{
 			Label skip_ebit;
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ebit_off));
@@ -3664,7 +3870,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				pending_xgkick_fire = false;
 			}
 			// Re-arm for the next pair if this one captured an XGKICK.
-			if (!ibit && isXgkickOp(lower))
+			// (ir_op.isKick is already gated on !iBit by Pass 1.)
+			if (ir_op.isKick)
 				pending_xgkick_fire = true;
 		}
 

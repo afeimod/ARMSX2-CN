@@ -1097,6 +1097,7 @@ set(pcsx2arm64Headers
 	arm64/intNativeOps.h
 	arm64/iVU0micro_arm64.h
 	arm64/iVU1micro_arm64.h
+	arm64/iVU1IR_arm64.h
 	arm64/iDMAC_arm64.h
 	arm64/iR3000A_arm64.h
 )
