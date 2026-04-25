@@ -287,6 +287,50 @@ struct VU1BlockEntry
 // only when the EE uploads different bytecode programs to the same PC.
 // Front of the deque is the MRU variant — findVariant bubbles hits forward.
 static std::deque<VU1BlockEntry*> s_variants[VU1_NUM_SLOTS];
+
+// Reverse index: for each VU1 slot S, the list of variants that have at
+// least one exit targeting S. Lets patchWaitingPredecessors and Clear()
+// skip the 2048-slot full walk and look at only the relevant predecessors.
+//
+// A variant is added once per UNIQUE target_pc among its exits[] (so a
+// self-loop or cond-branch where both exits hit the same slot is recorded
+// once, not twice). target_pc is immutable for the variant's lifetime, so
+// entries never need updating until deleteAllVariants() — the only path
+// that frees variants — wipes both s_variants and s_waitingForSlot.
+static std::vector<VU1BlockEntry*> s_waitingForSlot[VU1_NUM_SLOTS];
+
+static void indexVariantExits(VU1BlockEntry* blk)
+{
+	for (u32 e = 0; e < blk->num_exits; e++)
+	{
+		const u32 target_pc = blk->exits[e].target_pc;
+		if (target_pc == LINK_TARGET_NONE)
+			continue;
+		bool dup = false;
+		for (u32 j = 0; j < e; j++)
+		{
+			if (blk->exits[j].target_pc == target_pc)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (dup)
+			continue;
+		const u32 target_slot = target_pc / 8;
+		if (target_slot < VU1_NUM_SLOTS)
+			s_waitingForSlot[target_slot].push_back(blk);
+	}
+}
+
+// Per-slot cap on the variant deque. Without this, a slot grows unboundedly
+// as the EE uploads slightly-different VU bytecode (animated UI, particles,
+// per-frame matrix updates) — each unique snapshot becomes a new permanent
+// variant. findVariant's linear scan + memcmps then dominate dispatch over
+// time, producing the "main menu sits at 70% then climbs to 100% VU usage"
+// drift. 8 covers any sane number of distinct programs at one PC; the LRU
+// is evicted via destroyVariant when this cap is hit.
+static constexpr u32 kVariantCapPerSlot = 8;
 static u8* s_code_base  = nullptr;
 static u8* s_code_write = nullptr;
 static u8* s_code_end   = nullptr;
@@ -828,6 +872,61 @@ static void unpatchLinkSite(LinkExit& exit)
 	patchLinkSite(exit, exit.fallthrough);
 }
 
+// Detach and free a single variant. Caller has already removed it from
+// s_variants[my_slot]; this routine drops it from the reverse index and
+// releases heap allocations. Compiled code in the JIT buffer is left in
+// place — it'll get reclaimed at the next deleteAllVariants (code-buffer
+// full reset / Reset / Shutdown).
+//
+// Predecessors that had patches pointing at this variant's linkEntry get
+// reverted to fall-through so they don't jump into code that may be
+// overwritten by a future compile occupying the same buffer space. After
+// this routine returns the slot's `patchWaitingPredecessors` will re-link
+// any matching exits to the new MRU variant at my_slot.
+static void destroyVariant(VU1BlockEntry* blk, u32 my_slot)
+{
+	if (blk->linkEntry && my_slot < VU1_NUM_SLOTS)
+	{
+		for (VU1BlockEntry* pred : s_waitingForSlot[my_slot])
+		{
+			if (pred == blk)
+				continue;
+			for (u32 e = 0; e < pred->num_exits; e++)
+			{
+				LinkExit& exit = pred->exits[e];
+				if (exit.current_target == blk->linkEntry)
+					unpatchLinkSite(exit);
+			}
+		}
+	}
+
+	for (u32 e = 0; e < blk->num_exits; e++)
+	{
+		const u32 target_pc = blk->exits[e].target_pc;
+		if (target_pc == LINK_TARGET_NONE)
+			continue;
+		bool dup = false;
+		for (u32 j = 0; j < e; j++)
+		{
+			if (blk->exits[j].target_pc == target_pc)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (dup)
+			continue;
+		const u32 target_slot = target_pc / 8;
+		if (target_slot >= VU1_NUM_SLOTS)
+			continue;
+		auto& vec = s_waitingForSlot[target_slot];
+		vec.erase(std::remove(vec.begin(), vec.end(), blk), vec.end());
+	}
+
+	delete[] blk->snapshot;
+	delete blk;
+}
+
 // Content-keyed variant lookup. Scans the slot's deque for a variant whose
 // snapshot matches the live VU1.Micro bytes at `pc`; MRU-bubbles a hit to
 // the front so repeated dispatches find it in one compare. Miss → nullptr.
@@ -902,31 +1001,33 @@ static u8* vu1_indirect_dispatch(u32 tpc)
 	return blk ? blk->linkEntry : nullptr;
 }
 
-// Called right after a block compiles at `my_pc` with `my_linkEntry`: scan
-// all variants for predecessors whose exit targets `my_pc` and patch them
-// forward. Each variant's exits[] are independent — a pred variant compiled
-// against one bytecode may link to a completely different target variant
-// than another pred compiled against a different bytecode at the same PC.
+// Called right after a block compiles at `my_pc` with `my_linkEntry`: walk
+// the reverse index of variants whose exits target this slot and patch
+// them forward. Each variant's exits[] are independent — a pred variant
+// compiled against one bytecode may link to a completely different target
+// variant than another pred compiled against a different bytecode at the
+// same PC, hence the per-exit target_pc check inside the inner loop.
 //
-// Cost: O(total_variants * max_exits) per compile. In steady state most
-// slots carry 1 variant, so this is comparable to the pre-deque cost.
+// Cost: O(predecessors_of_my_slot * max_exits). For typical menu/UI VU
+// programs with 1-3 exits per block, this is dozens to hundreds of pairs,
+// not the millions the pre-index version touched as variants accumulated.
 static void patchWaitingPredecessors(u32 my_pc, u8* my_linkEntry)
 {
 	if (!my_linkEntry)
 		return;
-	for (u32 i = 0; i < VU1_NUM_SLOTS; i++)
+	const u32 my_slot = my_pc / 8;
+	if (my_slot >= VU1_NUM_SLOTS)
+		return;
+	for (VU1BlockEntry* pred : s_waitingForSlot[my_slot])
 	{
-		for (VU1BlockEntry* pred : s_variants[i])
+		for (u32 e = 0; e < pred->num_exits; e++)
 		{
-			for (u32 e = 0; e < pred->num_exits; e++)
+			LinkExit& exit = pred->exits[e];
+			if (exit.patch_site != nullptr
+			    && exit.target_pc == my_pc
+			    && exit.current_target != my_linkEntry)
 			{
-				LinkExit& exit = pred->exits[e];
-				if (exit.patch_site != nullptr
-				    && exit.target_pc == my_pc
-				    && exit.current_target != my_linkEntry)
-				{
-					patchLinkSite(exit, my_linkEntry);
-				}
+				patchLinkSite(exit, my_linkEntry);
 			}
 		}
 	}
@@ -1504,6 +1605,7 @@ static void deleteAllVariants()
 			delete blk;
 		}
 		s_variants[i].clear();
+		s_waitingForSlot[i].clear();
 	}
 }
 
@@ -3247,7 +3349,25 @@ void recArmVU1::Execute(u32 cycles)
 			// returns the prologue address for blk->codeEntry.
 			blk->codeEntry = CompileBlock(pc, numPairs, blk);
 
-			s_variants[slot].push_front(blk);
+			// Cap the per-slot deque. Evict the LRU (back) before pushing
+			// the new variant; destroyVariant unpatches any predecessors
+			// that were linked to the evicted variant's linkEntry (they
+			// fall through, then patchWaitingPredecessors below re-links
+			// them to the new variant if the target_pc still matches).
+			//
+			// Eviction must happen BEFORE indexVariantExits(blk) so the
+			// destroyVariant walk of s_waitingForSlot[slot] doesn't see
+			// the new variant as a predecessor candidate of itself.
+			auto& deque = s_variants[slot];
+			if (deque.size() >= kVariantCapPerSlot)
+			{
+				VU1BlockEntry* victim = deque.back();
+				deque.pop_back();
+				destroyVariant(victim, slot);
+			}
+
+			deque.push_front(blk);
+			indexVariantExits(blk);
 
 			// Phase 2 block linking:
 			//   1. Forward link — if this block's static exit target has
@@ -3300,18 +3420,20 @@ void recArmVU1::Clear(u32 addr, u32 size)
 	if (first >= VU1_NUM_SLOTS)
 		return;
 
-	// Block linking invalidation: walk every cached variant and un-patch
-	// any exit that currently jumps into the cleared range. Without this,
-	// a predecessor would still hold a dangling `B <freed_code>` to a
-	// variant whose bytecode is about to be overwritten and take it on
-	// next execution — executing code compiled against stale micro.
+	// Block linking invalidation: walk only the variants whose exits
+	// target slots in the cleared range, via the reverse index. Without
+	// this, a predecessor would still hold a dangling `B <freed_code>`
+	// to a variant whose bytecode is about to be overwritten and take
+	// it on next execution — executing code compiled against stale micro.
 	//
 	// Phase 3: each predecessor may have up to 2 active exits (conditional
 	// branches link both taken and not-taken). Iterate pred->exits[] up
-	// to num_exits.
-	for (u32 i = 0; i < VU1_NUM_SLOTS; i++)
+	// to num_exits and re-check target_pc per-exit, since a multi-exit
+	// variant indexed under one cleared slot may still have a second exit
+	// pointing OUTSIDE [first, clamped_last) which must not be unpatched.
+	for (u32 ts = first; ts < clamped_last; ts++)
 	{
-		for (VU1BlockEntry* pred : s_variants[i])
+		for (VU1BlockEntry* pred : s_waitingForSlot[ts])
 		{
 			for (u32 e = 0; e < pred->num_exits; e++)
 			{

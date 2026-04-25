@@ -16,6 +16,12 @@
 #define XMMTYPE_FPACC  7
 #define XMMTYPE_VFREG  8
 
+// Shared with x86 iCore.h's x86type enum — needed by recBackpropCOP2's
+// VI register tracking. Value matches the X86TYPE_VIREG enum entry.
+#ifndef X86TYPE_VIREG
+#define X86TYPE_VIREG 3
+#endif
+
 #define XMMGPR_LO  33
 #define XMMGPR_HI  32
 #define XMMFPU_ACC 32

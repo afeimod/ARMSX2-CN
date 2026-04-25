@@ -1087,6 +1087,7 @@ set(pcsx2arm64Sources
 	arm64/iDMAC_arm64.cpp
 	arm64/iR3000A_arm64.cpp
 	arm64/iR3000Atables_arm64.cpp
+	arm64/iR5900Backprop_arm64.cpp
 	x86/BaseblockEx.cpp
 	)
 

@@ -22,19 +22,14 @@
 
 #include "arm64/TraceBlocks.h"
 
-// EEINST: per-instruction info used by the recompiler for register liveness analysis.
-// This mirrors the definition in x86/iCore.h but avoids dragging in x86 register allocator deps.
-struct EEINST
-{
-	u16 info;
-	u8 regs[34];
-	u8 fpuregs[33];
-	u8 vfregs[34];
-	u8 viregs[16];
-	u8 writeType[3], writeReg[3];
-	u8 readType[4], readReg[4];
-};
-extern EEINST* g_pCurInstInfo;
+// EEINST struct + EEINST_USED/LIVE bits + g_pCurInstInfo extern declaration.
+// Shared with the IOP recompiler — iRecAnalysis.h is the arm64-friendly
+// version of the x86/iCore.h analysis pieces (no x86emitter dependency).
+#include "iRecAnalysis.h"
+
+// Defined in arm64/iR5900Backprop_arm64.cpp (a copy of x86/iR5900Analysis.cpp's
+// machinery, since that TU drags in x86emitter.h via iR5900Analysis.h).
+extern void recBackpropBSC(u32 code, EEINST* prev, EEINST* pinst);
 
 #include "common/AlignedMalloc.h"
 #include "common/Console.h"
@@ -97,6 +92,11 @@ static u8* recPtr = nullptr;
 static u8* recPtrEnd = nullptr;
 EEINST* s_pInstCache = nullptr;
 static u32 s_nInstCacheSize = 0;
+// Past-the-end pointer set after the backprop prep pass — points to the
+// sentinel EEINST whose `regs[]` is LIVE-filled but has no USED bits. The
+// Belady evictor uses this to bound its forward next-use scan; reads
+// past this point would hit memory left over from a previous block.
+static EEINST* s_pInstCacheLast = nullptr;
 
 static BASEBLOCK* s_pCurBlock = nullptr;
 static BASEBLOCKEX* s_pCurBlockEx = nullptr;
@@ -288,6 +288,23 @@ static u32 g_armGprUseClock;
 static constexpr u32 kArmGprHighPrioMask = (0xFEu) | (1u << 24) | (1u << 25);
 static constexpr u32 kArmGprHighPrioBonus = 1u << 24;
 
+// Returns true if the cached value of MIPS GPR `g` is dead at g_pCurInstInfo
+// (the LIVE bit on the state coming INTO the current emit point is clear,
+// meaning the next event for this reg is either nothing or a write that
+// discards the cached value). Eviction can drop these slots without
+// flushing dirty contents — a free win.
+//
+// Conservative when no analysis is available: returns false so the LRU
+// fallback path drives the choice. False if `g` is out of range.
+static bool armGprIsDeadAt(int g)
+{
+	if (g <= 0 || g >= 32)
+		return false;
+	if (!g_pCurInstInfo || !s_pInstCacheLast)
+		return false;
+	return (g_pCurInstInfo->regs[g] & EEINST_LIVE) == 0;
+}
+
 // Pool of caller-saved host regs available for cache slots. Order is the
 // allocation order (front-first). Indices into this array are what get
 // stored in g_armGprCachePoolUsed.
@@ -313,9 +330,34 @@ static int armGprPoolIndex(u8 host_code)
 	return -1;
 }
 
-// Acquire a free pool slot, or evict the LRU cached MIPS GPR (high-priority
-// regs biased to stay resident). Returns the host register code. Marks the
-// index used in g_armGprCachePoolUsed.
+// Acquire a free pool slot, or evict a victim. Eviction policy:
+//
+//   1. Dead-reg first: if any cached slot's MIPS reg is provably dead at
+//      the current emit point (backprop says LIVE-clear coming in — the
+//      next event is either a write that discards the value or block
+//      end), prefer that slot. Picking the dead reg avoids penalising a
+//      live one whose value would have to be reloaded later. Pick the
+//      LRU dead slot for determinism.
+//
+//      The dirty flush is NOT skipped even when LIVE-clear: iRecAnalysis.h
+//      keeps EE_WRITE_DEAD_VALUES=1 with a "tends to break stuff at the
+//      moment" note, so we mirror that caution. The win here is the
+//      eviction *choice*, not avoiding the spill.
+//
+//   2. Operand protection: skip slots whose last_use stamp falls within
+//      kProtectRecent ticks of g_armGprUseClock. Those were allocated as
+//      operands of the in-flight op, and reusing their host code for a
+//      different MIPS reg would alias the XRegister returned earlier in
+//      the same op.
+//
+//   3. LRU + priority among the remaining slots. Score = last_use +
+//      kArmGprHighPrioBonus for hot ABI regs (kArmGprHighPrioMask). Lowest
+//      score loses.
+//
+//   4. If every slot is protected (would only happen if the in-flight op
+//      asks for more operands than the pool can hold), fall back to LRU
+//      ignoring the protection band — a correctness fault either way, but
+//      LRU at least picks the oldest slot.
 static u8 armGprAcquirePoolSlot()
 {
 	for (int i = 0; i < kArmGprCachePoolSize; i++)
@@ -328,25 +370,64 @@ static u8 armGprAcquirePoolSlot()
 		}
 	}
 
-	// Pool full — pick the least-recently-used cached slot, biased against
-	// high-priority MIPS regs (see kArmGprHighPrioMask). Score is the LRU
-	// stamp plus a priority bonus; lowest score loses. Handing the freed
-	// host code straight to the new owner means the pool bit stays set.
+	// 1. Dead-reg first. Pick the LRU dead slot.
 	int victim = -1;
-	u64 best_score = ~0ull;
-	for (int g = 1; g < 32; g++)
 	{
-		const ArmGprCacheSlot& slot = g_armGprCache[g];
-		if (slot.host_code == 0xff)
-			continue;
-		if (armGprPoolIndex(slot.host_code) < 0)
-			continue;
-		const u64 bonus = (kArmGprHighPrioMask & (1u << g)) ? kArmGprHighPrioBonus : 0u;
-		const u64 score = static_cast<u64>(slot.last_use) + bonus;
-		if (score < best_score)
+		u32 oldest = UINT32_MAX;
+		for (int g = 1; g < 32; g++)
 		{
-			best_score = score;
-			victim = g;
+			const ArmGprCacheSlot& slot = g_armGprCache[g];
+			if (slot.host_code == 0xff) continue;
+			if (armGprPoolIndex(slot.host_code) < 0) continue;
+			if (!armGprIsDeadAt(g)) continue;
+			if (slot.last_use < oldest)
+			{
+				oldest = slot.last_use;
+				victim = g;
+			}
+		}
+	}
+
+	// 2 + 3. LRU + priority among live slots not currently held as
+	// operands of the in-flight op. kProtectRecent of 4 covers the
+	// typical 1-3 reg reads + 1 reg write of an EE op with headroom.
+	if (victim < 0)
+	{
+		constexpr u32 kProtectRecent = 4;
+		const u32 protect_floor = (g_armGprUseClock > kProtectRecent)
+			? (g_armGprUseClock - kProtectRecent) : 0;
+
+		u64 best_score = ~0ull;
+		for (int g = 1; g < 32; g++)
+		{
+			const ArmGprCacheSlot& slot = g_armGprCache[g];
+			if (slot.host_code == 0xff) continue;
+			if (armGprPoolIndex(slot.host_code) < 0) continue;
+			if (slot.last_use >= protect_floor) continue;
+			const u64 bonus = (kArmGprHighPrioMask & (1u << g)) ? kArmGprHighPrioBonus : 0u;
+			const u64 score = static_cast<u64>(slot.last_use) + bonus;
+			if (score < best_score)
+			{
+				best_score = score;
+				victim = g;
+			}
+		}
+	}
+
+	// 4. Every slot is protected — fall back to plain LRU.
+	if (victim < 0)
+	{
+		u32 oldest = UINT32_MAX;
+		for (int g = 1; g < 32; g++)
+		{
+			const ArmGprCacheSlot& slot = g_armGprCache[g];
+			if (slot.host_code == 0xff) continue;
+			if (armGprPoolIndex(slot.host_code) < 0) continue;
+			if (slot.last_use < oldest)
+			{
+				oldest = slot.last_use;
+				victim = g;
+			}
 		}
 	}
 
@@ -1629,7 +1710,13 @@ StartRecomp:
 		}
 	}
 
-	// Build instruction info cache
+	// Build instruction info cache + run backprop liveness analysis. The
+	// pass mirrors x86 ix86-32/iR5900.cpp:2532-2545: walk the block in
+	// REVERSE from a past-the-end sentinel (all regs assumed live across
+	// the block boundary), back-propagating USED/LIVE/LASTUSE bits per
+	// MIPS register. After this, s_pInstCache[k] holds the state coming
+	// INTO instruction k-1 (matches the x86 g_pCurInstInfo convention),
+	// which the GPR cache evictor consults for next-use info.
 	{
 		u32 numinsts = (s_nEndBlock - startpc) / 4;
 		if (numinsts + 1 > s_nInstCacheSize)
@@ -1640,13 +1727,17 @@ StartRecomp:
 		}
 		memset(s_pInstCache, 0, sizeof(EEINST) * (numinsts + 1));
 
-		// Instruction analysis (size will be set after compilation, matching x86)
-		g_pCurInstInfo = s_pInstCache;
-		for (u32 j = startpc; j < s_nEndBlock; j += 4)
+		EEINST* pcur = s_pInstCache + numinsts;
+		_recClearInst(pcur);
+		pcur->info = 0;
+		s_pInstCacheLast = pcur;
+
+		for (s32 i = static_cast<s32>(s_nEndBlock); i != static_cast<s32>(startpc); i -= 4)
 		{
-			g_pCurInstInfo++;
-			cpuRegs.code = *(u32*)PSM(j);
-			// Could add instruction analysis here for register liveness, etc.
+			cpuRegs.code = *(u32*)PSM(i - 4);
+			pcur[-1] = pcur[0];
+			recBackpropBSC(cpuRegs.code, pcur - 1, pcur);
+			pcur--;
 		}
 	}
 
