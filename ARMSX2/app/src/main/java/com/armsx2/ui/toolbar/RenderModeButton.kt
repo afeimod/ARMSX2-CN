@@ -12,7 +12,11 @@ class RenderModeButton : ToolbarButton() {
     // text show black boxes when AccBlendLevel is Full). The VULKAN_HW enum entry and the
     // VK HW branches below are intentionally left commented out so this can be re-enabled
     // once the HW blend issue is fixed.
-    var renderMode = RenderMode.VULKAN_SW
+    //
+    // Initial state matches the C++ Auto-resolved renderer on Android (OpenGL HW — see
+    // GSUtil::GetPreferredRenderer). Keeping these in sync means the button label is
+    // accurate at startup; cycling goes OPENGL → VULKAN_SW → OPENGL.
+    var renderMode = RenderMode.OPENGL
 
     override var icon = mutableStateOf<ImageVector?>(LineAwesomeIcons.Dashcube)
     override fun isVisible(): Boolean {

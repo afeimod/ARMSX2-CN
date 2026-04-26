@@ -122,10 +122,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
         si.SetStringValue("SPU2/Output", "Backend", "Oboe");
         si.SetBoolValue("EmuCore", "EnableFastBoot", false);
 
-        // VK HW is temporarily disabled (blending bugs). Force the default renderer to SW
-        // so the SW renderer is used while keeping Vulkan as the display backend on Android.
-        // Restore Auto (or VK) once VK HW blending is fixed.
-        si.SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::SW));
+        // Renderer is left at Auto (Pcsx2Config::DEFAULT_HW_RENDERER) so
+        // GSUtil::GetPreferredRenderer chooses at runtime — on Android that
+        // resolves to OpenGL HW. SW + VK can still be picked via the
+        // RenderModeButton (cycles VULKAN_SW ↔ OPENGL). VK HW is intentionally
+        // not in the cycle while its blending bugs remain unresolved.
 
         // none of the bindings are going to resolve to anything
         Pad::ClearPortBindings(si, 0);
