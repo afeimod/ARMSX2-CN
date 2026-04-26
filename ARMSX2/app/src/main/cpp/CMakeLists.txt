@@ -107,6 +107,13 @@ if(NOT ANDROID AND UNIX AND NOT APPLE)
 	target_compile_definitions(armsx2 PRIVATE
 		ARMSX2_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 	)
+
+	if(USE_OPENGL)
+		# Force libEGL into DT_NEEDED. The OpenGL renderer otherwise dlopens
+		# libEGL lazily, which trips LD_PRELOAD-based GL interposers (MangoHud)
+		# that index the EGL symbol table at process start.
+		target_link_libraries(armsx2 PRIVATE -Wl,--no-as-needed EGL -Wl,--as-needed)
+	endif()
 endif()
 
 # Updater is Windows only for now.
