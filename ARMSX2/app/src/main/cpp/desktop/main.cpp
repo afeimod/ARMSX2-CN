@@ -779,6 +779,12 @@ int main(int argc, char* argv[])
 				VMManager::Execute();
 			else if (state == VMState::Paused)
 			{
+				// IdlePollUpdate drains the SDL gamepad queue (via
+				// InputManager::PollSources) which is otherwise only drained
+				// from Counters' EE vsync handler. Without this, FullscreenUI
+				// receives keyboard nav (drained by PumpMessages) but no
+				// gamepad nav while PauseOnMenu is in effect.
+				VMManager::IdlePollUpdate();
 				Host::PumpMessagesOnCPUThread();
 				usleep(16000); // ~60fps pump while paused
 			}
