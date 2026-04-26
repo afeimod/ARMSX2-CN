@@ -237,7 +237,8 @@ static void recBC1_helper(bool branchIfSet)
 	// Cset: 1 = taken. BC1F taken when flag clear (eq), BC1T when set (ne).
 	armAsm->Cset(RDELAYSLOTGPR, branchIfSet ? a64::ne : a64::eq);
 
-	armFlushConstRegs();
+	// Pre-DS flush gated on DS safety (see armFlushConstRegsBeforeDS).
+	armFlushConstRegsBeforeDS();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
@@ -264,6 +265,11 @@ static void recBC1_Likely_helper(bool branchIfSet)
 	// Mov-imm for any const operands. Flushing before the Ldr also protects
 	// RWSCRATCH (the W view of RSCRATCHGPR, which armFlushConstRegs uses
 	// internally as scratch) so the Tbz/Tbnz below sees the FPU C flag.
+	//
+	// NB: armFlushConstRegsBeforeDS is NOT applicable here — the skip-DS
+	// path exits the block without ever recompiling the DS, so the DS
+	// safety gate doesn't help. The dirty-mask fast-path in
+	// armFlushConstRegs makes the no-dirty case cheap anyway.
 	armFlushConstRegs();
 
 	// Test FPU condition flag (bit 23)

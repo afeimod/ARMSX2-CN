@@ -56,7 +56,27 @@
 // top-5 hottest blocks (with per-pair disassembly) on recArmVU1::Shutdown —
 // fires when the Compose Stop button is pressed. Adds ~5 insns per block
 // entry (measurable cost on linked-chain entries), so keep off unless profiling.
-//#define VU1_PROFILE_BLOCKS
+#define VU1_PROFILE_BLOCKS
+
+// Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
+// each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,
+// `VU1_U_05_0x0040`). The next simpleperf trace then attributes samples
+// directly to specific MIPS/VU op emits inside hot blocks.
+//
+// Cost: one snprintf + one Perf::Register call per op AT COMPILE TIME (not
+// per execution). For typical workloads this is a few thousand calls per
+// block-cache-fill, negligible compared to actual emit cost. The runtime
+// JIT'd code is unchanged. Each Register call appends a line to the
+// /data/local/tmp/perf-<PID>.map file (~50 bytes/op), so a long session
+// can grow that file to several MB — flush the map when starting a new
+// trace if needed.
+//
+// Recommended workflow: enable one or two of these at a time, rebuild,
+// record perf.data, analyze, disable. Don't ship with these on.
+//#define EE_PROFILE_OPS
+//#define IOP_PROFILE_OPS
+//#define VU0_PROFILE_OPS
+//#define VU1_PROFILE_OPS
 
 //DMAC
 //#define INTERP_DMAC          // VIF0, VIF1, GIF, IPU0/1, SIF0/1/2, SPR0/1 + interrupt handlers

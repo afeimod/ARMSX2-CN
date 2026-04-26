@@ -122,7 +122,10 @@ static void recBranch_GPR64(a64::Condition cond, int rs, int rt, u32 branchTarge
 	// test it again after the flush.
 	armAsm->Cset(RDELAYSLOTGPR, cond);
 
-	armFlushConstRegs();
+	// Pre-DS flush — gated on DS opcode safety. Most non-faulting ALU
+	// delay slots can skip this; only memory-access / trap-capable DSes
+	// need GPR memory coherent before DS execution.
+	armFlushConstRegsBeforeDS();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
@@ -194,7 +197,8 @@ static void recBranch_GPR64_vs_Zero(a64::Condition cond, int rs, u32 branchTarge
 	armAsm->Cmp(RSCRATCHGPR, 0);
 	armAsm->Cset(RDELAYSLOTGPR, cond);
 
-	armFlushConstRegs();
+	// Pre-DS flush gated on DS safety (see armFlushConstRegsBeforeDS).
+	armFlushConstRegsBeforeDS();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
@@ -822,7 +826,8 @@ void recJR()
 {
 	armLoadGPR64(RDELAYSLOTGPR, _Rs_);
 
-	armFlushConstRegs();
+	// Pre-DS flush gated on DS safety (see armFlushConstRegsBeforeDS).
+	armFlushConstRegsBeforeDS();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 
@@ -860,7 +865,8 @@ void recJALR()
 		GPR_SET_CONST(_Rd_);
 	}
 
-	armFlushConstRegs();
+	// Pre-DS flush gated on DS safety (see armFlushConstRegsBeforeDS).
+	armFlushConstRegsBeforeDS();
 	recompileNextInstruction(true, false);
 	armFlushConstRegs();
 

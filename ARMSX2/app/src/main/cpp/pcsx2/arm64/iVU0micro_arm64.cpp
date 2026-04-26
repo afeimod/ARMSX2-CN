@@ -14,6 +14,7 @@
 #include "arm64/AsmHelpers.h"
 #include "arm64/arm64Emitter.h"
 #include "arm64/iVU0micro_arm64.h"
+#include "common/Perf.h"
 
 #include <cstring>
 
@@ -242,6 +243,24 @@ static u32 AnalyzeBlock(u32 startPC)
 
 static const auto VU0_BASE_REG = x23;
 
+// VU0_PROFILE_OPS scaffolding (toggle in arm64/InterpFlags.h). Same shape
+// as the VU1 macros — register the emit cursor span around per-pair sections.
+#ifdef VU0_PROFILE_OPS
+	#define VU0_PERF_BEGIN(varname) const u8* varname = armGetCurrentCodePointer()
+	#define VU0_PERF_END(varname, fmt, ...) do { \
+		const u8* _vu0_pe_end = armGetCurrentCodePointer(); \
+		if (_vu0_pe_end > (varname)) { \
+			char _vu0_pe_name[64]; \
+			std::snprintf(_vu0_pe_name, sizeof(_vu0_pe_name), fmt, ##__VA_ARGS__); \
+			Perf::vu0.Register((varname), \
+				static_cast<size_t>(_vu0_pe_end - (varname)), _vu0_pe_name); \
+		} \
+	} while (0)
+#else
+	#define VU0_PERF_BEGIN(varname) ((void)0)
+	#define VU0_PERF_END(varname, fmt, ...) ((void)0)
+#endif
+
 static u8* CompileBlock(u32 startPC, u32 numPairs)
 {
 	const size_t data_size    = numPairs * 2 * sizeof(_VURegsNum);
@@ -430,21 +449,27 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			}
 
 			// 5. Upper stalls
+			VU0_PERF_BEGIN(_pp_s5);
 			armAsm->Mov(x0, VU0_BASE_REG);
 			armMoveAddressToReg(x1, &uregs_data[i]);
 			armEmitCall(reinterpret_cast<const void*>(_vuTestUpperStalls));
+			VU0_PERF_END(_pp_s5, "VU0_TestUpper_0x%04x", pc);
 
 			// 5b. Lower stalls
+			VU0_PERF_BEGIN(_pp_s5b);
 			if (!ibit)
 			{
 				armAsm->Mov(x0, VU0_BASE_REG);
 				armMoveAddressToReg(x1, &lregs_data[i]);
 				armEmitCall(reinterpret_cast<const void*>(_vuTestLowerStalls));
 			}
+			VU0_PERF_END(_pp_s5b, "VU0_TestLower_0x%04x", pc);
 
 			// 6. Test pipes
+			VU0_PERF_BEGIN(_pp_s6);
 			armAsm->Mov(x0, VU0_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(_vuTestPipes));
+			VU0_PERF_END(_pp_s6, "VU0_TestPipes_0x%04x", pc);
 
 			// 6b. VIBackupCycles
 			armAsm->Mov(x0, VU0_BASE_REG);
@@ -464,7 +489,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 			}
 			armAsm->Str(w4, MemOperand(VU0_BASE_REG, code_off));
 			VU0.code = upper;
+			VU0_PERF_BEGIN(_pp_s7);
 			recVU0_UpperTable[upper & 0x3f]();
+			VU0_PERF_END(_pp_s7, "VU0_U_%02x_0x%04x", upper & 0x3f, pc);
 
 			// 8. Lower instruction
 			// NOP the lower when this pair is a branch AND the previous pair
@@ -499,8 +526,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 				}
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, code_off));
 				VU0.code = lower;
+				VU0_PERF_BEGIN(_pp_s8);
 				if (!suppress_branch)
 					recVU0_LowerTable[lower >> 25]();
+				VU0_PERF_END(_pp_s8, "VU0_L_%02x_0x%04x", lower >> 25, pc);
 			}
 
 			// 9. FMAC clear
@@ -605,6 +634,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs)
 
 	u8* end = armEndBlock();
 	s_code_write = end;
+
+	// Register the compiled VU0 block with simpleperf/perfetto so the JIT'd
+	// code shows up as `VU0_<startPC>` in profiler reports instead of
+	// "unknown unknown". Cost: one map insert per block compile.
+	Perf::vu0.RegisterPC(entry, static_cast<size_t>(end - entry), startPC);
+
 	return entry;
 }
 

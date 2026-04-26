@@ -44,6 +44,13 @@ static const auto VU1_CLIPFLAG_REG   = w28;
 // VI[REG_TPC], runtime TPC is compile-time predictable here).
 u32 g_vu1CurrentPC = 0;
 
+// analyzeBranchVI gate (audit item #12). Set per-pair from
+// ir.info[i].needs_vi_backup before emitVU1Lower dispatch. When false,
+// emitBackupVI early-returns — no Ldrb/Strb/cmp dance, no VIOldValue
+// snapshot. Default true so any direct call from non-Pass-1-driven paths
+// stays correct.
+bool g_vu1NeedsVIBackup = true;
+
 // Compute byte offset of VI[reg] within VURegs.
 static constexpr int64_t viOff(u32 reg)
 {
@@ -80,8 +87,16 @@ static void vu1BackupVI(VURegs* VU, u32 reg)
 // reg is a compile-time constant (VI index 0-15).
 // Must be emitted before any VI write (so VIOldValue captures pre-write state).
 // Scratch: w4, w5 (caller-saved; all emitBackupVI call sites avoid these).
+//
+// analyzeBranchVI gate: when g_vu1NeedsVIBackup is false, no in-block branch
+// within 4 pairs reads this VI AND we're not in the cross-block conservative
+// tail (last 4 pairs). The branch evaluation will read live VI directly, so
+// snapshotting the OLD value is dead work — early return.
 static void emitBackupVI(u32 reg)
 {
+	if (!g_vu1NeedsVIBackup)
+		return;
+
 	const int64_t vibackup_off = static_cast<int64_t>(offsetof(VURegs, VIBackupCycles));
 	const int64_t viregnum_off = static_cast<int64_t>(offsetof(VURegs, VIRegNumber));
 	const int64_t violdval_off = static_cast<int64_t>(offsetof(VURegs, VIOldValue));

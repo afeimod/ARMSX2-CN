@@ -98,6 +98,16 @@ struct alignas(16) microOp
 	// so consumers can switch on them without re-walking later.
 	bool noWriteVF;
 	bool backupVF;
+
+	// analyzeBranchVI (audit item #12): set when this pair writes a VI
+	// register that some downstream branch (within 4 pairs forward) reads.
+	// The VI-writing emit must call emitBackupVI to snapshot the OLD value
+	// into VIOldValue before overwriting, so the branch's evaluation reads
+	// the pre-write value. Conservatively also true for all VI writers in
+	// the last 4 pairs of the block (next block may branch in its first
+	// 4 pairs reading our late writes — without cross-block info we can't
+	// rule it out). When false, the emitBackupVI BL is elided entirely.
+	bool needs_vi_backup;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

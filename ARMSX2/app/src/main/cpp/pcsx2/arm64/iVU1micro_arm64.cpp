@@ -22,6 +22,7 @@
 #include "arm64/AsmHelpers.h"
 #include "arm64/iVU1micro_arm64.h"
 #include "arm64/iVU1IR_arm64.h"
+#include "common/Perf.h"
 
 #include <algorithm>
 #include <cfenv>
@@ -372,6 +373,75 @@ void mvu1AnalyzeBlock(
 		if (ir.info[i].branch != BR_NONE)
 			ir.info[i + 1].isBdelay = true;
 	}
+
+	// analyzeBranchVI (audit item #12): per-pair gate for VI backup BLs.
+	// Default false; flipped true when either:
+	//   (a) Some downstream branch within 4 pairs reads a VI this pair
+	//       writes — the branch will need the OLD value, so we must
+	//       backup before overwriting. Mirrors x86 microVU_Analyze.inl
+	//       analyzeBranchVI's backward walk.
+	//   (b) This pair is in the last 4 pairs of the block AND writes a VI
+	//       in [1..15]. Conservative: a successor block's branch in its
+	//       first 4 pairs may read this VI; without cross-block analysis
+	//       we can't prove it doesn't.
+	for (u32 i = 0; i < numPairs; i++)
+		ir.info[i].needs_vi_backup = false;
+
+	// Pass (a): forward branch scan + backward writer walk. The 4-pair
+	// window matches the IALU pipe maturity. JR/JALR also read a VI for
+	// their target → included via lregs.VIread bits regardless of branch
+	// kind. Mask off VI[0] (hardwired zero) and VI[16..31] (flag/special).
+	const u32 cacheable_vi_mask = 0xFFFEu; // VI[1..15] only
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		if (ir.info[i].branch == BR_NONE)
+			continue;
+		const u32 branch_reads = lregs_data[i].VIread & cacheable_vi_mask;
+		if (branch_reads == 0)
+			continue;
+		// Walk backward up to 4 pairs (or to block start). Find the
+		// LATEST writer of each VI bit in branch_reads.
+		const u32 lookback_start = (i >= 4) ? (i - 4) : 0;
+		for (u32 j = i; j > lookback_start; j--)
+		{
+			const u32 prev = j - 1;
+			const u32 wrote = lregs_data[prev].VIwrite & branch_reads;
+			if (wrote != 0)
+			{
+				ir.info[prev].needs_vi_backup = true;
+				// Mask off the bits we just resolved — earlier writers
+				// of those bits are overwritten by this later writer
+				// before reaching the branch.
+				const u32 remaining = branch_reads & ~wrote;
+				if (remaining == 0)
+					break;
+			}
+		}
+	}
+
+	// Pass (b): cross-block conservative — last 4 pairs that write VI
+	// [1..15] need backup since the successor may branch on them.
+	const u32 tail_start = (numPairs >= 4) ? (numPairs - 4) : 0;
+	for (u32 i = tail_start; i < numPairs; i++)
+	{
+		if ((lregs_data[i].VIwrite & cacheable_vi_mask) != 0
+		    && lregs_data[i].pipe != VUPIPE_BRANCH)
+			ir.info[i].needs_vi_backup = true;
+	}
+
+	// Update has_vi_backup_set to reflect the precise post-analyzeBranchVI
+	// truth, not the pre-walk overapproximation. The earlier sweep already
+	// initialized it from the wide heuristic; tighten here so step 6b's
+	// decrement-elision (skip_vibackup_decrement in CompileBlock) is exact.
+	ir.has_vi_backup_set = false;
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		if (ir.info[i].needs_vi_backup)
+		{
+			ir.has_vi_backup_set = true;
+			break;
+		}
+	}
 }
 
 } // namespace armvu1ir
@@ -391,6 +461,10 @@ void emitVU1Lower(u32 lower);
 // skip the BL vu1_fmac_writeback and inline a NEON clamp + store instead.
 extern bool g_vu1NeedsFlags;
 extern u32 g_vu1CurrentPC;
+// analyzeBranchVI gate (audit item #12) — set per-pair from
+// ir.info[i].needs_vi_backup before the lower emit. When false, the
+// emitBackupVI BL is elided entirely.
+extern bool g_vu1NeedsVIBackup;
 
 // ============================================================================
 //  Block cache
@@ -2527,6 +2601,26 @@ static void deleteAllVariants()
 	}
 }
 
+// VU1_PROFILE_OPS scaffolding (toggle in arm64/InterpFlags.h). Begin/End
+// pair captures the emit cursor before/after a per-pair section and
+// registers the range with simpleperf. When the toggle is off both macros
+// expand to no-ops — zero compile-time and zero runtime cost.
+#ifdef VU1_PROFILE_OPS
+	#define VU1_PERF_BEGIN(varname) const u8* varname = armGetCurrentCodePointer()
+	#define VU1_PERF_END(varname, fmt, ...) do { \
+		const u8* _vu1_pe_end = armGetCurrentCodePointer(); \
+		if (_vu1_pe_end > (varname)) { \
+			char _vu1_pe_name[64]; \
+			std::snprintf(_vu1_pe_name, sizeof(_vu1_pe_name), fmt, ##__VA_ARGS__); \
+			Perf::vu1.Register((varname), \
+				static_cast<size_t>(_vu1_pe_end - (varname)), _vu1_pe_name); \
+		} \
+	} while (0)
+#else
+	#define VU1_PERF_BEGIN(varname) ((void)0)
+	#define VU1_PERF_END(varname, fmt, ...) ((void)0)
+#endif
+
 static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 {
 	// VF cache: clear the compile-time tracker before any pair emit. The
@@ -3657,14 +3751,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//    instructions are non-FMAC and emit zero work here. Stage A uses
 		//    skip_info[i] to elide FMAC stall-check BLs when the compile-time
 		//    ring buffer proves no alias exists.
+		VU1_PERF_BEGIN(_pp_s5);
 		emitTestUpperStalls(uregs,
 			skip_info[i].skipUpperFMACStall0,
 			skip_info[i].skipUpperFMACStall1);
+		VU1_PERF_END(_pp_s5, "VU1_TestUpper_0x%04x", pc);
 
 		// 5b. Test lower stalls BEFORE TestPipes (non-I-bit only).
 		//     TestLowerStalls may advance VU->cycle (FDIV/EFU/ALU stalls);
 		//     TestPipes needs to see the updated cycle to flush FMAC correctly.
 		//     Stage B adds FDIV/EFU/ALU wait skip flags.
+		VU1_PERF_BEGIN(_pp_s5b);
 		if (!ibit)
 			emitTestLowerStalls(lregs,
 				skip_info[i].skipLowerFMACStall0,
@@ -3672,6 +3769,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				skip_info[i].skipLowerFDIVWait,
 				skip_info[i].skipLowerEFUWait,
 				skip_info[i].skipLowerALUStall);
+		VU1_PERF_END(_pp_s5b, "VU1_TestLower_0x%04x", pc);
 
 		// 6. Test pipes (after lower stalls for non-I-bit). Uses the VU1-
 		//    specialized helper that skips the XGKICK block and the do-while
@@ -3683,6 +3781,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//    write cycle so no reload is needed.
 		if (!skip_info[i].skipTestPipes)
 		{
+			VU1_PERF_BEGIN(_pp_s6);
 			emitFlushCycleReg(cycle_off);
 			// Phase-9b: vu1_TestPipes_VU1 reads fmaccount as the FMAC-flush
 			// loop bound and decrements it per flushed slot. Flush+reload
@@ -3691,6 +3790,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			armAsm->Mov(x0, VU1_BASE_REG);
 			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 			emitReloadFmaccountReg(fmaccount_off);
+			VU1_PERF_END(_pp_s6, "VU1_TestPipes_0x%04x", pc);
 		}
 
 		// 6b. Decrement VIBackupCycles (needed for correct VI backup reads
@@ -3738,8 +3838,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		armAsm->Str(w4, MemOperand(VU1_BASE_REG, code_off));
 		VU1.code = upper; // compile-time context for the rec emitter
 		g_vu1NeedsFlags = pair_needs_flags[i]; // flag-deferral hint for FMAC emitters
+		// analyzeBranchVI: gate VI backup BL on whether any in-block
+		// branch within 4 pairs reads this writer's VI (or this pair is
+		// in the cross-block conservative tail).
+		g_vu1NeedsVIBackup = ir_op.needs_vi_backup;
 
+		VU1_PERF_BEGIN(_pp_s7);
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op
+		VU1_PERF_END(_pp_s7, "VU1_U_%02x_0x%04x", upper & 0x3f, pc);
 
 		// 8. Lower instruction handling.
 		// NOP the lower when this pair is a branch AND the previous pair
@@ -3812,8 +3918,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				// reads + decrements fmaccount.
 				emitFlushFmaccountReg(fmaccount_off);
 			}
+			VU1_PERF_BEGIN(_pp_s8);
 			if (!suppress_branch)
 				emitVU1Lower(lower); // switch dispatch — emits native ARM64 for this op
+			VU1_PERF_END(_pp_s8, "VU1_L_%02x_0x%04x", lower >> 25, pc);
 			if (hack_xgkick_here)
 			{
 				emitReloadCycleReg(cycle_off);
@@ -3829,9 +3937,11 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//       FDIV/EFU/IALU adds for non-FMAC lower pipes.
 		//       For I-bit pairs lregs is all-zero (pipe == VUPIPE_NONE),
 		//       so passing it directly is safe — both helpers no-op on it.
+		VU1_PERF_BEGIN(_pp_s9);
 		emitFMACAddPair(uregs, lregs);
 		if (!ibit)
 			emitLowerNonFMACAdd(lregs);
+		VU1_PERF_END(_pp_s9, "VU1_PipeAdd_0x%04x", pc);
 
 		// 11b. D/T bits — depend on VU0 FBRST (runtime). Only emit when
 		//      actually set. Runs AFTER the op so the pair's side effects
@@ -4189,6 +4299,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 
 	u8* end = armEndBlock();
 	s_code_write = end;
+
+	// Register the compiled VU1 block with simpleperf/perfetto so the JIT'd
+	// code shows up as `VU1_<startPC>` in profiler reports instead of
+	// "unknown unknown". Cost: one map insert per block compile.
+	Perf::vu1.RegisterPC(entry, static_cast<size_t>(end - entry), startPC);
+
 	return entry;
 }
 

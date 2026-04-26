@@ -23,7 +23,17 @@
 #include <sys/syscall.h>
 #endif
 
-//#define ProfileWithPerf
+// Enable simpleperf JIT symbol resolution on Android (and any other Linux
+// build that wants it). When defined, Perf::Register*() writes one line per
+// JIT'd code region to /data/local/tmp/perf-<PID>.map (Android) or
+// /tmp/perf-<PID>.map (desktop Linux). simpleperf reads this map file and
+// resolves anonymous JIT addresses to the registered symbol names.
+//
+// Without this, every JIT'd EE/IOP/VU/VIF/GS-SW block shows up as "unknown
+// unknown" in profiler reports — making it impossible to localize hot ops.
+#if defined(__ANDROID__) || defined(__linux__)
+#define ProfileWithPerf
+#endif
 //#define ProfileWithPerfJitDump
 
 #if defined(ENABLE_VTUNE) && defined(_WIN32)
@@ -54,8 +64,46 @@ namespace Perf
 				return;
 
 			char file[256];
+#if defined(__ANDROID__)
+			// simpleperf reads JIT symbol maps from /data/local/tmp/perf-<pid>.map
+			// at RECORD time and embeds them into perf.data. The app UID
+			// can't write there by default (SELinux + ownership). One-time
+			// setup before recording:
+			//
+			//   adb shell chmod 777 /data/local/tmp
+			//
+			// (Resets to default on every reboot; rerun if needed.)
+			//
+			// If the chmod hasn't been done, fall back to the app's cache
+			// dir (always writable). The map can then be pulled via:
+			//
+			//   adb shell run-as com.armsx2 cat cache/perf-<PID>.map \
+			//     > perf-<PID>.map
+			//
+			// But pulled-after maps don't help simpleperf report — the JIT
+			// addresses must be resolved at record time. The chmod path is
+			// the only path that gives you symbol-resolved profiles.
+			static const char* const k_path_templates[] = {
+				"/data/local/tmp/perf-%d.map",            // PRIMARY — needs chmod 777
+				"/data/data/com.armsx2/cache/perf-%d.map", // FALLBACK — pull-only
+				nullptr
+			};
+			for (int i = 0; k_path_templates[i] != nullptr; i++)
+			{
+				snprintf(file, std::size(file), k_path_templates[i], getpid());
+				s_map_file = std::fopen(file, "wb");
+				if (s_map_file)
+				{
+					std::fprintf(stderr, "[Perf] JIT symbol map: %s\n", file);
+					break;
+				}
+			}
+			if (!s_map_file)
+				std::fprintf(stderr, "[Perf] Failed to open any JIT symbol map path (PID %d)\n", getpid());
+#else
 			snprintf(file, std::size(file), "/tmp/perf-%d.map", getpid());
 			s_map_file = std::fopen(file, "wb");
+#endif
 			s_map_file_opened = true;
 			if (!s_map_file)
 				return;

@@ -341,12 +341,31 @@ static const void* _DynGen_UnmappedRecLUTPage()
 
 static void _DynGen_Dispatchers()
 {
+	// Register each dispatcher with simpleperf so it shows up by name in
+	// profiler reports. armAsmPtr is the bump pointer that advances after
+	// each armEndBlock(); sample it before/after each generator to get
+	// the size of the just-emitted block.
+	const auto reg_dispatcher = [](const void* start, const char* name) {
+		Perf::iop.Register(start,
+			static_cast<size_t>(armAsmPtr - reinterpret_cast<u8*>(const_cast<void*>(start))),
+			name);
+	};
+
 	iopDispatcherReg = _DynGen_DispatcherReg();
+	reg_dispatcher(iopDispatcherReg, "IOP_DispatcherReg");
+
 	iopDispatcherEvent = _DynGen_DispatcherEvent();
+	reg_dispatcher(iopDispatcherEvent, "IOP_DispatcherEvent");
+
 	iopJITCompile = _DynGen_JITCompile();
+	reg_dispatcher(iopJITCompile, "IOP_JITCompile");
+
 	iopEnterRecompiledCode = _DynGen_EnterRecompiledCode();
+	reg_dispatcher(iopEnterRecompiledCode, "IOP_EnterRecompiledCode");
 	// iopExitRecompiledCode is set inside _DynGen_EnterRecompiledCode
+
 	iopUnmappedRecLUTPage = _DynGen_UnmappedRecLUTPage();
+	reg_dispatcher(iopUnmappedRecLUTPage, "IOP_UnmappedRecLUTPage");
 
 	recBlocks.SetJITCompile(iopJITCompile);
 }
@@ -635,9 +654,27 @@ void psxRecompileNextInstruction(bool delayslot, bool swapped_delayslot)
 	g_psxFlushedCode = false;
 	g_iopCyclePenalty = 0;
 
+#ifdef IOP_PROFILE_OPS
+	const u8* _iop_op_start = armGetCurrentCodePointer();
+	const u32 _iop_op_pc    = psxpc - 4;
+	const u32 _iop_op_code  = psxRegs.code;
+#endif
 	// Dispatch to instruction recompiler
 	rpsxBSC[psxRegs.code >> 26]();
 	s_psxBlockCycles += g_iopCyclePenalty;
+#ifdef IOP_PROFILE_OPS
+	{
+		const u8* _iop_op_end = armGetCurrentCodePointer();
+		if (_iop_op_end > _iop_op_start)
+		{
+			char _iop_op_name[48];
+			std::snprintf(_iop_op_name, sizeof(_iop_op_name),
+				"IOP_%02x_0x%08x", _iop_op_code >> 26, _iop_op_pc);
+			Perf::iop.Register(_iop_op_start,
+				static_cast<size_t>(_iop_op_end - _iop_op_start), _iop_op_name);
+		}
+	}
+#endif
 
 	if (swapped_delayslot)
 	{

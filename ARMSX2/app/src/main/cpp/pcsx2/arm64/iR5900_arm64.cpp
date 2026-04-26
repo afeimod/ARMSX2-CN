@@ -209,25 +209,135 @@ static void memory_protect_recompiled_code(u32 startpc, u32 size);
 
 void armFlushConstRegs()
 {
-	for (int i = 1; i < 32; i++)
+	// Only flush regs that are const AND not yet in memory — these are the
+	// regs that mutated since the last flush. Common-case fast-path: dirty
+	// mask is 0 and we exit immediately without iterating 1..31.
+	u32 dirty = g_cpuHasConstReg & ~g_cpuFlushedConstReg & 0xFFFFFFFEu; // skip r0
+	if (!dirty)
+		return;
+
+	// Iterate set bits via ctz instead of scanning 31 indices. With typical
+	// dirty counts of 1-3, this is 1-3 iterations vs 31 mask-tests.
+	while (dirty)
 	{
-		if ((g_cpuHasConstReg & (1u << i)) && !(g_cpuFlushedConstReg & (1u << i)))
+		const int i = __builtin_ctz(dirty);
+		dirty &= dirty - 1; // clear lowest set bit
+
+		// Write constant value to cpuRegs.GPR[i].SD[0] (lower 64 bits only).
+		// Upper 64 bits (UD[1]) are left untouched — matches interpreter behavior.
+		const s64 val = g_cpuConstRegs[i].SD[0];
+		if (val == 0)
 		{
-			// Write constant value to cpuRegs.GPR[i].SD[0] (lower 64 bits only).
-			// Upper 64 bits (UD[1]) are left untouched — matches interpreter behavior.
-			s64 val = g_cpuConstRegs[i].SD[0];
-			if (val == 0)
-			{
-				armAsm->Str(a64::xzr, a64::MemOperand(RCPUSTATE, GPR_OFFSET(i)));
-			}
-			else
-			{
-				armAsm->Mov(RSCRATCHGPR, static_cast<u64>(val));
-				armAsm->Str(RSCRATCHGPR, a64::MemOperand(RCPUSTATE, GPR_OFFSET(i)));
-			}
-			g_cpuFlushedConstReg |= (1u << i);
+			armAsm->Str(a64::xzr, a64::MemOperand(RCPUSTATE, GPR_OFFSET(i)));
+		}
+		else
+		{
+			armAsm->Mov(RSCRATCHGPR, static_cast<u64>(val));
+			armAsm->Str(RSCRATCHGPR, a64::MemOperand(RCPUSTATE, GPR_OFFSET(i)));
 		}
 	}
+	// All previously-dirty consts are now in memory.
+	g_cpuFlushedConstReg = g_cpuHasConstReg;
+}
+
+// Classify whether an EE opcode is a "safe" branch delay slot for the
+// pre-DS flush skip optimization. Returns true for non-faulting,
+// non-memory-accessing, non-interp-calling ops.
+//
+// The post-DS armFlushConstRegs always runs (it's the block-exit flush,
+// needed for direct-B linking to a successor that reads GPR memory). The
+// pre-DS flush is only needed if the DS could:
+//   1. Take an exception and longjmp before its own flush would happen
+//      (true for memory loads/stores via fastmem, since the fastmem fault
+//      thunk does not flush const tracker).
+//   2. Call an interp helper that reads GPR memory before the helper's
+//      own armCallInterpreter flush runs (cannot happen — armCallInterpreter
+//      always flushes first).
+//
+// So we only need to flush before DS if (1) applies — i.e., the DS is a
+// memory access or other faulting op. For pure ALU/shift/MFHI/etc., the
+// pre-DS flush is redundant and the post-DS flush is sufficient.
+bool armDelaySlotIsSafe(u32 opcode)
+{
+	// Canonical NOP — never emits anything.
+	if (opcode == 0u)
+		return true;
+
+	const u32 op = (opcode >> 26) & 0x3Fu;
+
+	switch (op)
+	{
+		case 0x00: // SPECIAL — funct in low 6 bits
+		{
+			const u32 funct = opcode & 0x3Fu;
+			switch (funct)
+			{
+				// Shifts (no memory, no exceptions)
+				case 0x00: case 0x02: case 0x03:           // SLL, SRL, SRA
+				case 0x04: case 0x06: case 0x07:           // SLLV, SRLV, SRAV
+				case 0x14: case 0x16: case 0x17:           // DSLLV, DSRLV, DSRAV
+				case 0x38: case 0x3A: case 0x3B:           // DSLL, DSRL, DSRA
+				case 0x3C: case 0x3E: case 0x3F:           // DSLL32, DSRL32, DSRA32
+				// HI/LO move (no memory)
+				case 0x10: case 0x11: case 0x12: case 0x13: // MFHI, MTHI, MFLO, MTLO
+				// Mult/Div (no memory; EE doesn't trap on /0 in JIT)
+				case 0x18: case 0x19: case 0x1A: case 0x1B: // MULT, MULTU, DIV, DIVU
+				// MFSA/MTSA (no memory)
+				case 0x28: case 0x29:                       // MFSA, MTSA
+				// Non-trapping register ALU (ADDU/SUBU/AND/OR/XOR/NOR/SLT/SLTU/DADDU/DSUBU)
+				case 0x21: case 0x23: case 0x24: case 0x25: // ADDU, SUBU, AND, OR
+				case 0x26: case 0x27: case 0x2A: case 0x2B: // XOR, NOR, SLT, SLTU
+				case 0x2D: case 0x2F:                       // DADDU, DSUBU
+				// MOVZ/MOVN
+				case 0x0A: case 0x0B:                       // MOVZ, MOVN
+				// SYNC
+				case 0x0F:                                  // SYNC
+					return true;
+				// Trapping/exception ops — NOT safe:
+				//   0x08 JR, 0x09 JALR (branches in DS are illegal anyway)
+				//   0x0C SYSCALL, 0x0D BREAK
+				//   0x20 ADD, 0x22 SUB, 0x2C DADD, 0x2E DSUB (overflow trap)
+				//   0x30-0x36 TGE/TGEU/TLT/TLTU/TEQ/TNE (trap)
+				default:
+					return false;
+			}
+		}
+
+		case 0x01: // REGIMM — branches; illegal in DS regardless
+			return false;
+
+		// Top-level immediate ALU — no memory, no exceptions
+		case 0x09: case 0x0A: case 0x0B:                   // ADDIU, SLTI, SLTIU
+		case 0x0C: case 0x0D: case 0x0E: case 0x0F:        // ANDI, ORI, XORI, LUI
+		case 0x19:                                          // DADDIU
+			return true;
+
+		// 0x08 ADDI, 0x18 DADDI — overflow trap. NOT safe.
+		// 0x02-0x07 J/JAL/BEQ/BNE/BLEZ/BGTZ — branches.
+		// 0x10 COP0 — TLB ops can fault, mode changes, ERET. NOT safe.
+		// 0x11 COP1, 0x12 COP2 — arith mostly safe but interp paths can be
+		//   tricky. Conservative: not safe (FPU exceptions, VU0 macro side
+		//   effects).
+		// 0x14-0x17 BEQL/BNEL/BLEZL/BGTZL — branches.
+		// 0x1A-0x1B LDL/LDR — memory.
+		// 0x1C MMI — mostly arith but some can be ISTUB; conservative skip.
+		// 0x1E LQ, 0x1F SQ — memory.
+		// 0x20-0x2F loads/stores.
+		// 0x30+ LL/SC/coprocessor loads/stores — memory.
+		default:
+			return false;
+	}
+}
+
+void armFlushConstRegsBeforeDS()
+{
+	// Peek at the DS opcode at the current pc. The branch emitter has
+	// already advanced pc past the branch instruction itself (via the
+	// pre-increment in recompileNextInstruction's caller), so pc points
+	// at the DS. Skip the flush if the DS is provably safe.
+	const u32 ds_code = *reinterpret_cast<const u32*>(PSM(pc));
+	if (!armDelaySlotIsSafe(ds_code))
+		armFlushConstRegs();
 }
 
 // Flush a single constant register to memory if it has a const value that
@@ -1047,13 +1157,37 @@ static void _DynGen_Dispatchers()
 	// DispatcherReg must be generated before DispatcherEvent (Event jumps to Reg).
 	// On x86 these are contiguous (fallthrough), but on ARM64 each block has
 	// alignment padding, so DispatcherEvent uses an explicit jump instead.
+	//
+	// Register each dispatcher with simpleperf so it shows up by name in
+	// profiler reports. armAsmPtr is the bump pointer that advances after
+	// each armEndBlock(); we sample it before/after each generator to get
+	// the size of the just-emitted block.
+	const auto reg_dispatcher = [](const void* start, const char* name) {
+		Perf::ee.Register(start,
+			static_cast<size_t>(armAsmPtr - reinterpret_cast<u8*>(const_cast<void*>(start))),
+			name);
+	};
+
 	DispatcherReg = _DynGen_DispatcherReg();
+	reg_dispatcher(DispatcherReg, "EE_DispatcherReg");
+
 	DispatcherEvent = _DynGen_DispatcherEvent();
+	reg_dispatcher(DispatcherEvent, "EE_DispatcherEvent");
+
 	JITCompile = _DynGen_JITCompile();
+	reg_dispatcher(JITCompile, "EE_JITCompile");
+
 	EnterRecompiledCode = _DynGen_EnterRecompiledCode();
+	reg_dispatcher(EnterRecompiledCode, "EE_EnterRecompiledCode");
+
 	DispatchBlockDiscard = _DynGen_DispatchBlockDiscard();
+	reg_dispatcher(DispatchBlockDiscard, "EE_DispatchBlockDiscard");
+
 	DispatchPageReset = _DynGen_DispatchPageReset();
+	reg_dispatcher(DispatchPageReset, "EE_DispatchPageReset");
+
 	UnmappedRecLUTPage = _DynGen_UnmappedRecLUTPage();
+	reg_dispatcher(UnmappedRecLUTPage, "EE_UnmappedRecLUTPage");
 
 	recBlocks.SetJITCompile(JITCompile);
 }
@@ -1382,6 +1516,9 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
 
+#ifdef EE_PROFILE_OPS
+		const u8* _ee_op_start = armGetCurrentCodePointer();
+#endif
 		if (opcode.recompile)
 			opcode.recompile();
 		else
@@ -1389,6 +1526,19 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 			// No recompiler implementation — fall back to interpreter
 			armCallInterpreter(opcode.interpret);
 		}
+#ifdef EE_PROFILE_OPS
+		{
+			const u8* _ee_op_end = armGetCurrentCodePointer();
+			if (_ee_op_end > _ee_op_start)
+			{
+				char _ee_op_name[48];
+				std::snprintf(_ee_op_name, sizeof(_ee_op_name),
+					"EE_%s_0x%08x", opcode.Name ? opcode.Name : "OP", pc - 4);
+				Perf::ee.Register(_ee_op_start,
+					static_cast<size_t>(_ee_op_end - _ee_op_start), _ee_op_name);
+			}
+		}
+#endif
 
 		// Phase D: op-local GPR cache discipline.
 		// Migrated ops (ALU only as of Phase D) use armGprAlloc to bind MIPS
@@ -1932,6 +2082,12 @@ StartRecomp:
 	// so use armAsmPtr directly instead of armGetCurrentCodePointer().
 	recPtr = armAsmPtr;
 	pxAssert((g_cpuHasConstReg & g_cpuFlushedConstReg) == g_cpuHasConstReg);
+
+	// Register the compiled block with simpleperf/perfetto so JIT'd code
+	// shows up as `EE_<startpc>` in profiler reports instead of "unknown
+	// unknown". Mirrors x86 ix86-32/iR5900.cpp's per-block Register call.
+	// Cost: one map insert per block compile, no runtime hit.
+	Perf::ee.RegisterPC(blockStart, static_cast<size_t>(recPtr - blockStart), startpc);
 
 	// Point the BASEBLOCK at the compiled code so the dispatcher jumps directly
 	// to it. Without this, the block stays pointed at JITCompile and gets

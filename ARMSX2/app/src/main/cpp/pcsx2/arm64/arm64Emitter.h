@@ -179,6 +179,28 @@ void emitEELinkableExit(u32 target_pc);
 // Flush all constant registers that haven't been written back to memory yet
 void armFlushConstRegs();
 
+// Pre-DS flush gate. Returns true when the given EE opcode is "safe" as a
+// branch delay slot — meaning it never faults, never calls into an interp
+// helper that reads GPR memory, and never longjmps via Cpu->CancelInstruction.
+// When the DS is safe, the pre-DS armFlushConstRegs in branch emitters is
+// redundant: any const tracker mutations the DS makes are caught by the
+// post-DS flush, and there's no path that would observe stale GPR memory.
+//
+// Conservative: returns true ONLY for ops we know don't access memory and
+// don't trap. Loads/stores, COP0/TLB ops, traps, and SYSCALL/BREAK return
+// false. NOP, immediate ALU, register ALU (non-trapping), shifts, MFHI/LO,
+// MULT/DIV return true. Returns false for COP1/COP2 (their interp helpers
+// might) — be conservative there too.
+bool armDelaySlotIsSafe(u32 opcode);
+
+// Wrapper: peek at the global `pc` (which points at the delay slot when
+// called from a branch emitter, just before recompileNextInstruction(true)),
+// classify the DS, and skip the flush if safe. Replaces the standalone
+// armFlushConstRegs() call that precedes every recompileNextInstruction(true)
+// in the EE branch emitters. Call this *only* for the pre-DS flush; the
+// post-DS flush (block-exit) must remain unconditional.
+void armFlushConstRegsBeforeDS();
+
 // Flush a single constant register to memory if it has a const value not yet
 // committed. No-op otherwise. Use this before any direct GPR memory LDR that
 // bypasses armLoadGPR* (e.g. 128-bit MMI loads, upper-half reads), so the
