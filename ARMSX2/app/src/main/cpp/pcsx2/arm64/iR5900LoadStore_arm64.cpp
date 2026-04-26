@@ -49,10 +49,10 @@ static constexpr s64 FPR_OFFSET(int reg) { return FPUREGS_BASE + offsetof(fpuReg
 #define ISTUB_LWU      0
 #define ISTUB_LD       0
 #define ISTUB_LWC1     0
-#define ISTUB_LWL      1   // unaligned — keep as interp
-#define ISTUB_LWR      1
-#define ISTUB_LDL      1
-#define ISTUB_LDR      1
+#define ISTUB_LWL      0   // unaligned — native shift+mask+merge
+#define ISTUB_LWR      0
+#define ISTUB_LDL      0
+#define ISTUB_LDR      0
 #define ISTUB_LQ       0   // 128-bit — native NEON Ldr q-reg
 #define ISTUB_LQC2     0   // 128-bit VU — native, falls back on SYNC/FINISH
 #endif
@@ -75,10 +75,10 @@ static constexpr s64 FPR_OFFSET(int reg) { return FPUREGS_BASE + offsetof(fpuReg
 #define ISTUB_SW       0
 #define ISTUB_SD       0
 #define ISTUB_SWC1     0
-#define ISTUB_SWL      1   // unaligned — keep as interp
-#define ISTUB_SWR      1
-#define ISTUB_SDL      1
-#define ISTUB_SDR      1
+#define ISTUB_SWL      0   // unaligned — native shift+mask+merge
+#define ISTUB_SWR      0
+#define ISTUB_SDL      0
+#define ISTUB_SDR      0
 #define ISTUB_SQ       0   // 128-bit — native NEON Str q-reg
 #define ISTUB_SQC2     0   // 128-bit VU — native, falls back on SYNC/FINISH
 #endif
@@ -428,30 +428,244 @@ void recLWC1()
 }
 #endif
 
-// ---- Unaligned / 128-bit loads — interpreter stubs ----
+// ============================================================================
+//  Unaligned loads (LWL/LWR/LDL/LDR)
+//
+//  PS2 unaligned MIPS-style: address is byte-granular; the op reads the
+//  ALIGNED word/dword and merges some of its bytes into the destination GPR.
+//  Bit-offset within the aligned unit drives the shift/mask. We re-derive
+//  bit_offset AFTER the slow-path BL since vtlb_memRead doesn't touch GPR
+//  memory and the BL clobbers caller-saved scratch regs.
+//
+//  No fastmem path — the read is followed by complex merge logic, and the
+//  fastmem backpatcher only handles single-instruction load/store fault
+//  windows. Slow path only: BL vtlb_memRead<mem32_t> / <mem64_t>.
+// ============================================================================
 
+// ---- LWL — Load Word Left (high bytes of unaligned word) ----
+//
+// Mirrors x86 recLWL in iR5900LoadStore.cpp:273. Sign-extends merged result
+// to 64 bits (low 32 of GPR + sign extension into high 32).
 #if ISTUB_LWL
 void recLWL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWL); }
 #else
-void recLWL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWL); }
+void recLWL()
+{
+	armComputeAddress();                 // w0 = addr (Rs + Imm)
+	armAsm->Bic(a64::w0, a64::w0, 3u);   // w0 = aligned
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem32_t>);
+	armEmitReloadCycleAfterCall();
+	// w0 = loaded aligned 32-bit word
+
+	if (!_Rt_)
+		return;
+
+	// Re-derive bit_offset (= (addr & 3) * 8) — re-read Rs since BL clobbered
+	// caller-saved scratch but cpuRegs.GPR is intact.
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w1, a64::w1, 3u);
+	armAsm->Lsl(a64::w1, a64::w1, 3);    // w1 = bit_offset (0,8,16,24)
+
+	// Mask: 0xFFFFFF >> bit_offset → keep low (24 - bit_offset) bits of Rt.
+	armAsm->Mov(a64::w2, 0x00FFFFFFu);
+	armAsm->Lsr(a64::w2, a64::w2, a64::w1);
+
+	// w3 = Rt low 32; mask off bytes loaded.
+	armLoadGPR32(a64::w3, _Rt_);
+	armAsm->And(a64::w3, a64::w3, a64::w2);
+
+	// shift = 24 - bit_offset; w0 <<= shift; w0 |= w3.
+	armAsm->Mov(a64::w4, 24);
+	armAsm->Sub(a64::w4, a64::w4, a64::w1);
+	armAsm->Lsl(a64::w0, a64::w0, a64::w4);
+	armAsm->Orr(a64::w0, a64::w0, a64::w3);
+
+	// Sign-extend to 64-bit and store into GPR[_Rt_] low qword.
+	armDelConstReg(_Rt_);
+	armAsm->Sxtw(a64::x0, a64::w0);
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+}
 #endif
 
+// ---- LWR — Load Word Right (low bytes of unaligned word) ----
+//
+// Mirrors x86 recLWR in iR5900LoadStore.cpp:334. When bit_offset == 0, the
+// loaded word IS the result (sign-extend to 64). Otherwise mask + merge,
+// upper 32 bits cleared (matches x86's xRegister32 ops zeroing the high 32).
 #if ISTUB_LWR
 void recLWR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWR); }
 #else
-void recLWR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LWR); }
+void recLWR()
+{
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 3u);
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem32_t>);
+	armEmitReloadCycleAfterCall();
+
+	if (!_Rt_)
+		return;
+
+	armDelConstReg(_Rt_);
+
+	// Re-derive byte offset (0..3).
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w1, a64::w1, 3u);
+
+	a64::Label do_merge, end;
+	armAsm->Cbnz(a64::w1, &do_merge);
+
+	// bit_offset == 0: result = sign_extend_64(loaded_word).
+	armAsm->Sxtw(a64::x0, a64::w0);
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_merge);
+	armAsm->Lsl(a64::w1, a64::w1, 3);    // w1 = bit_offset (8,16,24)
+
+	// Mask: 0xFFFFFF00 << (24 - bit_offset) → keeps upper bytes of Rt.
+	armAsm->Mov(a64::w2, 24);
+	armAsm->Sub(a64::w2, a64::w2, a64::w1);
+	armAsm->Mov(a64::w3, 0xFFFFFF00u);
+	armAsm->Lsl(a64::w3, a64::w3, a64::w2);
+
+	armLoadGPR32(a64::w4, _Rt_);
+	armAsm->And(a64::w4, a64::w4, a64::w3);
+
+	// w0 = loaded >> bit_offset; w0 |= w4. Result is 32-bit; high 32 = 0.
+	armAsm->Lsr(a64::w0, a64::w0, a64::w1);
+	armAsm->Orr(a64::w0, a64::w0, a64::w4);
+
+	// 32-bit Str clears nothing on its own; explicitly write 0 to high 32 by
+	// using a 64-bit Str of zero-extended w0.
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	armAsm->Bind(&end);
+}
 #endif
 
+// ---- LDL — Load Doubleword Left (high bytes of unaligned dword) ----
+//
+// Mirrors x86 recLDL in iR5900LoadStore.cpp:587. 64-bit aligned read,
+// 8-bit-granular merge. When (addr & 7) == 7, no shift needed — result
+// IS the loaded dword.
 #if ISTUB_LDL
 void recLDL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDL); }
 #else
-void recLDL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDL); }
+void recLDL()
+{
+	if (!_Rt_)
+		return;
+
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 7u);   // align to 8 bytes
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem64_t>);
+	armEmitReloadCycleAfterCall();
+	// x0 = loaded aligned 64-bit dword
+
+	armDelConstReg(_Rt_);
+
+	// Re-derive byte_off (0..7).
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w1, a64::w1, 7u);
+
+	a64::Label do_merge, end;
+	armAsm->Cmp(a64::w1, 7);
+	armAsm->B(a64::ne, &do_merge);
+
+	// byte_off == 7: result = loaded dword as-is (no shift).
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_merge);
+	// shift = (byte_off + 1) * 8;  rt_kept = Rt & (~0ULL >> shift);
+	// merged = (loaded << (64 - shift)) | rt_kept;
+	armAsm->Add(a64::w1, a64::w1, 1);
+	armAsm->Lsl(a64::w1, a64::w1, 3);    // w1 = shift (8..56)
+
+	// w2 = 64 - shift  (used for left-shift of loaded)
+	armAsm->Mov(a64::w2, 64);
+	armAsm->Sub(a64::w2, a64::w2, a64::w1);
+
+	// x3 = (~0ULL) >> shift; x3 &= Rt; merged = (x0 << w2) | x3
+	armAsm->Mov(a64::x3, ~u64{0});
+	armAsm->Lsr(a64::x3, a64::x3, a64::x1);
+	armAsm->Ldr(a64::x4, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+	armAsm->And(a64::x3, a64::x3, a64::x4);
+	armAsm->Lsl(a64::x0, a64::x0, a64::x2);
+	armAsm->Orr(a64::x0, a64::x0, a64::x3);
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	armAsm->Bind(&end);
+}
 #endif
 
+// ---- LDR — Load Doubleword Right (low bytes of unaligned dword) ----
+//
+// Mirrors x86 recLDR in iR5900LoadStore.cpp:674. When byte_off == 0, the
+// loaded dword IS the result.
 #if ISTUB_LDR
 void recLDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDR); }
 #else
-void recLDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::LDR); }
+void recLDR()
+{
+	if (!_Rt_)
+		return;
+
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 7u);
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem64_t>);
+	armEmitReloadCycleAfterCall();
+
+	armDelConstReg(_Rt_);
+
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w1, a64::w1, 7u);
+
+	a64::Label do_merge, end;
+	armAsm->Cbnz(a64::w1, &do_merge);
+
+	// byte_off == 0: result = loaded as-is.
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_merge);
+	// shift = byte_off * 8;
+	// merged = (Rt & (~0ULL << (64 - shift))) | (loaded >> shift);
+	armAsm->Lsl(a64::w1, a64::w1, 3);    // w1 = shift (8..56)
+	armAsm->Mov(a64::w2, 64);
+	armAsm->Sub(a64::w2, a64::w2, a64::w1);
+
+	// x3 = (~0ULL) << w2 (mask preserving high (64 - shift) bits of Rt).
+	armAsm->Mov(a64::x3, ~u64{0});
+	armAsm->Lsl(a64::x3, a64::x3, a64::x2);
+	armAsm->Ldr(a64::x4, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+	armAsm->And(a64::x3, a64::x3, a64::x4);
+	armAsm->Lsr(a64::x0, a64::x0, a64::x1);
+	armAsm->Orr(a64::x0, a64::x0, a64::x3);
+	armAsm->Str(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	armAsm->Bind(&end);
+}
 #endif
 
 // ---- LQ — Load Quadword (128-bit) to GPR ----
@@ -678,30 +892,255 @@ void recSWC1()
 }
 #endif
 
-// ---- Unaligned / 128-bit stores — interpreter stubs ----
+// ============================================================================
+//  Unaligned stores (SWL/SWR/SDL/SDR)
+//
+//  Two-step: read aligned mem, mask + merge with shifted Rt, write back. When
+//  bit_offset == 0 (8-aligned for word, 8-aligned-end for dword), no merge
+//  needed — write Rt directly. We re-derive bit_offset after the slow-path
+//  read BL since vtlb_memRead clobbers caller-saved scratch.
+// ============================================================================
 
+// ---- SWL — Store Word Left (high bytes of Rt → high bytes of unaligned mem) ----
+//
+// Mirrors x86 recSWL in iR5900LoadStore.cpp:402.
 #if ISTUB_SWL
 void recSWL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SWL); }
 #else
-void recSWL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SWL); }
+void recSWL()
+{
+	// Special path for byte_off == 3: just write Rt as a 32-bit word.
+	// Detect at runtime via the same merge/skip pattern as upstream.
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 3u);
+
+	// Read aligned word (always — even when byte_off==3 we'll discard).
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem32_t>);
+	armEmitReloadCycleAfterCall();
+	// w0 = loaded aligned word
+
+	// Re-derive byte_off + recompute aligned addr.
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w2, a64::w1, 3u);   // w2 = byte_off
+	armAsm->Bic(a64::w1, a64::w1, 3u);   // w1 = aligned addr (for write call below)
+
+	a64::Label do_write;
+	armAsm->Cmp(a64::w2, 3);
+	armAsm->B(a64::eq, &do_write);       // byte_off == 3 → write Rt directly
+
+	armAsm->Lsl(a64::w2, a64::w2, 3);    // w2 = bit_offset (0,8,16)
+
+	// Mask read: keep upper bytes — w_merged = loaded & (0xFFFFFF00 << bit_off).
+	armAsm->Mov(a64::w3, 0xFFFFFF00u);
+	armAsm->Lsl(a64::w3, a64::w3, a64::w2);
+	armAsm->And(a64::w0, a64::w0, a64::w3);
+
+	if (_Rt_)
+	{
+		// shift = 24 - bit_off; merged |= Rt >> shift.
+		armAsm->Mov(a64::w4, 24);
+		armAsm->Sub(a64::w4, a64::w4, a64::w2);
+		armLoadGPR32(a64::w5, _Rt_);
+		armAsm->Lsr(a64::w5, a64::w5, a64::w4);
+		armAsm->Orr(a64::w0, a64::w0, a64::w5);
+	}
+
+	a64::Label end;
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_write);
+	// byte_off == 3: write Rt's low 32 bits directly.
+	armLoadGPR32(a64::w0, _Rt_);
+
+	armAsm->Bind(&end);
+	// w0 = value to write, w1 = aligned address. Swap into vtlb_memWrite ABI
+	// (addr in w0, value in w1) via a scratch.
+	armAsm->Mov(a64::w2, a64::w0);
+	armAsm->Mov(a64::w0, a64::w1);
+	armAsm->Mov(a64::w1, a64::w2);
+
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memWrite<mem32_t>);
+	armEmitReloadCycleAfterCall();
+}
 #endif
 
+// ---- SWR — Store Word Right (low bytes of Rt → low bytes of unaligned mem) ----
 #if ISTUB_SWR
 void recSWR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SWR); }
 #else
-void recSWR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SWR); }
+void recSWR()
+{
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 3u);
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem32_t>);
+	armEmitReloadCycleAfterCall();
+
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w2, a64::w1, 3u);   // byte_off
+	armAsm->Bic(a64::w1, a64::w1, 3u);   // aligned addr
+
+	a64::Label do_write;
+	armAsm->Cbz(a64::w2, &do_write);     // byte_off == 0 → write Rt directly
+
+	armAsm->Lsl(a64::w2, a64::w2, 3);    // bit_offset (8,16,24)
+
+	// Keep low bytes of read: shift_amt = 24 - bit_off; mask = 0xFFFFFF >> shift_amt.
+	armAsm->Mov(a64::w3, 24);
+	armAsm->Sub(a64::w3, a64::w3, a64::w2);
+	armAsm->Mov(a64::w4, 0x00FFFFFFu);
+	armAsm->Lsr(a64::w4, a64::w4, a64::w3);
+	armAsm->And(a64::w0, a64::w0, a64::w4);
+
+	if (_Rt_)
+	{
+		armLoadGPR32(a64::w5, _Rt_);
+		armAsm->Lsl(a64::w5, a64::w5, a64::w2);
+		armAsm->Orr(a64::w0, a64::w0, a64::w5);
+	}
+
+	a64::Label end;
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_write);
+	armLoadGPR32(a64::w0, _Rt_);
+
+	armAsm->Bind(&end);
+	armAsm->Mov(a64::w2, a64::w0);
+	armAsm->Mov(a64::w0, a64::w1);
+	armAsm->Mov(a64::w1, a64::w2);
+
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memWrite<mem32_t>);
+	armEmitReloadCycleAfterCall();
+}
 #endif
 
+// ---- SDL — Store Doubleword Left ----
 #if ISTUB_SDL
 void recSDL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDL); }
 #else
-void recSDL() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDL); }
+void recSDL()
+{
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 7u);
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem64_t>);
+	armEmitReloadCycleAfterCall();
+	// x0 = loaded dword
+
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w2, a64::w1, 7u);   // byte_off
+	armAsm->Bic(a64::w1, a64::w1, 7u);   // aligned addr
+
+	a64::Label do_write;
+	armAsm->Cmp(a64::w2, 7);
+	armAsm->B(a64::eq, &do_write);       // byte_off == 7 → write Rt directly
+
+	// shift = (byte_off + 1) * 8 (range 8..56);
+	// merged = (loaded & (~0ULL << shift)) | (Rt >> (64 - shift));
+	armAsm->Add(a64::w2, a64::w2, 1);
+	armAsm->Lsl(a64::w2, a64::w2, 3);    // shift
+	armAsm->Mov(a64::w3, 64);
+	armAsm->Sub(a64::w3, a64::w3, a64::w2);
+
+	armAsm->Mov(a64::x4, ~u64{0});
+	armAsm->Lsl(a64::x4, a64::x4, a64::x2);
+	armAsm->And(a64::x0, a64::x0, a64::x4);
+
+	if (_Rt_)
+	{
+		armAsm->Ldr(a64::x5, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+		armAsm->Lsr(a64::x5, a64::x5, a64::x3);
+		armAsm->Orr(a64::x0, a64::x0, a64::x5);
+	}
+
+	a64::Label end;
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_write);
+	armAsm->Ldr(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	armAsm->Bind(&end);
+	// vtlb_memWrite<mem64_t>(addr in w0, value in x1). Swap.
+	armAsm->Mov(a64::x2, a64::x0);
+	armAsm->Mov(a64::w0, a64::w1);
+	armAsm->Mov(a64::x1, a64::x2);
+
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memWrite<mem64_t>);
+	armEmitReloadCycleAfterCall();
+}
 #endif
 
+// ---- SDR — Store Doubleword Right ----
 #if ISTUB_SDR
 void recSDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDR); }
 #else
-void recSDR() { armCallInterpreter(R5900::Interpreter::OpcodeImpl::SDR); }
+void recSDR()
+{
+	armComputeAddress();
+	armAsm->Bic(a64::w0, a64::w0, 7u);
+
+	armPreVtlbCall();
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memRead<mem64_t>);
+	armEmitReloadCycleAfterCall();
+
+	armLoadGPR32(a64::w1, _Rs_);
+	if (_Imm_ != 0)
+		armAsm->Add(a64::w1, a64::w1, _Imm_);
+	armAsm->And(a64::w2, a64::w1, 7u);
+	armAsm->Bic(a64::w1, a64::w1, 7u);
+
+	a64::Label do_write;
+	armAsm->Cbz(a64::w2, &do_write);     // byte_off == 0 → write Rt directly
+
+	// shift = byte_off * 8 (range 8..56);
+	// merged = (loaded & (~0ULL >> (64 - shift))) | (Rt << shift);
+	armAsm->Lsl(a64::w2, a64::w2, 3);
+	armAsm->Mov(a64::w3, 64);
+	armAsm->Sub(a64::w3, a64::w3, a64::w2);
+
+	armAsm->Mov(a64::x4, ~u64{0});
+	armAsm->Lsr(a64::x4, a64::x4, a64::x3);
+	armAsm->And(a64::x0, a64::x0, a64::x4);
+
+	if (_Rt_)
+	{
+		armAsm->Ldr(a64::x5, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+		armAsm->Lsl(a64::x5, a64::x5, a64::x2);
+		armAsm->Orr(a64::x0, a64::x0, a64::x5);
+	}
+
+	a64::Label end;
+	armAsm->B(&end);
+
+	armAsm->Bind(&do_write);
+	armAsm->Ldr(a64::x0, a64::MemOperand(RCPUSTATE, GPR_OFFSET(_Rt_)));
+
+	armAsm->Bind(&end);
+	armAsm->Mov(a64::x2, a64::x0);
+	armAsm->Mov(a64::w0, a64::w1);
+	armAsm->Mov(a64::x1, a64::x2);
+
+	armEmitFlushCycleBeforeCall();
+	armEmitCall((const void*)&vtlb_memWrite<mem64_t>);
+	armEmitReloadCycleAfterCall();
+}
 #endif
 
 // ---- SQ — Store Quadword (128-bit) from GPR ----
