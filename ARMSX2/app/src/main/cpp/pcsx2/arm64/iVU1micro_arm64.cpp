@@ -2663,7 +2663,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// When neither holds, the FMAC arithmetic emitters skip BL vu1_fmac_writeback
 	// entirely and emit a NEON clamp + store instead — typically 5-7 instructions
 	// instead of a function call doing per-lane flag math.
+	//
+	// Audit item #7 — vuFlagHack speedhack honoring: this elision is exactly
+	// what the upstream microVU vuFlagHack toggle controls. When the user
+	// disables the speedhack (`EmuConfig.Speedhacks.vuFlagHack == false`),
+	// they're asking for exact flag computation regardless of observability.
+	// We honor that by forcing pair_needs_flags[i] = true for every pair.
+	// When the toggle is on (default), the elision logic runs as before.
 	bool pair_needs_flags[VU1_MAX_BLOCK_PAIRS];
+	const bool flagHackOn = EmuConfig.Speedhacks.vuFlagHack;
 	{
 		constexpr u32 FLAG_READ_MASK = (1u << REG_MAC_FLAG)
 		                              | (1u << REG_STATUS_FLAG)
@@ -2679,7 +2687,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			bool needsFlags = false;
 			if (isFmacPair)
 			{
-				if (fmacFromEnd < 4 || sawFlagReader)
+				if (!flagHackOn || fmacFromEnd < 4 || sawFlagReader)
 					needsFlags = true;
 				fmacFromEnd++;
 			}
