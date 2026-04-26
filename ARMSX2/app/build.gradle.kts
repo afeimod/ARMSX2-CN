@@ -19,16 +19,6 @@ android {
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild {
-            cmake {
-                // pass flags to clang
-                arguments += "-DANDROID=true"
-                arguments += "-DANDROID_STL=c++_static"
-                arguments += "-DCMAKE_BUILD_TYPE=Release"
-                arguments += "-DCMAKE_C_FLAGS=-O2 -ffp-contract=off"
-                arguments += "-DCMAKE_CXX_FLAGS=-O2 -ffp-contract=off"
-            }
-        }
         ndk {
             abiFilters.add("arm64-v8a")
         }
@@ -46,8 +36,8 @@ android {
                     arguments += "-DANDROID=true"
                     arguments += "-DANDROID_STL=c++_static"
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
-                    arguments += "-DCMAKE_C_FLAGS=-O3 -g -ffp-contract=off"
-                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g -ffp-contract=off"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
                 }
             }
         }
@@ -57,15 +47,19 @@ android {
             // codegen. -O0 was exposing a JIT-adjacent crash in MGS2 that
             // -O3 release didn't hit, which narrows the cause to stack/
             // uninitialised-local fragility rather than the debug defines.
-            // -ffp-contract=off is kept because the VU1 JIT's bit-exact
-            // float semantics depend on separate FMUL+FADD (not fused FMA).
+            // -ffp-contract=off was previously kept for VU1 bit-exactness
+            // but only affects C/C++ FP code, not JIT-emitted FMUL/FADD.
+            // Removing it lets the compiler fuse a*b+c → FMADD in counters,
+            // GS software renderer, SPU2 audio mixing, IPU, VIF unpack —
+            // significant FP-heavy paths. JIT'd VU FMAC semantics are
+            // unaffected because the recompiler emits explicit Fmul+Fadd.
             externalNativeBuild {
                 cmake {
                     arguments += "-DANDROID=true"
                     arguments += "-DANDROID_STL=c++_static"
                     arguments += "-DCMAKE_BUILD_TYPE=Debug"
-                    arguments += "-DCMAKE_C_FLAGS=-O3 -g -ffp-contract=off"
-                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g -ffp-contract=off"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
                 }
             }
         }
