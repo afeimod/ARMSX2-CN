@@ -586,10 +586,14 @@ static void emitLoadBroadcast(u32 ft, int comp) // comp: 0=x,1=y,2=z,3=w
 {
 	if (ft == 0)
 	{
-		// VF0 holds the constant {0,0,0,1}; broadcasting from memory is
-		// fine — not worth a cache slot.
-		armAsm->Ldr(s1, MemOperand(VU1_BASE_REG, vfOff(0) + comp * 4));
-		armAsm->Dup(v1.V4S(), v1.V4S(), 0);
+		// VF[0] is the hardwired constant (0, 0, 0, 1). The broadcast value
+		// is compile-time known: comp 0/1/2 → 0.0f, comp 3 → 1.0f. Build
+		// directly into v1 instead of Ldr+Dup from memory. (#2 from FMAC
+		// optimization deep-dive — VF[0] hardwired const-fold.)
+		if (comp == 3)
+			armAsm->Fmov(v1.V4S(), 1.0f);
+		else
+			armAsm->Movi(v1.V4S(), 0);
 		return;
 	}
 	const auto resident = vfCacheLoadResident(static_cast<int>(ft));
@@ -686,8 +690,12 @@ static void emitVuAddSubHack(const VRegister& to, const VRegister& from)
 // --- Binary FMAC: dst = VF[fs] OP src2 ---
 // op: 0=ADD, 1=SUB, 2=MUL
 // isScalarAdd: caller is ADDi/ADDq (scalar broadcast ADD). Gates VuAddSubHack.
+// same_operands: caller has already loaded v1 = VF[fs] (e.g., FULL variants
+//   where fs == ft). Skips the redundant vfCacheLoadInto for v0 and instead
+//   copies v1 → v0. Saves one Ldr/Mov per SQR-style op (MUL vfX,vfA,vfA;
+//   ADD vfX,vfA,vfA). #3 from FMAC optimization deep-dive.
 static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
-                           bool isScalarAdd = false)
+                           bool isScalarAdd = false, bool same_operands = false)
 {
 	const bool needsFlags  = g_vu1NeedsFlags;
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
@@ -703,7 +711,10 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
 	// Load VF[fs] → v0 (via cache: hit → Mov from resident slot, miss → Ldr).
 	// v1 must already be loaded with src2 (by emitLoadBroadcast / emitLoadQI /
 	// the FMAC_*_FULL caller's Ldr).
-	vfCacheLoadInto(static_cast<int>(fs), v0);
+	if (same_operands)
+		armAsm->Mov(v0.V16B(), v1.V16B());
+	else
+		vfCacheLoadInto(static_cast<int>(fs), v0);
 
 	// vuDouble input clamping (matches interpreter's vuDouble on every operand)
 	if (clampInputs || clampOutput)
@@ -740,18 +751,25 @@ static void emitBinaryFmac(int op, u32 fs, int64_t dst_off, u32 xyzw,
 
 // --- Ternary FMAC: dst = ACC ± VF[fs] * src2 ---
 // subtract: false=MADD (ACC + fs*src2), true=MSUB (ACC - fs*src2)
+// same_operands: caller has already loaded v1 = VF[fs] (FULL variants where
+//   fs == ft). Skips the redundant vfCacheLoadInto for v0. #3 from FMAC
+//   optimization deep-dive.
 // NOTE: The PS2 VU does NOT have fused multiply-add. It performs a separate
 // multiply then add/sub with intermediate rounding. Using FMLA/FMLS would
 // produce results differing by 1+ ULP, causing cascading precision errors
 // in matrix transforms. We use separate FMUL + FADD/FSUB to match.
-static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
+static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw,
+                            bool same_operands = false)
 {
 	const bool needsFlags  = g_vu1NeedsFlags;
 	const bool clampInputs = CHECK_VU_SIGN_OVERFLOW(0) || CHECK_VU_SIGN_OVERFLOW(1);
 	const bool clampOutput = !needsFlags && CHECK_VU_OVERFLOW(1);
 
 	// Load VF[fs] → v0 (via cache).
-	vfCacheLoadInto(static_cast<int>(fs), v0);
+	if (same_operands)
+		armAsm->Mov(v0.V16B(), v1.V16B());
+	else
+		vfCacheLoadInto(static_cast<int>(fs), v0);
 	// v1 must already be loaded with src2.
 	// Phase-8: ACC lives in pinned VU1_ACC_REG (q16). Copy into v5 for the
 	// ±FMA pipeline below instead of reading from memory.
@@ -993,7 +1011,10 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 			return; \
 		} \
 		vfCacheLoadInto(static_cast<int>(ft), v1); \
-		emitBinaryFmac(op, fs, dst, xyzw); \
+		/* SQR detection (#3 deep-dive): MUL/ADD with fs == ft skips the \
+		 * second vfCacheLoadInto; v0 = v1 via Mov. SUB+self handled above. */ \
+		emitBinaryFmac(op, fs, dst, xyzw, /*isScalarAdd=*/false, \
+		               /*same_operands=*/(fs == ft)); \
 	}
 
 // ============================================================================
@@ -1039,7 +1060,9 @@ static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 		const u32 xyzw = (VU1.code >> 21) & 0xF; \
 		vfCacheLoadInto(static_cast<int>(ft), v1); \
 		int64_t dst = (toACC) ? accOff() : vfOff(fd); \
-		emitTernaryFmac(isSub, fs, dst, xyzw); \
+		/* SQR detection (#3 deep-dive): when fs == ft, skip the redundant \
+		 * v0 load and use v1 for both operands. */ \
+		emitTernaryFmac(isSub, fs, dst, xyzw, /*same_operands=*/(fs == ft)); \
 	}
 
 // ============================================================================

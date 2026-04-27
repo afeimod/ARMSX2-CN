@@ -1535,13 +1535,30 @@ static void emitReloadWposRegs(int64_t fmacwpos_off, int64_t ialuwpos_off)
 // via _vuFlushAll/vu1EbitDone/vu1Exec/emitVU1InterpBL/hack_xgkick capture).
 // Reload after BLs that decrement VU->fmaccount (everything in that list
 // except vu1_TestFMACStallReg, which is read-only — flush only there).
+//
+// #18 from FMAC optimization deep-dive — fmaccount batching:
+// emitFMACAddPair would normally bump w26 by 1 every FMAC pair. For runs of
+// consecutive FMAC pairs with no intervening BL that needs the value,
+// collapse those Adds into a single Add at the next flush site (or block
+// end). s_vu1_deferred_fmaccount tracks the pending count; Flush drains it
+// into w26 before the Str; Reload zeroes it (the post-BL memory value is
+// authoritative; any pending count is stale).
+static int s_vu1_deferred_fmaccount = 0;
+
 static void emitFlushFmaccountReg(int64_t fmaccount_off)
 {
+	if (s_vu1_deferred_fmaccount > 0)
+	{
+		armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, s_vu1_deferred_fmaccount);
+		s_vu1_deferred_fmaccount = 0;
+	}
 	armAsm->Str(VU1_FMACCOUNT_REG, MemOperand(VU1_BASE_REG, fmaccount_off));
 }
 
 static void emitReloadFmaccountReg(int64_t fmaccount_off)
 {
+	// Memory holds the authoritative value post-BL; any pending defer is stale.
+	s_vu1_deferred_fmaccount = 0;
 	armAsm->Ldr(VU1_FMACCOUNT_REG, MemOperand(VU1_BASE_REG, fmaccount_off));
 }
 
@@ -2547,7 +2564,11 @@ static void emitFMACAddPair(const _VURegsNum& uregs, const _VURegsNum& lregs)
 	// Block-end flush + per-BL flush (around vu1_TestFMACStallReg /
 	// vu1_TestPipes_VU1 / vu1Exec / vu1EbitDone / hack_xgkick / interp BLs)
 	// keeps memory in sync wherever a downstream reader expects it.
-	armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, 1);
+	//
+	// #18 deep-dive: defer the Add. emitFlushFmaccountReg drains the
+	// accumulated count into w26 before the Str. Saves N-1 Adds across N
+	// consecutive FMAC pairs with no flush between them.
+	s_vu1_deferred_fmaccount++;
 }
 
 // Stage C1 inline pipeline add for non-FMAC lower pipes (FDIV/EFU/IALU).
@@ -2702,6 +2723,9 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	vfCacheReset();
 	// VI cache: same lifecycle as VF cache — empty at every block compile.
 	viCacheReset();
+	// #18 deep-dive: fmaccount Add-batching state. Reset per block since the
+	// pinned w26 is reloaded fresh in the prologue.
+	s_vu1_deferred_fmaccount = 0;
 
 	// --- Size check ---
 	const size_t data_size    = numPairs * 2 * sizeof(_VURegsNum);
@@ -4093,6 +4117,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// executes its per-pair loop.
 		if (ir.has_ebit || ir.has_dbit_or_tbit)
 		{
+			// #18 fix: drain any deferred fmaccount Adds into x26 BEFORE the
+			// runtime Cbz/B.ne. emitFlushFmaccountReg below would otherwise
+			// emit `Add x26, x26, N` inside the runtime conditional — when
+			// the skip path is taken (ebit was 0, or still > 1 after
+			// decrement) the Add never executes, but compile-time resets
+			// the deferred counter to 0. Subsequent FMAC pairs would then
+			// accumulate from 0 against an x26 that's silently short by N,
+			// and a future _vuFMACflush would walk the wrong number of ring
+			// slots — visible as missing flag/clip writes and corrupted
+			// vertex output (FFX residual flicker after the link-exit drain).
+			if (s_vu1_deferred_fmaccount > 0)
+			{
+				armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, s_vu1_deferred_fmaccount);
+				s_vu1_deferred_fmaccount = 0;
+			}
 			Label skip_ebit;
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ebit_off));
 			armAsm->Cbz(w4, &skip_ebit);          // ebit == 0: nothing to do
@@ -4103,6 +4142,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			emitFlushCycleReg(cycle_off);
 			// Phase-9b: vu1EbitDone calls _vuFlushAll, which drains the
 			// FMAC pipe via _vuFMACflush (decrements fmaccount per slot).
+			// (Deferred Adds already drained above; this just emits Str.)
 			emitFlushFmaccountReg(fmaccount_off);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			emitVu1Call(reinterpret_cast<const void*>(vu1EbitDone));
@@ -4181,6 +4221,20 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// VIBackupCycles untouched, matching "did not execute any pair" semantics.
 	if (skip_vibackup_decrement)
 		armAsm->Strb(wzr, MemOperand(VU1_BASE_REG, vibackup_off));
+
+	// #18 fix: drain any deferred fmaccount Adds into the pinned w26 BEFORE
+	// the exit selector. Linked exits (B → successor's linkEntry) and the
+	// JR/JALR indirect dispatch path BOTH skip the epilogue flush below;
+	// without this drain, the successor inherits a stale x26 (deferred
+	// counter not added in), every subsequent emitFMACAddPair fires on the
+	// stale value, and FMAC pipeline state corrupts. Symptom: vertex
+	// transform output collapses to flat textures at camera position
+	// (FFX battle scenes regression seen during testing).
+	if (s_vu1_deferred_fmaccount > 0)
+	{
+		armAsm->Add(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, s_vu1_deferred_fmaccount);
+		s_vu1_deferred_fmaccount = 0;
+	}
 
 	// Block-linking scaffolding (Phase 1): record the address immediately
 	// after the block-end XGKICK drain and immediately before the register
