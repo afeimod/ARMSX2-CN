@@ -416,22 +416,42 @@ static void emitFmacInlineWriteback(int64_t dst_off, u32 xyzw, FmacWritebackMode
 	// macflag nibble i". Tst + Cset + Orr shifted.
 	// ------------------------------------------------------------------
 
-	armAsm->Tst(w6, 0x000Fu);
-	armAsm->Cset(VU1_STATUSFLAG_REG, ne);
-	armAsm->Tst(w6, 0x00F0u);
-	armAsm->Cset(w4, ne);
-	armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 1));
 	if (compute_uo)
 	{
-		// Skipping when !compute_uo is equivalent: U/O macflag bits are
-		// always 0 in that path, so Tst would always set Z and Cset would
-		// always emit 0 — the Orr is a no-op.
-		armAsm->Tst(w6, 0x0F00u);
+		// 6-insn nibble-OR + compress: replaces the 11-insn Tst+Cset+Orr
+		// chain that used to dominate this step. w6 is dead after this
+		// (macflag was already stored to VU1_MACFLAG_REG above), so we
+		// destructively reuse it as the OR-fold accumulator.
+		//
+		// Steps 1-2: collapse each 4-bit nibble of w6 to its OR.
+		//   bit 0/4/8/12 of result = (any bit set in Z/S/U/O nibble)
+		//   bits between are contaminated (cross-nibble OR-fold leaks),
+		//   so step 3 masks them out.
+		// 0x11111111 is the encodable equivalent of 0x1111: bits 16-31 of
+		// w6 are 0 (Step D Umov sourced from a 16-bit-meaningful s-reg),
+		// so Anding with the upper-half-also-set 0x11111111 has the same
+		// effect on bits 0-15 as Anding with 0x1111. (0x1111 itself is
+		// not a valid ARM64 logical immediate — would need 2 insn to load.)
+		// Steps 4-5: spread the 4 bit-0/4/8/12 bits down to positions 0-3
+		// via shift+OR (no carry/multiply, no latency hazard).
+		// Step 6: ubfx 4 bits into the statusflag reg.
+		armAsm->Orr(w6, w6, Operand(w6, LSR, 1));
+		armAsm->Orr(w6, w6, Operand(w6, LSR, 2));
+		armAsm->And(w6, w6, 0x11111111u);
+		armAsm->Orr(w6, w6, Operand(w6, LSR, 3));
+		armAsm->Orr(w6, w6, Operand(w6, LSR, 6));
+		armAsm->Ubfx(VU1_STATUSFLAG_REG, w6, 0, 4);
+	}
+	else
+	{
+		// !compute_uo: U/O macflag bits are always 0, so only Z+S contribute
+		// to statusflag. The original 5-insn Tst chain matches this exactly
+		// and beats the 6-insn nibble-OR approach by 1 insn here, so keep it.
+		armAsm->Tst(w6, 0x000Fu);
+		armAsm->Cset(VU1_STATUSFLAG_REG, ne);
+		armAsm->Tst(w6, 0x00F0u);
 		armAsm->Cset(w4, ne);
-		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 2));
-		armAsm->Tst(w6, 0xF000u);
-		armAsm->Cset(w4, ne);
-		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 3));
+		armAsm->Orr(VU1_STATUSFLAG_REG, VU1_STATUSFLAG_REG, Operand(w4, LSL, 1));
 	}
 	// statusflag lives in the pinned reg; no memory store here.
 

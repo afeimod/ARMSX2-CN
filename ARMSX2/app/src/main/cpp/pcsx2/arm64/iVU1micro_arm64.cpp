@@ -1139,10 +1139,60 @@ static BlockLinkExits computeBlockLinkExits(u32 startPC, u32 numPairs)
 //  Block linking — patch helpers (Phase 2)
 // ============================================================================
 
+// Batched icache flush. Per-patch FlushInstructionCache costs ~3 barriers
+// (dsb ish, dsb ish, isb) — for wide Clear()s that unpatch hundreds of exit
+// sites, that's ms-scale lag (visible in FFXII, GTASA, Darkwatch when the
+// EE re-uploads VU1 micro programs). Batching dedupes cache lines and pays
+// the barrier overhead exactly once per call site.
+//
+// Each LinkExit patch is 4 bytes (single B-imm26). A single 64-byte cache
+// line covers 16 patch sites, so dedup wins materially when patches cluster
+// (each block's exits[0]/exits[1] are adjacent in JIT memory).
+//
+// Cache line size hard-coded to 64 — true for every Snapdragon Oryon /
+// Cortex-A7x / Cortex-X core. Querying CTR_EL0 once at init would be
+// trivial future work if a target ships with 32 or 128 byte lines.
+struct VU1IcacheBatch
+{
+	std::vector<uintptr_t> lines;
+	static constexpr uintptr_t LINE_MASK = ~uintptr_t(63);
+
+	void note(void* addr)
+	{
+		lines.push_back(reinterpret_cast<uintptr_t>(addr) & LINE_MASK);
+	}
+
+	void flush()
+	{
+		if (lines.empty())
+			return;
+		std::sort(lines.begin(), lines.end());
+		lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+#ifdef ARCH_ARM64
+		for (uintptr_t line : lines)
+			asm volatile("dc cvau, %0" ::"r"(line) : "memory");
+		asm volatile("dsb ish" ::: "memory");
+		for (uintptr_t line : lines)
+			asm volatile("ic ivau, %0" ::"r"(line) : "memory");
+		asm volatile("dsb ish" ::: "memory");
+		asm volatile("isb" ::: "memory");
+#else
+		// Fallback: single range flush. Only the unit-test build path
+		// reaches here; the JIT itself only runs on ARM64.
+		uintptr_t lo = lines.front();
+		uintptr_t hi = lines.back() + 64;
+		HostSys::FlushInstructionCache(reinterpret_cast<void*>(lo),
+			static_cast<u32>(hi - lo));
+#endif
+		lines.clear();
+	}
+};
+
 // Rewrite a single LinkExit's patch site to jump to `target` (typically
 // another block's linkEntry, or the exit's own fallthrough address for
 // unpatching). No-op if the slot already points at `target`. Handles
-// I-cache coherency via armEmitJmpPtr's internal FlushInstructionCache.
+// I-cache coherency via armEmitJmpPtr's internal FlushInstructionCache,
+// unless the caller passes a `batch` to defer the flush.
 //
 // The single-thread assumption: this is called from recArmVU1::Execute
 // (block compile path) or recArmVU1::Clear (invalidation). Both run on the
@@ -1151,13 +1201,20 @@ static BlockLinkExits computeBlockLinkExits(u32 startPC, u32 numPairs)
 // external serialization, same as the pre-existing codeEntry=nullptr
 // invalidation). Intra-thread patching is safe with armEmitJmpPtr's
 // FlushInstructionCache call; we don't add extra barriers here.
-static void patchLinkSite(LinkExit& exit, u8* target)
+//
+// When `batch` is non-null the icache flush is deferred — the caller must
+// invoke batch->flush() before any code that may execute through the
+// patched site runs. Used by Clear() and the post-Clear relink path in
+// Execute() to amortize per-patch barrier overhead across many sites.
+static void patchLinkSite(LinkExit& exit, u8* target, VU1IcacheBatch* batch = nullptr)
 {
 	if (!exit.patch_site)
 		return;
 	if (exit.current_target == target)
 		return;
-	armEmitJmpPtr(exit.patch_site, target, true);
+	armEmitJmpPtr(exit.patch_site, target, /* flush_icache */ batch == nullptr);
+	if (batch)
+		batch->note(exit.patch_site);
 	exit.current_target = target;
 }
 
@@ -1166,11 +1223,11 @@ static void patchLinkSite(LinkExit& exit, u8* target)
 // path immediately after the B. For num_exits==2 (Phase 3 conditional)
 // both exits' fallthrough is ALSO the flush path — exits[1]'s B.eq
 // fallthrough skips past exits[0]'s B to reach it.
-static void unpatchLinkSite(LinkExit& exit)
+static void unpatchLinkSite(LinkExit& exit, VU1IcacheBatch* batch = nullptr)
 {
 	if (!exit.patch_site)
 		return;
-	patchLinkSite(exit, exit.fallthrough);
+	patchLinkSite(exit, exit.fallthrough, batch);
 }
 
 // Detach and free a single variant. Caller has already removed it from
@@ -1188,6 +1245,10 @@ static void destroyVariant(VU1BlockEntry* blk, u32 my_slot)
 {
 	if (blk->linkEntry && my_slot < VU1_NUM_SLOTS)
 	{
+		// Batch the unpatch icache flushes — eviction at a hot slot can
+		// touch every predecessor with a live patch, paying ~3 barriers
+		// each per call without batching.
+		VU1IcacheBatch flush_batch;
 		for (VU1BlockEntry* pred : s_waitingForSlot[my_slot])
 		{
 			if (pred == blk)
@@ -1196,9 +1257,10 @@ static void destroyVariant(VU1BlockEntry* blk, u32 my_slot)
 			{
 				LinkExit& exit = pred->exits[e];
 				if (exit.current_target == blk->linkEntry)
-					unpatchLinkSite(exit);
+					unpatchLinkSite(exit, &flush_batch);
 			}
 		}
+		flush_batch.flush();
 	}
 
 	for (u32 e = 0; e < blk->num_exits; e++)
@@ -1269,7 +1331,11 @@ static VU1BlockEntry* findVariant(u32 pc)
 // Called right after a block compiles: for each active exit, if its static
 // target has a currently-live compiled variant (one whose snapshot matches
 // live VU1.Micro at target_pc), patch that exit's slot to jump directly.
-static void tryForwardLink(VU1BlockEntry& block)
+//
+// `batch` allows the caller to coalesce icache flushes across this call
+// and a subsequent patchWaitingPredecessors. Caller MUST flush before any
+// patched code is executed.
+static void tryForwardLink(VU1BlockEntry& block, VU1IcacheBatch* batch = nullptr)
 {
 	for (u32 e = 0; e < block.num_exits; e++)
 	{
@@ -1278,7 +1344,7 @@ static void tryForwardLink(VU1BlockEntry& block)
 			continue;
 		VU1BlockEntry* target = findVariant(exit.target_pc);
 		if (target && target->linkEntry)
-			patchLinkSite(exit, target->linkEntry);
+			patchLinkSite(exit, target->linkEntry, batch);
 	}
 }
 
@@ -1312,7 +1378,7 @@ static u8* vu1_indirect_dispatch(u32 tpc)
 // Cost: O(predecessors_of_my_slot * max_exits). For typical menu/UI VU
 // programs with 1-3 exits per block, this is dozens to hundreds of pairs,
 // not the millions the pre-index version touched as variants accumulated.
-static void patchWaitingPredecessors(u32 my_pc, u8* my_linkEntry)
+static void patchWaitingPredecessors(u32 my_pc, u8* my_linkEntry, VU1IcacheBatch* batch = nullptr)
 {
 	if (!my_linkEntry)
 		return;
@@ -1328,7 +1394,7 @@ static void patchWaitingPredecessors(u32 my_pc, u8* my_linkEntry)
 			    && exit.target_pc == my_pc
 			    && exit.current_target != my_linkEntry)
 			{
-				patchLinkSite(exit, my_linkEntry);
+				patchLinkSite(exit, my_linkEntry, batch);
 			}
 		}
 	}
@@ -4579,16 +4645,25 @@ void recArmVU1::Execute(u32 cycles)
 			//      whose static target is THIS block's PC (and that are
 			//      still falling through because no matching variant
 			//      existed yet) get patched to jump to our linkEntry.
-			tryForwardLink(*blk);
-			patchWaitingPredecessors(pc, blk->linkEntry);
+			// Batched icache flush: a freshly-compiled block at a hot PC
+			// can have many waiters; per-patch flush would dominate the
+			// post-compile cost.
+			VU1IcacheBatch compile_batch;
+			tryForwardLink(*blk, &compile_batch);
+			patchWaitingPredecessors(pc, blk->linkEntry, &compile_batch);
+			compile_batch.flush();
 		}
 		else if (blk->needsRelink)
 		{
 			// The variant survived a Clear() that unpatched its incoming
 			// exit edges — re-wire the graph lazily on the first dispatch
-			// post-Clear so repeated hits pay this cost only once.
-			tryForwardLink(*blk);
-			patchWaitingPredecessors(pc, blk->linkEntry);
+			// post-Clear so repeated hits pay this cost only once. Batch
+			// the icache flush across both relink calls and the eventual
+			// codeEntry call below — must flush before the dispatch.
+			VU1IcacheBatch flush_batch;
+			tryForwardLink(*blk, &flush_batch);
+			patchWaitingPredecessors(pc, blk->linkEntry, &flush_batch);
+			flush_batch.flush();
 			blk->needsRelink = false;
 		}
 
@@ -4634,6 +4709,11 @@ void recArmVU1::Clear(u32 addr, u32 size)
 	// to num_exits and re-check target_pc per-exit, since a multi-exit
 	// variant indexed under one cleared slot may still have a second exit
 	// pointing OUTSIDE [first, clamped_last) which must not be unpatched.
+	//
+	// Batched icache flush: a wide Clear() (e.g., VIF MPG re-uploading the
+	// whole micro) can touch hundreds of patch sites — per-patch flush
+	// would pay 3 barriers each (~ms-scale lag). Defer + batch.
+	VU1IcacheBatch flush_batch;
 	for (u32 ts = first; ts < clamped_last; ts++)
 	{
 		for (VU1BlockEntry* pred : s_waitingForSlot[ts])
@@ -4645,10 +4725,11 @@ void recArmVU1::Clear(u32 addr, u32 size)
 					continue;
 				const u32 target_slot = exit.target_pc / 8;
 				if (target_slot >= first && target_slot < clamped_last)
-					unpatchLinkSite(exit);
+					unpatchLinkSite(exit, &flush_batch);
 			}
 		}
 	}
+	flush_batch.flush();
 
 	// Mark variants in the cleared range as needing relink on next dispatch.
 	// We deliberately do NOT delete them: if the EE re-uploads identical
