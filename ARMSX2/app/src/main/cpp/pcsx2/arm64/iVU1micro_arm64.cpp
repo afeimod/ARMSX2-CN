@@ -862,6 +862,44 @@ static void vu1_TestFMACStallReg(VURegs* VU, u32 reg, u32 xyzw)
 	}
 }
 
+// Combined two-read FMAC stall check. Most FMAC ops have two VF reads
+// (ADD/SUB/MUL/MADD/MSUB all read two operands), so the JIT used to
+// emit two separate BL vu1_TestFMACStallReg calls per pair — paying
+// the full emitVu1Call overhead twice (vfCacheFlushAndInvalidate emits
+// Strs for every dirty VF cache slot, ~3-6 per pair in FMAC-heavy
+// blocks like FFXII vertex T&L). One BL with both (reg, xyzw) pairs
+// halves that overhead. reg0/reg1 == 0 means "skip this check"
+// (mirrors emitFMACStallChecks's pre-BL guard).
+//
+// Walks the FMAC ring once, checks both pairs per slot. Same semantics
+// as two back-to-back vu1_TestFMACStallReg calls — VU->cycle update
+// is monotonic so order of checks doesn't matter for the final cycle.
+static void vu1_TestFMACStallReg2(VURegs* VU, u32 reg0, u32 xyzw0, u32 reg1, u32 xyzw1)
+{
+	u32 i = 0;
+	for (int currentpipe = VU->fmacreadpos; i < VU->fmaccount;
+	     currentpipe = (currentpipe + 1) & 3, i++)
+	{
+		if ((VU->cycle - VU->fmac[currentpipe].sCycle) >= VU->fmac[currentpipe].Cycle)
+			continue;
+
+		const fmacPipe& slot = VU->fmac[currentpipe];
+		const bool hit0 = reg0 != 0 && (
+			(slot.regupper == reg0 && (slot.xyzwupper & xyzw0)) ||
+			(slot.reglower == reg0 && (slot.xyzwlower & xyzw0)));
+		const bool hit1 = reg1 != 0 && (
+			(slot.regupper == reg1 && (slot.xyzwupper & xyzw1)) ||
+			(slot.reglower == reg1 && (slot.xyzwlower & xyzw1)));
+
+		if (hit0 || hit1)
+		{
+			u64 newCycle = (u64)slot.Cycle + slot.sCycle;
+			if (newCycle > VU->cycle)
+				VU->cycle = newCycle;
+		}
+	}
+}
+
 // FDIV pipe wait portion of _vuTestFDIVStalls (the FMAC test is called
 // separately by the JIT when needed).
 static void vu1_TestFDIVPipeWait(VURegs* VU)
@@ -2374,7 +2412,27 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 	const int64_t cycle_off     = (int64_t)offsetof(VURegs, cycle);
 	const int64_t fmaccount_off = (int64_t)offsetof(VURegs, fmaccount);
 
-	if (!skip0 && regs.VFread0 != 0)
+	const bool active0 = !skip0 && regs.VFread0 != 0;
+	const bool active1 = !skip1 && regs.VFread1 != 0;
+
+	if (active0 && active1)
+	{
+		// Combined path: one BL handles both reads. Cuts vfCacheFlushAndInvalidate
+		// + Mov scratch + emitFlush/Reload overhead in half for the typical
+		// 2-read FMAC pair (ADD/SUB/MUL/MADD/MSUB). Hot in FFXII vertex blocks.
+		emitFlushCycleReg(cycle_off);
+		emitFlushFmaccountReg(fmaccount_off);
+		armAsm->Mov(x0, VU1_BASE_REG);
+		armAsm->Mov(w1, regs.VFread0);
+		armAsm->Mov(w2, regs.VFr0xyzw);
+		armAsm->Mov(w3, regs.VFread1);
+		armAsm->Mov(w4, regs.VFr1xyzw);
+		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
+		emitReloadCycleReg(cycle_off);
+		return;
+	}
+
+	if (active0)
 	{
 		emitFlushCycleReg(cycle_off);
 		emitFlushFmaccountReg(fmaccount_off);
@@ -2384,7 +2442,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 		emitReloadCycleReg(cycle_off);
 	}
-	if (!skip1 && regs.VFread1 != 0)
+	if (active1)
 	{
 		emitFlushCycleReg(cycle_off);
 		emitFlushFmaccountReg(fmaccount_off);
@@ -4251,6 +4309,100 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// (ir_op.isKick is already gated on !iBit by Pass 1.)
 			if (ir_op.isKick)
 				pending_xgkick_fire = true;
+		}
+
+		// Step 16 (FMAC opt #20): software-pipeline preload of next pair's
+		// VF reads. ARM Cortex/Oryon out-of-order cores hide a 4-6 cycle
+		// Ldr latency behind independent FMUL/FADD/integer work. Pass 1
+		// already populated the next pair's _VURegsNum; emitting the Ldrs
+		// HERE — at the runtime tail of this pair, before the loop iterates
+		// to the next pair's prologue/compute — means the Ldrs issue while
+		// step 12/13/15 conditional BLs (if any) have already executed,
+		// step 14 fmacwpos++ has retired, and step 1-6 of the NEXT pair
+		// (cycle++, TPC store, etc.) provide the cycle gap that hides the
+		// Ldr's load-to-use latency. The next pair's vfCacheLoadInto then
+		// hits the cache and emits a single Mov instead of an Ldr.
+		//
+		// Restricted to "clean-entry" next pairs only: any BL in the next
+		// pair's pre-compute path goes through emitVu1Call →
+		// vfCacheFlushAndInvalidate, which drops the cache tracker and
+		// (at runtime) clobbers caller-saved NEON regs. A speculative
+		// preload through such a BL is pure waste — the runtime data is
+		// destroyed and the tracker reset means the JIT re-Ldrs anyway.
+		//
+		// xgkickhack mode is excluded entirely: step 6c xgkickhack sync
+		// and step 8's hack_xgkick_here both emit unconditional BLs in
+		// configurations that's enabled, and the per-pair gating would
+		// have to consider kick_cycles_sync[] which adds noise. Most
+		// users keep xgkickhack off; we forfeit the optimization for the
+		// rest.
+		if (!xgkickhack && i + 1 < numPairs)
+		{
+			const u32 next_i = i + 1;
+			const armvu1ir::microOp& nextOp = ir.info[next_i];
+			const _VURegsNum& uregs_n = uregs_data[next_i];
+			const _VURegsNum& lregs_n = lregs_data[next_i];
+			const PerPairSkip& sk = skip_info[next_i];
+
+			// Upper-stalls BL gate. emitTestUpperStalls only emits a BL
+			// when uregs.pipe == VUPIPE_FMAC AND a non-skipped VFread is
+			// non-zero. Match that exactly.
+			const bool upper_clean =
+				(uregs_n.pipe != VUPIPE_FMAC)
+				|| ((sk.skipUpperFMACStall0 || uregs_n.VFread0 == 0)
+				    && (sk.skipUpperFMACStall1 || uregs_n.VFread1 == 0));
+
+			// Lower-stalls BL gate. I-bit pairs have no lower work; for
+			// non-I-bit, the BL gating depends on the lower's pipe class.
+			bool lower_clean = false;
+			if (nextOp.iBit)
+			{
+				lower_clean = true;
+			}
+			else
+			{
+				const bool fmac_stalls_clean =
+					(sk.skipLowerFMACStall0 || lregs_n.VFread0 == 0)
+					&& (sk.skipLowerFMACStall1 || lregs_n.VFread1 == 0);
+				switch (lregs_n.pipe)
+				{
+					case VUPIPE_FMAC:   lower_clean = fmac_stalls_clean; break;
+					case VUPIPE_FDIV:   lower_clean = fmac_stalls_clean && sk.skipLowerFDIVWait; break;
+					case VUPIPE_EFU:    lower_clean = fmac_stalls_clean && sk.skipLowerEFUWait; break;
+					case VUPIPE_BRANCH: lower_clean = (sk.skipLowerALUStall || lregs_n.VIread == 0); break;
+					default:            lower_clean = true; break;
+				}
+			}
+
+			const bool clean_entry =
+				!nextOp.vf_read_after_write && !nextOp.vf_write_collision
+				&& !nextOp.clip_read_after_write && !nextOp.clip_write_collision
+				&& upper_clean && lower_clean
+				&& sk.skipTestPipes
+				// step 8a back-to-back XGKICK fire BL: both pairs are XGKICK.
+				&& !(ir_op.isKick && nextOp.isKick);
+
+			if (clean_entry)
+			{
+				u32 preloaded[4] = {0, 0, 0, 0};
+				int n_preloaded = 0;
+				auto try_preload = [&](u32 vf) {
+					// VF[0] is constant {0,0,0,1} — load helpers handle it
+					// inline without a cache slot, so preloading wastes a
+					// slot and an Ldr.
+					if (vf == 0)
+						return;
+					for (int k = 0; k < n_preloaded; k++)
+						if (preloaded[k] == vf)
+							return;
+					preloaded[n_preloaded++] = vf;
+					(void)vfCacheLoadResident(static_cast<int>(vf));
+				};
+				try_preload(uregs_n.VFread0);
+				try_preload(uregs_n.VFread1);
+				try_preload(lregs_n.VFread0);
+				try_preload(lregs_n.VFread1);
+			}
 		}
 
 		// Track branch for next pair's D/T bit suppression (step 11b).
