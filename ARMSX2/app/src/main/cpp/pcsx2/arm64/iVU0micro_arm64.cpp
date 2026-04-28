@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <vector>
 
 using namespace vixl::aarch64;
@@ -72,7 +73,7 @@ static constexpr u32 LINK_TARGET_NONE = ~0u;
 
 struct VU0BlockEntry
 {
-	u8*  codeEntry;   // prologue entry — nullptr = not yet compiled / cleared
+	u8*  codeEntry;   // prologue entry — for first-call dispatch from Execute
 	u8*  linkEntry;   // post-prologue entry; predecessors B here directly
 	u8*  returnExit;  // post-pair-loop label where the exit-selector lives
 
@@ -85,22 +86,40 @@ struct VU0BlockEntry
 
 	u32  numPairs;
 
-	// Set by Clear() when this entry is invalidated. The next dispatch path
-	// recompiles from scratch; we keep the field for symmetry with VU1.
+	// Content-keyed cache key. Snapshot of the VU0.Micro bytes this variant
+	// was compiled against (numPairs * 8 bytes). findVariantVU0 picks the
+	// variant whose snapshot matches the live micro at dispatch time —
+	// surviving across Clear() so re-uploads of the same program get a hit
+	// instead of a fresh compile. Heap-owned; freed in destroyVariantVU0.
+	u8*  snapshot;
+
+	// Set by Clear() when this variant's slot is in a cleared range. The
+	// next dispatch via findVariantVU0 re-runs tryForwardLinkVU0 +
+	// patchWaitingPredecessorsVU0 to re-wire incoming/outgoing edges
+	// (Clear already unpatched incoming edges for correctness).
 	bool needsRelink;
 };
 
-static VU0BlockEntry s_blocks[VU0_NUM_SLOTS];
+// Per-slot cap on the variant deque. Mirrors VU1's kVariantCapPerSlot. 8
+// covers any sane number of distinct programs at one PC; the LRU is
+// evicted via destroyVariantVU0 when the cap is hit.
+static constexpr u32 kVU0VariantCapPerSlot = 8;
 
-// Reverse index: for each VU0 slot S, the list of currently-compiled blocks
-// that have at least one exit targeting S. patchWaitingPredecessors uses
-// this to find candidates after a fresh compile; Clear() uses it to find
-// predecessors that need their incoming exits unpatched.
+// Content-keyed program cache — one deque of compiled variants per slot.
+// Most slots carry 0 or 1 variant in steady state; a slot grows a deque
+// only when the EE uploads different bytecode programs to the same PC.
+// Front of the deque is the MRU variant — findVariantVU0 bubbles hits forward.
+static std::deque<VU0BlockEntry*> s_vu0_variants[VU0_NUM_SLOTS];
+
+// Reverse index: for each VU0 slot S, the list of variants that have at
+// least one exit targeting S. patchWaitingPredecessorsVU0 walks this to
+// find waiters after a fresh compile; Clear() walks it to find predecessors
+// that need their incoming exits unpatched.
 //
-// Each entry is the predecessor's startpc (slot index = pc / 8). Lazily
-// cleaned during walks (entries with `s_blocks[pred_slot].codeEntry == nullptr`
-// are skipped). Wiped by Reset/Shutdown.
-static std::vector<u32> s_vu0_waitingForSlot[VU0_NUM_SLOTS];
+// A variant is added once per UNIQUE target_pc among its exits[]. Variants
+// stay in the index for their lifetime; cleaned up by destroyVariantVU0
+// (per-eviction) or deleteAllVariantsVU0 (full reset).
+static std::vector<VU0BlockEntry*> s_vu0_waitingForSlot[VU0_NUM_SLOTS];
 
 static u8* s_code_base  = nullptr;
 static u8* s_code_write = nullptr;
@@ -397,20 +416,59 @@ static void unpatchVU0LinkSite(LinkExit& exit)
 	patchVU0LinkSite(exit, exit.fallthrough);
 }
 
-// Add this block's startpc to the reverse index for each unique exit target.
-// Call after writing the entry into s_blocks[].
-static void indexVU0BlockExits(u32 my_pc, const VU0BlockEntry& blk)
+// Content-keyed variant lookup. Scans the slot's deque for a variant whose
+// snapshot matches the live VU0.Micro bytes at `pc`; MRU-bubbles a hit to
+// the front. Miss → nullptr.
+//
+// Fast-reject on the first 8-byte compare before the full memcmp — most
+// mismatches fail there. VU0.Micro is 16-byte aligned and slot PCs are
+// 8-byte aligned, so the u64 load is well-defined.
+static VU0BlockEntry* findVariantVU0(u32 pc)
 {
-	const u32 my_slot = my_pc / 8;
-	for (u32 e = 0; e < blk.num_exits; e++)
+	const u32 slot = pc / 8;
+	if (slot >= VU0_NUM_SLOTS)
+		return nullptr;
+	auto& deque = s_vu0_variants[slot];
+	if (deque.empty())
+		return nullptr;
+
+	const u8* live = VU0.Micro + pc;
+	const u64 live_head = *reinterpret_cast<const u64*>(live);
+
+	for (auto it = deque.begin(); it != deque.end(); ++it)
 	{
-		const u32 target_pc = blk.exits[e].target_pc;
+		VU0BlockEntry* blk = *it;
+		const u64 snap_head = *reinterpret_cast<const u64*>(blk->snapshot);
+		if (snap_head != live_head)
+			continue;
+		const u32 snap_bytes = blk->numPairs * 8;
+		if (snap_bytes > 8
+			&& std::memcmp(blk->snapshot + 8, live + 8, snap_bytes - 8) != 0)
+			continue;
+
+		if (it != deque.begin())
+		{
+			deque.erase(it);
+			deque.push_front(blk);
+		}
+		return blk;
+	}
+	return nullptr;
+}
+
+// Add this block to the reverse index for each unique exit target. Caller
+// has already pushed the entry onto its slot's deque.
+static void indexVU0VariantExits(VU0BlockEntry* blk)
+{
+	for (u32 e = 0; e < blk->num_exits; e++)
+	{
+		const u32 target_pc = blk->exits[e].target_pc;
 		if (target_pc == LINK_TARGET_NONE)
 			continue;
 		bool dup = false;
 		for (u32 j = 0; j < e; j++)
 		{
-			if (blk.exits[j].target_pc == target_pc)
+			if (blk->exits[j].target_pc == target_pc)
 			{
 				dup = true;
 				break;
@@ -420,12 +478,13 @@ static void indexVU0BlockExits(u32 my_pc, const VU0BlockEntry& blk)
 			continue;
 		const u32 target_slot = target_pc / 8;
 		if (target_slot < VU0_NUM_SLOTS)
-			s_vu0_waitingForSlot[target_slot].push_back(my_slot);
+			s_vu0_waitingForSlot[target_slot].push_back(blk);
 	}
 }
 
-// Right after a block compiles: for each live static exit, if its target
-// is already compiled, wire the exit up.
+// Right after a block compiles: for each live static exit, look up the
+// target slot's variant cache for a snapshot-matching entry; if found and
+// it has a linkEntry, wire our exit to it.
 static void tryForwardLinkVU0(VU0BlockEntry& block)
 {
 	for (u32 e = 0; e < block.num_exits; e++)
@@ -433,19 +492,16 @@ static void tryForwardLinkVU0(VU0BlockEntry& block)
 		LinkExit& exit = block.exits[e];
 		if (exit.target_pc == LINK_TARGET_NONE)
 			continue;
-		const u32 target_slot = exit.target_pc / 8;
-		if (target_slot >= VU0_NUM_SLOTS)
-			continue;
-		VU0BlockEntry& target = s_blocks[target_slot];
-		if (target.linkEntry)
-			patchVU0LinkSite(exit, target.linkEntry);
+		VU0BlockEntry* target = findVariantVU0(exit.target_pc);
+		if (target && target->linkEntry)
+			patchVU0LinkSite(exit, target->linkEntry);
 	}
 }
 
 // Walk the reverse index for `my_slot` and patch any predecessor exit whose
-// target is `my_pc` to jump directly to `my_linkEntry`. Called right after
-// a fresh compile so previously-compiled predecessors that fall through to
-// the dispatcher start B'ing into us instead.
+// target is `my_pc` to jump directly into `my_linkEntry`. Predecessors are
+// stored as VU0BlockEntry* (multiple variants can target the same slot,
+// and a slot can hold multiple variants too).
 static void patchWaitingPredecessorsVU0(u32 my_pc, u8* my_linkEntry)
 {
 	if (!my_linkEntry)
@@ -453,17 +509,11 @@ static void patchWaitingPredecessorsVU0(u32 my_pc, u8* my_linkEntry)
 	const u32 my_slot = my_pc / 8;
 	if (my_slot >= VU0_NUM_SLOTS)
 		return;
-	const auto& preds = s_vu0_waitingForSlot[my_slot];
-	for (u32 pred_slot : preds)
+	for (VU0BlockEntry* pred : s_vu0_waitingForSlot[my_slot])
 	{
-		if (pred_slot >= VU0_NUM_SLOTS)
-			continue;
-		VU0BlockEntry& pred = s_blocks[pred_slot];
-		if (!pred.codeEntry)
-			continue; // stale entry — pred was invalidated, skip
-		for (u32 e = 0; e < pred.num_exits; e++)
+		for (u32 e = 0; e < pred->num_exits; e++)
 		{
-			LinkExit& exit = pred.exits[e];
+			LinkExit& exit = pred->exits[e];
 			if (exit.patch_site != nullptr
 			    && exit.target_pc == my_pc
 			    && exit.current_target != my_linkEntry)
@@ -474,17 +524,86 @@ static void patchWaitingPredecessorsVU0(u32 my_pc, u8* my_linkEntry)
 	}
 }
 
-// JR/JALR runtime dispatcher. Given the runtime TPC (in x0 from JIT), look
-// up the target block's linkEntry; return nullptr if not yet compiled.
-// Caller (the JIT-emitted indirect tail) tail-Brs to the returned address
-// or falls through to flushes+Ret on null.
+// Detach and free a single variant. Caller has already removed it from
+// s_vu0_variants[my_slot]; this routine drops it from the reverse index
+// and frees the snapshot + entry. Compiled code in the JIT buffer is left
+// in place — reclaimed at the next deleteAllVariantsVU0 (buffer-full
+// reset / Reset / Shutdown).
+//
+// Predecessors that had patches pointing at this variant's linkEntry get
+// reverted to fall-through so they don't jump into code that may be
+// overwritten by a future compile occupying the same buffer space.
+static void destroyVariantVU0(VU0BlockEntry* blk, u32 my_slot)
+{
+	if (blk->linkEntry && my_slot < VU0_NUM_SLOTS)
+	{
+		for (VU0BlockEntry* pred : s_vu0_waitingForSlot[my_slot])
+		{
+			if (pred == blk)
+				continue;
+			for (u32 e = 0; e < pred->num_exits; e++)
+			{
+				LinkExit& exit = pred->exits[e];
+				if (exit.current_target == blk->linkEntry)
+					unpatchVU0LinkSite(exit);
+			}
+		}
+	}
+
+	for (u32 e = 0; e < blk->num_exits; e++)
+	{
+		const u32 target_pc = blk->exits[e].target_pc;
+		if (target_pc == LINK_TARGET_NONE)
+			continue;
+		bool dup = false;
+		for (u32 j = 0; j < e; j++)
+		{
+			if (blk->exits[j].target_pc == target_pc)
+			{
+				dup = true;
+				break;
+			}
+		}
+		if (dup)
+			continue;
+		const u32 target_slot = target_pc / 8;
+		if (target_slot >= VU0_NUM_SLOTS)
+			continue;
+		auto& vec = s_vu0_waitingForSlot[target_slot];
+		vec.erase(std::remove(vec.begin(), vec.end(), blk), vec.end());
+	}
+
+	delete[] blk->snapshot;
+	delete blk;
+}
+
+// Wipe every cached variant in every slot. Called on buffer-full reset,
+// Shutdown, and Reset. The compiled code buffer itself is reclaimed by
+// the caller — this only frees the per-variant heap storage.
+static void deleteAllVariantsVU0()
+{
+	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
+	{
+		for (VU0BlockEntry* blk : s_vu0_variants[i])
+		{
+			delete[] blk->snapshot;
+			delete blk;
+		}
+		s_vu0_variants[i].clear();
+		s_vu0_waitingForSlot[i].clear();
+	}
+}
+
+// JR/JALR runtime dispatcher. Given the runtime TPC, look up the target
+// slot's variant cache (content-match against live micro). On hit, the
+// JIT-emitted indirect tail tail-Brs to the returned linkEntry. On miss
+// (no compiled variant matches live micro), fall through to flushes+Ret;
+// Execute's loop will dispatch + compile, and the next visit hits.
 static u8* vu0_indirect_dispatch(u32 tpc)
 {
 	const u32 pc = tpc & VU0_PROGMASK;
-	const u32 slot = pc / 8;
-	if (slot >= VU0_NUM_SLOTS)
-		return nullptr;
-	return s_blocks[slot].linkEntry;
+	VU0BlockEntry* blk = findVariantVU0(pc);
+	return blk ? blk->linkEntry : nullptr;
 }
 
 // ============================================================================
@@ -519,17 +638,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 
 	if (static_cast<size_t>(s_code_end - s_code_write) < total_needed)
 	{
-		// Wipe ALL block entries + reverse-index. Any predecessor's patched B
-		// would now point at the recycled buffer region; clearing the block
-		// table forces a fresh compile (which calls patchWaitingPredecessors
-		// to re-link). The reverse-index entries become stale (the predecessor
-		// blocks themselves are reset here) — patchWaitingPredecessors's
-		// `pred.codeEntry == nullptr` skip handles that.
-		std::memset(s_blocks, 0, sizeof(s_blocks));
-	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
-		s_vu0_waitingForSlot[i].clear();
-		for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
-			s_vu0_waitingForSlot[i].clear();
+		// Wipe every cached variant. Any predecessor's patched B would now
+		// point at the recycled buffer region; nuking the cache forces a
+		// fresh compile (which calls patchWaitingPredecessorsVU0 to re-link).
+		// The incoming out_block is fresh (caller hasn't pushed it onto a
+		// deque yet), so it survives.
+		deleteAllVariantsVU0();
 		s_code_write = s_code_base;
 		s_pool.Reset();
 	}
@@ -1031,9 +1145,7 @@ void recArmVU0::Reserve()
 	s_code_write = s_code_base;
 	s_code_end   = buf_end;
 
-	std::memset(s_blocks, 0, sizeof(s_blocks));
-	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
-		s_vu0_waitingForSlot[i].clear();
+	deleteAllVariantsVU0();
 }
 
 void recArmVU0::Shutdown()
@@ -1042,9 +1154,7 @@ void recArmVU0::Shutdown()
 	s_code_base  = nullptr;
 	s_code_write = nullptr;
 	s_code_end   = nullptr;
-	std::memset(s_blocks, 0, sizeof(s_blocks));
-	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
-		s_vu0_waitingForSlot[i].clear();
+	deleteAllVariantsVU0();
 }
 
 void recArmVU0::Reset()
@@ -1056,9 +1166,7 @@ void recArmVU0::Reset()
 	VU0.ialureadpos  = 0;
 	VU0.ialucount    = 0;
 
-	std::memset(s_blocks, 0, sizeof(s_blocks));
-	for (u32 i = 0; i < VU0_NUM_SLOTS; i++)
-		s_vu0_waitingForSlot[i].clear();
+	deleteAllVariantsVU0();
 	if (s_code_base)
 		s_code_write = s_code_base;
 	s_pool.Reset();
@@ -1100,29 +1208,66 @@ void recArmVU0::Execute(u32 cycles)
 		const u32 pc   = VU0.VI[REG_TPC].UL & (VU0_PROGSIZE - 1);
 		const u32 slot = pc / 8;
 
-		VU0BlockEntry& blk = s_blocks[slot];
+		// Content-keyed lookup: scan the slot's deque for a variant whose
+		// snapshot matches live VU0.Micro at `pc`. A hit bubbles the variant
+		// to the deque front (MRU) so subsequent dispatches find it first.
+		VU0BlockEntry* blk = findVariantVU0(pc);
 
-		if (!blk.codeEntry)
+		if (!blk)
 		{
+			// Miss — compile a new variant. Allocate first so the entry is
+			// stable while CompileBlock writes linkEntry/exits/etc. into it.
 			const u32 numPairs = AnalyzeBlock(pc);
-			blk.numPairs  = numPairs;
-			blk.codeEntry = CompileBlock(pc, numPairs, &blk);
+			blk = new VU0BlockEntry{};
+			blk->numPairs = numPairs;
 
-			// Block-link wiring for the freshly-compiled block:
-			//   1. Index the new block's exits in the reverse map so future
-			//      compiles at any of its target_pcs find us as a waiter.
-			//   2. Forward-link our outgoing exits to any already-compiled
-			//      target's linkEntry.
-			//   3. Patch any predecessor that statically targets us (and
-			//      was sitting on the dispatcher fall-through) to B
-			//      directly into our linkEntry.
-			indexVU0BlockExits(pc, blk);
-			tryForwardLinkVU0(blk);
-			patchWaitingPredecessorsVU0(pc, blk.linkEntry);
+			// Snapshot the bytecode this variant compiles against so future
+			// dispatches can content-match against it even after Clear()
+			// rewrites live VU0.Micro and (eventually) the EE re-uploads
+			// the same program. This is what survives the MGS2 thrash
+			// pattern.
+			const u32 snap_bytes = numPairs * 8;
+			blk->snapshot = new u8[snap_bytes];
+			std::memcpy(blk->snapshot, VU0.Micro + pc, snap_bytes);
+
+			blk->codeEntry = CompileBlock(pc, numPairs, blk);
+
+			// Cap the per-slot deque. Evict LRU (back) before pushing the
+			// new variant; destroyVariantVU0 unpatches predecessors that
+			// were linked to the evicted variant so they fall through to
+			// the dispatcher (then patchWaitingPredecessorsVU0 below
+			// re-links them to the new MRU variant).
+			//
+			// Eviction must happen BEFORE indexVU0VariantExits so the
+			// destroyVariant walk of s_vu0_waitingForSlot[slot] doesn't
+			// see the new variant as a predecessor candidate of itself.
+			auto& deque = s_vu0_variants[slot];
+			if (deque.size() >= kVU0VariantCapPerSlot)
+			{
+				VU0BlockEntry* victim = deque.back();
+				deque.pop_back();
+				destroyVariantVU0(victim, slot);
+			}
+
+			deque.push_front(blk);
+			indexVU0VariantExits(blk);
+
+			// Block-link wiring for the freshly-compiled variant.
+			tryForwardLinkVU0(*blk);
+			patchWaitingPredecessorsVU0(pc, blk->linkEntry);
+		}
+		else if (blk->needsRelink)
+		{
+			// Variant survived a Clear() that unpatched its incoming exit
+			// edges — re-wire the graph lazily on the first dispatch
+			// post-Clear so repeated hits pay this cost only once.
+			tryForwardLinkVU0(*blk);
+			patchWaitingPredecessorsVU0(pc, blk->linkEntry);
+			blk->needsRelink = false;
 		}
 
 		using BlockFn = void (*)();
-		reinterpret_cast<BlockFn>(blk.codeEntry)();
+		reinterpret_cast<BlockFn>(blk->codeEntry)();
 	}
 
 	VU0.VI[REG_TPC].UL >>= 3;
@@ -1186,25 +1331,16 @@ void recArmVU0::Clear(u32 addr, u32 size)
 
 	// Block-linking invalidation: any predecessor that has a B patched to a
 	// linkEntry inside the cleared range needs that exit reverted to its
-	// fallthrough. Otherwise the predecessor's next exec would jump into
-	// stale code that's about to be (or has been) overwritten by a fresh
-	// compile occupying the same buffer region.
-	//
-	// Walk the reverse index for each cleared slot, pull the predecessor
-	// out of s_blocks, and unpatch any of its exits whose target_pc lands
-	// in [first, clamped_last).
+	// fallthrough — otherwise the predecessor's next execution jumps into
+	// code that may be overwritten by a fresh compile occupying the same
+	// buffer region. Walk the reverse index for each cleared slot.
 	for (u32 ts = first; ts < clamped_last; ts++)
 	{
-		for (u32 pred_slot : s_vu0_waitingForSlot[ts])
+		for (VU0BlockEntry* pred : s_vu0_waitingForSlot[ts])
 		{
-			if (pred_slot >= VU0_NUM_SLOTS)
-				continue;
-			VU0BlockEntry& pred = s_blocks[pred_slot];
-			if (!pred.codeEntry)
-				continue; // stale entry — pred itself was already cleared
-			for (u32 e = 0; e < pred.num_exits; e++)
+			for (u32 e = 0; e < pred->num_exits; e++)
 			{
-				LinkExit& exit = pred.exits[e];
+				LinkExit& exit = pred->exits[e];
 				if (!exit.patch_site || exit.target_pc == LINK_TARGET_NONE)
 					continue;
 				const u32 target_slot = exit.target_pc / 8;
@@ -1214,13 +1350,15 @@ void recArmVU0::Clear(u32 addr, u32 size)
 		}
 	}
 
-	// Drop the cleared blocks themselves. codeEntry=nullptr makes the next
-	// dispatch recompile; linkEntry=nullptr is defensive (any stale read of
-	// it via vu0_indirect_dispatch is treated as a miss). The exits[] data
-	// is now stale and won't be read again until recompile rewrites it.
+	// Mark variants in the cleared range as needing relink on next dispatch.
+	// We deliberately do NOT delete them: if the EE re-uploads identical
+	// bytes later (the MGS2 thrash pattern), findVariantVU0 will match
+	// against the preserved snapshot and reuse the compiled code without
+	// re-emitting. On the first post-Clear dispatch, `needsRelink` triggers
+	// tryForwardLinkVU0 + patchWaitingPredecessorsVU0 to re-wire exits.
 	for (u32 i = first; i < clamped_last; i++)
 	{
-		s_blocks[i].codeEntry = nullptr;
-		s_blocks[i].linkEntry = nullptr;
+		for (VU0BlockEntry* blk : s_vu0_variants[i])
+			blk->needsRelink = true;
 	}
 }
