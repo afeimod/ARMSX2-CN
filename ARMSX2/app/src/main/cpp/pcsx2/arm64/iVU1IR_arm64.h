@@ -128,6 +128,12 @@ struct alignas(16) microOp
 	// batch_with_next is true.
 	bool batch_with_next;
 	bool batch_from_prev;
+
+	// ABS-of-known-positive elimination (FMAC opt #4): set when this pair
+	// is an ABS upper whose source VF lanes (in the write mask) are
+	// proven non-negative by the per-block forward sign tracker. The
+	// emitter swaps Fabs for a direct load-into-v5, saving 1 Fabs insn.
+	bool abs_src_known_non_neg;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

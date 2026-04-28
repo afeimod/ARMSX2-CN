@@ -58,6 +58,12 @@ void vfCacheInvalidateAll();
 void vfCacheLoadInto(int vfreg, const vixl::aarch64::VRegister& scratch);
 vixl::aarch64::VRegister vfCacheLoadResident(int vfreg);
 
+// Cache residency check (FMAC opt #6 cache-read variant). Returns true if
+// vfreg is currently held in a cache slot (no Ldr needed to consume it).
+// Caller can then call vfCacheLoadResident to get the slot reg without
+// triggering an allocation+Ldr — the function will hit the existing slot.
+bool vfCacheIsResident(int vfreg);
+
 // Phase 2: defer a write of `src_reg`'s `xyzw_mask` lanes into VF[vfreg].
 // The slot is force-loaded from memory if not fully valid. Result lanes
 // merge into the slot via per-lane Mov; the actual Str is deferred to

@@ -570,6 +570,91 @@ void mvu1AnalyzeBlock(
 		ir.info[i].batch_with_next     = true;
 		ir.info[i + 1].batch_from_prev = true;
 	}
+
+	// ABS-of-known-positive elimination (FMAC opt #4). Forward-walk the
+	// block tracking per-VF per-lane "known non-negative" sign state. The
+	// canonical pattern is `MAX vfD, vfA, vf0` — vf0's bit pattern is
+	// (0,0,0,1) so each lane of the result is max(vfA.lane, 0_or_1) which
+	// is always sign-bit-zero. A subsequent `ABS vfE, vfD` with the
+	// matching xyzw mask is then a no-op: we replace Fabs with a direct
+	// vfCacheLoadInto(fs, v5), saving one Fabs insn.
+	//
+	// Lane state is u8 per VF; bit 3 = X, 2 = Y, 1 = Z, 0 = W (FMAC
+	// xyzw convention). Set means "this lane's sign bit is known 0."
+	// VF[0] is the hardwired (0,0,0,1) constant — always non-neg in
+	// every lane.
+	for (u32 i = 0; i < numPairs; i++)
+		ir.info[i].abs_src_known_non_neg = false;
+
+	{
+		u8 lane_state[32] = {0};
+		lane_state[0] = 0xFu;
+
+		for (u32 i = 0; i < numPairs; i++)
+		{
+			const _VURegsNum& ui = uregs_data[i];
+			const _VURegsNum& li = lregs_data[i];
+			const u32 upper = ir.info[i].upper;
+			const u32 op6   = upper & 0x3Fu;
+			const u32 ft    = (upper >> 16) & 0x1Fu;
+			const u32 fdsub = (upper >> 6)  & 0x1Fu;
+
+			// ABS detection: upper opcode 0x3D, FD-sub-table 0x01,
+			// idx 7. Match by full upper bit pattern.
+			const bool is_abs = (op6 == 0x3Du) && (fdsub == 7u);
+			if (is_abs && ui.VFwxyzw != 0)
+			{
+				const u32 fs   = (upper >> 11) & 0x1Fu;
+				const u32 mask = ui.VFwxyzw;
+				if ((lane_state[fs] & mask) == mask)
+					ir.info[i].abs_src_known_non_neg = true;
+			}
+
+			// Hazard pair runs interp; conservative — drop everything.
+			// The pair's writes will hit memory through interp, and we
+			// can't statically prove sign of those writes.
+			if (ir.info[i].vf_read_after_write || ir.info[i].vf_write_collision
+			    || ir.info[i].clip_read_after_write || ir.info[i].clip_write_collision)
+			{
+				for (int v = 1; v < 32; v++)
+					lane_state[v] = 0;
+				continue;
+			}
+
+			// MAX-with-vf0 detection. Broadcast forms (MAXx/y/z/w =
+			// 0x10..0x13) and the full-vector form (MAX = 0x2B). MAXi
+			// (0x1D) broadcasts the I scalar — sign unknown — skip.
+			//
+			// MAXw with ft==0 broadcasts vf0.w = 1.0, so result is
+			// max(?, 1) ≥ 1 ≥ 0; still non-negative. Full MAX with
+			// ft==0 picks vf0 = (0,0,0,1) as the second operand, so
+			// per-lane result is ≥ 0 (XYZ) or ≥ 1 (W).
+			bool produces_non_neg = false;
+			if (ft == 0 && ((op6 >= 0x10u && op6 <= 0x13u) || op6 == 0x2Bu))
+				produces_non_neg = true;
+			if (is_abs)
+				produces_non_neg = true;
+
+			if (ui.VFwrite != 0)
+			{
+				const u32 v    = ui.VFwrite;
+				const u32 mask = ui.VFwxyzw;
+				if (produces_non_neg)
+					lane_state[v] |= static_cast<u8>(mask);
+				else
+					lane_state[v] &= static_cast<u8>(~mask);
+			}
+
+			// Lower writes are conservatively unknown (LQ/MOVE/MR32/
+			// MFIR/MFP can carry any sign). Clear the written lanes.
+			if (li.VFwrite != 0)
+			{
+				const u32 v    = li.VFwrite;
+				const u32 mask = li.VFwxyzw;
+				lane_state[v] &= static_cast<u8>(~mask);
+			}
+		}
+	}
 }
 
 } // namespace armvu1ir
@@ -610,6 +695,10 @@ extern bool g_vu1DeadVFWrite;
 // pair; ACC writes ignore the gates.
 extern bool g_vu1BatchWithNext;
 extern bool g_vu1BatchFromPrev;
+// ABS-of-known-positive elimination (FMAC opt #4). Set per-pair-per-emit
+// before dispatching emitVU1Upper from Pass 1's `abs_src_known_non_neg`.
+// Consumed by emitAbsFmac to swap Fabs for a direct vfCacheLoadInto into v5.
+extern bool g_vu1AbsSrcKnownNonNeg;
 
 // ============================================================================
 //  Block cache
@@ -1998,6 +2087,15 @@ a64::VRegister vfCacheLoadResident(int vfreg)
 {
 	const int slot = vfCacheEnsureLoaded(vfreg);
 	return a64::VRegister(vfCacheSlotReg(slot), 128);
+}
+
+// FMAC opt #6 (cache-read variant): cheap residency probe. Lets a caller
+// ask "is vfreg in a slot already?" without triggering vfCacheLoadResident's
+// allocate-and-Ldr miss path. CLIP uses this to skip 4 memory Ldrs when
+// fs/ft happen to be resident from a recent FMAC pair.
+bool vfCacheIsResident(int vfreg)
+{
+	return vfCacheFind(vfreg) >= 0;
 }
 
 // Phase 2.5 (write-through): merge `src_reg`'s `xyzw_mask` lanes into
@@ -4181,6 +4279,8 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// FMAC opt #17: same-VF different-lane batching gates.
 		g_vu1BatchWithNext = ir_op.batch_with_next;
 		g_vu1BatchFromPrev = ir_op.batch_from_prev;
+		// FMAC opt #4: ABS-of-known-positive gate.
+		g_vu1AbsSrcKnownNonNeg = ir_op.abs_src_known_non_neg;
 
 		VU1_PERF_BEGIN(_pp_s7);
 		emitVU1Upper(upper); // switch dispatch — emits native ARM64 for this op

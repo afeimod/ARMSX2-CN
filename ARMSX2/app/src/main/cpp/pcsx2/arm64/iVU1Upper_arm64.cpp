@@ -97,6 +97,11 @@ bool g_vu1DeadVFWrite = false;
 bool g_vu1BatchWithNext = false;
 bool g_vu1BatchFromPrev = false;
 
+// FMAC opt #4: ABS source is provably non-negative for the lanes the ABS
+// op writes. Set per-emit by CompileBlock; consumed by emitAbsFmac to
+// swap Fabs for a direct slot→v5 load (saves 1 Fabs insn).
+bool g_vu1AbsSrcKnownNonNeg = false;
+
 namespace
 {
 	bool s_batchPendingActive    = false;
@@ -1130,8 +1135,20 @@ static void emitMaxFmac(bool isMini, u32 fs, u32 fd, u32 xyzw)
 // returns early when _Ft_==0, and does not touch MAC/Status flags.
 static void emitAbsFmac(u32 fs, u32 ft, u32 xyzw)
 {
-	vfCacheLoadInto(static_cast<int>(fs), v0);
-	armAsm->Fabs(v5.V4S(), v0.V4S());
+	// FMAC opt #4: ABS-of-known-positive elimination. Pass 1 proved the
+	// source's lanes (in xyzw) are sign-bit-zero, so Fabs is a no-op for
+	// those lanes. Lanes outside xyzw don't get stored by the masked
+	// writeback either, so Fabs on them is irrelevant. Load the slot
+	// straight into v5 and skip the Fabs entirely.
+	if (g_vu1AbsSrcKnownNonNeg)
+	{
+		vfCacheLoadInto(static_cast<int>(fs), v5);
+	}
+	else
+	{
+		vfCacheLoadInto(static_cast<int>(fs), v0);
+		armAsm->Fabs(v5.V4S(), v0.V4S());
+	}
 	emitNoFlagWriteback(ft, xyzw);
 }
 
@@ -2210,15 +2227,32 @@ void recVU1_CLIP() {
 	const u32 fs = (VU1.code >> 11) & 0x1F;
 	const u32 ft = (VU1.code >> 16) & 0x1F;
 
-	// Phase 2: CLIP reads VF[ft].w and VF[fs].xyz via direct 32-bit Ldrs.
-	// Flush deferred dirty lanes for both VFs before the reads. (Drops the
-	// cache slots — CLIP isn't usually adjacent to FMACs reading the same
-	// VFs, so the loss is small.)
-	vfCacheFlushOne(static_cast<int>(ft));
-	vfCacheFlushOne(static_cast<int>(fs));
+	// FMAC opt #6 (cache-read variant): if VF[ft] / VF[fs] are already
+	// resident in NEON cache slots from a prior FMAC pair, extract the
+	// scalar lanes via Umov (register-to-register) instead of going to
+	// memory. With write-through, the slot value is always coherent with
+	// memory, so cache reads are equivalent. Saves up to 4 Ldrs per CLIP
+	// when both operands are hot in cache (typical right after a matrix
+	// transform writes the projected vertex into the same VFs we now
+	// CLIP-test). Falls back to direct Ldr for cache misses — allocating
+	// fresh slots just for CLIP would cost more than 4 Ldr w (one Ldr q
+	// + 4 Umov vs 4 Ldr w).
+	//
+	// vfreg == 0 (VF[0] hardwired (0,0,0,1)) takes the direct-Ldr path:
+	// we don't allocate a cache slot for the constant.
+	const bool ft_resident = (ft != 0) && vfCacheIsResident(static_cast<int>(ft));
+	const bool fs_resident = (fs != 0) && vfCacheIsResident(static_cast<int>(fs));
 
 	// value = raw ft.w
-	armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
+	if (ft_resident)
+	{
+		const auto ftSlot = vfCacheLoadResident(static_cast<int>(ft));
+		armAsm->Umov(w0, ftSlot.V4S(), 3);
+	}
+	else
+	{
+		armAsm->Ldr(w0, MemOperand(VU1_BASE_REG, vfOff(ft) + 12));
+	}
 	// w1 = value & 0x7f800000 (exponent bits)
 	armAsm->And(w1, w0, 0x7f800000u);
 	// w0 = value & 0x7fffffff (abs value)
@@ -2230,9 +2264,19 @@ void recVU1_CLIP() {
 	armAsm->Csel(w0, w0, w2, ne);
 
 	// Load fs.xyz (w=don't care)
-	armAsm->Ldr(w3, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
-	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));
-	armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));
+	if (fs_resident)
+	{
+		const auto fsSlot = vfCacheLoadResident(static_cast<int>(fs));
+		armAsm->Umov(w3, fsSlot.V4S(), 0);
+		armAsm->Umov(w4, fsSlot.V4S(), 1);
+		armAsm->Umov(w5, fsSlot.V4S(), 2);
+	}
+	else
+	{
+		armAsm->Ldr(w3, MemOperand(VU1_BASE_REG, vfOff(fs) + 0));
+		armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vfOff(fs) + 4));
+		armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, vfOff(fs) + 8));
+	}
 
 	// w6 = VU->clipflag << 6 (read from pinned VU1_CLIPFLAG_REG, not memory).
 	armAsm->Lsl(w6, VU1_CLIPFLAG_REG, 6);
