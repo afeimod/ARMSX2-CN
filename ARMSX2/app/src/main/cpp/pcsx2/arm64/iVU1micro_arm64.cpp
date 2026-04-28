@@ -2454,10 +2454,11 @@ void viCacheLoadInto(int vireg, const a64::Register& scratch)
 // Like viCacheLoadInto but returns the resident w-reg directly. Caller must
 // NOT modify it — it's the cache's authoritative copy. Returns wzr for VI[0].
 //
-// NOTE: vixl rejects wzr as a source for some extend instructions
-// (Sxth/Sxtb/Sxtw/Uxth/Uxtb assert !rn.IsZero()). Callers that need a
-// sign-extended read MUST go through viCacheLoadSignedInto, which handles
-// the vireg==0 special case. Callers that only do simple Mov / Add / Lsl /
+// NOTE: vixl rejects wzr as a source for many macros — Sxth/Sxtb/Sxtw/Uxth/
+// Uxtb (extend) AND Lsl/Lsr/Asr (shift macros all assert !rn.IsZero()).
+// Callers that need a sign-extended read MUST go through viCacheLoadSignedInto.
+// Callers that need to shift the result MUST handle the vireg==0 case with
+// a direct `Mov dest, wzr` (target value is 0 anyway). Simple Mov / Add /
 // And / Orr / Sub / Cmp on the result are fine — those accept wzr.
 a64::Register viCacheLoadResident(int vireg)
 {

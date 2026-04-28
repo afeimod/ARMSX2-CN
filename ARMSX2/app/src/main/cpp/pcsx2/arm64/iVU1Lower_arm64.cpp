@@ -1920,9 +1920,19 @@ REC_VU1_LOWER_INTERP(JR)
 #else
 void recVU1_JR() {
 	const u32 is = W_Is(&VU1);
-	// bpc = VI[is].US[0] * 8  (interpreter does no hazard check here)
-	const auto srcVi = viCacheLoadResident(static_cast<int>(is));
-	armAsm->Lsl(w3, srcVi, 3);
+	// bpc = VI[is].US[0] * 8. JR vi00 is legal (Scarface intro hits this) —
+	// vi00 is hardwired zero, so the target is fixed at PC 0. vixl's
+	// Lsl(rd, rn, shift) asserts !rn.IsZero(), so we can't pass wzr through
+	// it; emit a direct `Mov w3, wzr` for the is==0 case.
+	if (is == 0)
+	{
+		armAsm->Mov(w3, a64::wzr);
+	}
+	else
+	{
+		const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+		armAsm->Lsl(w3, srcVi, 3);
+	}
 	emitInlineSetBranch(w3);
 }
 #endif
@@ -1933,9 +1943,17 @@ REC_VU1_LOWER_INTERP(JALR)
 void recVU1_JALR() {
 	const u32 is = W_Is(&VU1);
 	const u32 it = W_It(&VU1);
-	// Compute bpc into w3 first (preserved across link write — which only touches w4/w5)
-	const auto srcVi = viCacheLoadResident(static_cast<int>(is));
-	armAsm->Lsl(w3, srcVi, 3);
+	// Compute bpc into w3 first (preserved across link write — which only touches w4/w5).
+	// is==0: target fixed at PC 0 (vi00 hardwired). See recVU1_JR comment.
+	if (is == 0)
+	{
+		armAsm->Mov(w3, a64::wzr);
+	}
+	else
+	{
+		const auto srcVi = viCacheLoadResident(static_cast<int>(is));
+		armAsm->Lsl(w3, srcVi, 3);
+	}
 	if (it != 0)
 		emitBranchLinkWrite(it);
 	emitInlineSetBranch(w3);
