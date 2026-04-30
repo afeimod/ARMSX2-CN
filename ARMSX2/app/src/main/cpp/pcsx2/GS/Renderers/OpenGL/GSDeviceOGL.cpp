@@ -806,8 +806,8 @@ bool GSDeviceOGL::CheckFeatures()
 		{
 			glTextureBarrier = ReplaceGL::TextureBarrier;
 			m_features.multidraw_fb_copy = true;
-			Host::AddOSDMessage(
-				"GL_ARB_texture_barrier is not supported, blending will be slower.", Host::OSD_ERROR_DURATION);
+/*			Host::AddOSDMessage(
+				"GL_ARB_texture_barrier is not supported, blending will be slower.", Host::OSD_ERROR_DURATION);*/
 		}
 	}
 

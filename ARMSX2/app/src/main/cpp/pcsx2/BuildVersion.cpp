@@ -11,7 +11,7 @@ namespace BuildVersion
 	bool GitTaggedCommit = GIT_TAGGED_COMMIT;
 	int GitTagHi = 2;
 	int GitTagMid = 7;
-	int GitTagLo = 298; 
+	int GitTagLo = 304;
 	int ARMSX2Build = 0;
 
 	namespace
