@@ -17,6 +17,8 @@
 #include "common/Perf.h"
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <vector>
@@ -245,6 +247,134 @@ static void vu0DecrementVIBackup(VURegs* VU, u64 cyclesBefore)
 			VU->VIBackupCycles -= static_cast<u8>(elapsed);
 	}
 }
+
+// ============================================================================
+//  Shadow-compare debug harness (VU0_SHADOW_VERIFY).
+//
+//  Hooks into the native (non-fallback) per-pair path. Pre-pair: snapshots
+//  VU0 to s_shadow_pre. Post-pair: saves VU0 (the JIT result) to s_shadow_post,
+//  restores VU0 from s_shadow_pre, runs vu0Exec(&VU0) for the SAME pair via
+//  interp, then compares interp result (VU0) against JIT result (s_shadow_post)
+//  field-by-field. Logs the first divergent field per pair, then restores VU0
+//  to the JIT result so the game continues with whatever JIT produced (we
+//  want to find the bug, not silently fix it).
+//
+//  Skipped for fallback pairs because those run vu0Exec themselves and would
+//  always agree with interp.
+//
+//  Limitations:
+//    - hwIntcIrq is global state; if interp's _vu0Exec fires INTC for D/T
+//      bits we'd see a duplicate IRQ. Mitigation: D/T pairs go through the
+//      INTERP_VU0_DTBITS fallback in the user's harness setup, so the verify
+//      hook never fires on D/T pairs.
+//    - VU0.code is restored along with the rest of VU0 — no global leak.
+//    - Mem / Micro pointers are shared (same backing memory); the snapshot
+//      only duplicates the header struct, not the 4KB micro program.
+// ============================================================================
+#ifdef VU0_SHADOW_VERIFY
+alignas(16) static u8 s_shadow_pre[sizeof(VURegs)];
+alignas(16) static u8 s_shadow_post[sizeof(VURegs)];
+
+static void vu0_shadow_snapshot()
+{
+	std::memcpy(s_shadow_pre, &VU0, sizeof(VURegs));
+}
+
+static void vu0_shadow_log(u32 pc, const char* field, const char* fmt, ...)
+{
+	char detail[224];
+	va_list ap;
+	va_start(ap, fmt);
+	std::vsnprintf(detail, sizeof(detail), fmt, ap);
+	va_end(ap);
+	Console.Error("VU0 SHADOW: pc=0x%04x field=%s %s", pc, field, detail);
+}
+
+static void vu0_shadow_verify(u32 pc)
+{
+	// Snapshot post-JIT state.
+	std::memcpy(s_shadow_post, &VU0, sizeof(VURegs));
+
+	// Restore pre-pair state and run interp on the same pair.
+	std::memcpy(&VU0, s_shadow_pre, sizeof(VURegs));
+	vu0Exec(&VU0);
+
+	// Now: VU0 == interp result, s_shadow_post == JIT result.
+	const VURegs* jit  = reinterpret_cast<const VURegs*>(s_shadow_post);
+	const VURegs* iref = &VU0;
+	bool diverged = false;
+
+	auto check_u32 = [&](const char* name, u32 j, u32 i) -> bool {
+		if (j != i) {
+			vu0_shadow_log(pc, name, "jit=0x%08x interp=0x%08x", j, i);
+			return true;
+		}
+		return false;
+	};
+
+	// VF[0..31] — most likely place for vertex-transform corruption to land.
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (std::memcmp(&jit->VF[v], &iref->VF[v], sizeof(VECTOR)) != 0)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VF[%u]", v);
+			vu0_shadow_log(pc, fname,
+				"jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+				jit->VF[v].UL[0], jit->VF[v].UL[1], jit->VF[v].UL[2], jit->VF[v].UL[3],
+				iref->VF[v].UL[0], iref->VF[v].UL[1], iref->VF[v].UL[2], iref->VF[v].UL[3]);
+			diverged = true;
+		}
+	}
+
+	// ACC — accumulator FMAC ops write here.
+	if (!diverged && std::memcmp(&jit->ACC, &iref->ACC, sizeof(VECTOR)) != 0)
+	{
+		vu0_shadow_log(pc, "ACC",
+			"jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+			jit->ACC.UL[0], jit->ACC.UL[1], jit->ACC.UL[2], jit->ACC.UL[3],
+			iref->ACC.UL[0], iref->ACC.UL[1], iref->ACC.UL[2], iref->ACC.UL[3]);
+		diverged = true;
+	}
+
+	// Live working flags (drive future fmac slot snapshots).
+	if (!diverged) diverged = check_u32("macflag",    jit->macflag,    iref->macflag);
+	if (!diverged) diverged = check_u32("statusflag", jit->statusflag, iref->statusflag);
+	if (!diverged) diverged = check_u32("clipflag",   jit->clipflag,   iref->clipflag);
+
+	// VI registers — both integer regs and committed flag/Q/I/R/P registers.
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (jit->VI[v].UL != iref->VI[v].UL)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VI[%u]", v);
+			diverged = check_u32(fname, jit->VI[v].UL, iref->VI[v].UL);
+		}
+	}
+
+	// Pipeline state.
+	if (!diverged && jit->cycle != iref->cycle)
+	{
+		vu0_shadow_log(pc, "cycle", "jit=%llu interp=%llu",
+			(unsigned long long)jit->cycle, (unsigned long long)iref->cycle);
+		diverged = true;
+	}
+	if (!diverged) diverged = check_u32("ebit",         jit->ebit,         iref->ebit);
+	if (!diverged) diverged = check_u32("branch",       jit->branch,       iref->branch);
+	if (!diverged) diverged = check_u32("branchpc",     jit->branchpc,     iref->branchpc);
+	if (!diverged) diverged = check_u32("flags",        jit->flags,        iref->flags);
+	if (!diverged) diverged = check_u32("fmacwritepos", jit->fmacwritepos, iref->fmacwritepos);
+	if (!diverged) diverged = check_u32("fmaccount",    jit->fmaccount,    iref->fmaccount);
+
+	// Q register (FDIV result).
+	if (!diverged && jit->q.UL != iref->q.UL)
+		diverged = check_u32("q", jit->q.UL, iref->q.UL);
+
+	// Restore JIT result so the game continues with whatever JIT produced.
+	std::memcpy(&VU0, s_shadow_post, sizeof(VURegs));
+}
+#endif // VU0_SHADOW_VERIFY
 
 // ============================================================================
 //  Block analysis
@@ -805,6 +935,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 		}
 		else
 		{
+#ifdef VU0_SHADOW_VERIFY
+			// Snapshot VU0 state before the native pair runs. Post-pair the
+			// vu0_shadow_verify call will restore from this, run interp on
+			// the same pair, and compare results.
+			armEmitCall(reinterpret_cast<const void*>(vu0_shadow_snapshot));
+#endif
+
 			// 1. VU->cycle++
 			armAsm->Ldr(x4, MemOperand(VU0_BASE_REG, cycle_off));
 			armAsm->Mov(x22, x4);
@@ -989,6 +1126,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 				armAsm->And(w4, w4, 3);
 				armAsm->Str(w4, MemOperand(VU0_BASE_REG, fmacwpos_off));
 			}
+
+#ifdef VU0_SHADOW_VERIFY
+			// Run interp on the snapshot, compare to JIT result, log first
+			// divergent field. pc baked in compile-time so the log identifies
+			// the offending pair.
+			armAsm->Mov(w0, pc);
+			armEmitCall(reinterpret_cast<const void*>(vu0_shadow_verify));
+#endif
 		}
 
 		pc = (pc + 8) & (VU0_PROGSIZE - 1);

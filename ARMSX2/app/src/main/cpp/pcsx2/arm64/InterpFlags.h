@@ -58,6 +58,15 @@
 // entry (measurable cost on linked-chain entries), so keep off unless profiling.
 //#define VU1_PROFILE_BLOCKS
 
+// Diagnostic: shadow-compare every native VU0 pair against a parallel
+// _vu0Exec interp run on a snapshot of VU0 state. Logs the first divergent
+// field per pair (jit value vs interp value + pc) to Console.Error. Fires
+// only on the native pair path (fallback pairs use vu0Exec themselves and
+// would always agree). Slows VU0 emulation drastically — debug-only.
+// Use this to localize "JIT pair body produces wrong VF/ACC/macflag"
+// bugs that don't show up in INTERP_VU0_PAIR mode.
+//#define VU0_SHADOW_VERIFY
+
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,
 // `VU1_U_05_0x0040`). The next simpleperf trace then attributes samples
