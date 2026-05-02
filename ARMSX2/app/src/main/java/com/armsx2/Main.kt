@@ -2,6 +2,7 @@ package com.armsx2
 
 import android.app.ActivityManager
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
@@ -46,6 +47,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import com.armsx2.events.TestResult
 import com.armsx2.ui.Colors
+import com.armsx2.ui.SetupImpl
 import com.armsx2.ui.WindowImpl
 import compose.icons.LineAwesomeIcons
 import compose.icons.lineawesomeicons.Android
@@ -87,6 +89,20 @@ val eeSeqTests = mutableStateOf("")
 class Main: ComponentActivity() {
     companion object {
         var instance : Main? = null
+        lateinit var prefs: SharedPreferences
+        val setupComplete = mutableStateOf(false)
+        // Tree URI of the user-picked PCSX2 system folder (where bios/,
+        // memcards/, etc. should live). Persisted as `systemDir` pref.
+        // When unset, emucore falls back to getExternalFilesDir(null)
+        // (Android/data/<package>/files).
+        val systemDir = mutableStateOf<String?>(null)
+        val bios = mutableStateOf<String?>(null)
+        // Tree URI of the folder the user picked their BIOS from. Persisted
+        // separately from `bios` (the path of the copied private file) so
+        // re-entering setup can re-scan the original folder without
+        // forcing the user to re-pick.
+        val biosDir = mutableStateOf<String?>(null)
+        val romsDir = mutableStateOf<String?>(null)
         private val eDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         private val eScope = CoroutineScope(eDispatcher)
 
@@ -227,6 +243,12 @@ class Main: ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        prefs = applicationContext.getSharedPreferences("ARMSX2", MODE_PRIVATE)
+        setupComplete.value = prefs.getBoolean("setupComplete", false)
+        systemDir.value = prefs.getString("systemDir", null)
+        bios.value = prefs.getString("bios", null)
+        biosDir.value = prefs.getString("biosDir", null)
+        romsDir.value = prefs.getString("roms", null)
         surface.value = SurfaceCallbacks(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).let { controller ->
@@ -269,162 +291,87 @@ class Main: ComponentActivity() {
             eState.value = EmuState.EMULATOR_UNSUPPORTED
             println("DEVICE_UNSUPPORTED")
         }
-
-
         setContent {
-            WindowImpl.Window {
-                if (!tested) {
-                    NativeApp.runCodegenTests()
-                    NativeApp.runPatchTests()
-                    NativeApp.runVuJitTests()
-                    tested = true
-                }
-                if (surface.value != null) {
-                    AndroidView(factory = { surface.value!! }, modifier = Modifier
-                        .focusable()
-                        .focusRequester(focusRequester)
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures(onLongPress = {
-                                WindowImpl.toolbarVisible.value = !WindowImpl.toolbarVisible.value
+            // Setup wizard runs once. After it persists prefs and flips
+            // setupComplete the main emulator UI takes over. Re-entering
+            // setup requires clearing app data (or wiping the prefs key).
+            if (setupComplete.value) {
+                WindowImpl.Window {
+                    if (!tested) {
+                        NativeApp.runCodegenTests()
+                        NativeApp.runPatchTests()
+                        NativeApp.runVuJitTests()
+                        tested = true
+                    }
+                    if (surface.value != null) {
+                        AndroidView(factory = { surface.value!! }, modifier = Modifier
+                            .focusable()
+                            .focusRequester(focusRequester)
+                            .fillMaxSize()
+                            .pointerInput(Unit) {
+                                detectTapGestures(onLongPress = {
+                                    WindowImpl.toolbarVisible.value = !WindowImpl.toolbarVisible.value
+                                })
+                            }
+                            .onKeyEvent { event ->
+                                if (eState.value != EmuState.RUNNING)
+                                    return@onKeyEvent false
+                                when (event.key) {
+                                    // DirectionUp/Down/Left/Right intentionally NOT
+                                    // bound here — they're handled by the focus
+                                    // navigation path so the toolbar can use them.
+                                    Key.ButtonA -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_A); true }
+                                    Key.ButtonB -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_B); true }
+                                    Key.ButtonX -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_X); true }
+                                    Key.ButtonY -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_Y); true }
+                                    Key.ButtonSelect -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_SELECT); true }
+                                    Key.ButtonStart -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_START); true }
+                                    Key.ButtonL1 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L1); true }
+                                    Key.ButtonR1 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R1); true }
+                                    Key.ButtonL2 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L2); true }
+                                    Key.ButtonR2 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R2); true }
+                                    Key.ButtonThumbLeft -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBL); true }
+                                    Key.ButtonThumbRight -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBR); true }
+                                    else -> false
+                                }
                             })
-                        }
-                        .onKeyEvent { event ->
-                            if (eState.value != EmuState.RUNNING)
-                                return@onKeyEvent false
-                            when (event.key) {
-/*                                Key.DirectionUp -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_DPAD_UP)
-                                    true
-                                }
+                    }
 
-                                Key.DirectionDown -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_DPAD_DOWN)
-                                    true
-                                }
-
-                                Key.DirectionLeft -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_DPAD_LEFT)
-                                    true
-                                }
-
-                                Key.DirectionRight -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_DPAD_RIGHT)
-                                    true
-                                }*/
-
-                                Key.ButtonA -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_A)
-                                    true
-                                }
-
-                                Key.ButtonB -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_B)
-                                    true
-                                }
-
-                                Key.ButtonX -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_X)
-                                    true
-                                }
-
-                                Key.ButtonY -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_Y)
-                                    true
-                                }
-
-                                Key.ButtonSelect -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_SELECT)
-                                    true
-                                }
-
-                                Key.ButtonStart -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_START)
-                                    true
-                                }
-
-                                Key.ButtonL1 -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L1)
-                                    true
-                                }
-
-                                Key.ButtonR1 -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R1)
-                                    true
-                                }
-
-                                Key.ButtonL2 -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L2)
-                                    true
-                                }
-
-                                Key.ButtonR2 -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R2)
-                                    true
-                                }
-
-                                Key.ButtonThumbLeft -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBL)
-                                    true
-                                }
-
-                                Key.ButtonThumbRight -> {
-                                    sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBR)
-                                    true
-                                }
-
-                                else -> false
-                            }
-                        })
-                }
-
-                if (eState.value == EmuState.STOPPED || eState.value == EmuState.RENDER_UNSUPPORTED || eState.value == EmuState.EMULATOR_UNSUPPORTED) {
-                    Box(Modifier
-                        .fillMaxSize()
-                        .background(Colors.surface.value)) {
-                        if (eState.value == EmuState.EMULATOR_UNSUPPORTED) {
-                            Box(Modifier.align(Alignment.Center)) {
-                                Column {
-                                    Image(LineAwesomeIcons.Android, "",
-                                        colorFilter = ColorFilter.tint(Colors.pasx2_blue),
-                                        modifier = Modifier
-                                            .size(150.dp)
-                                            .align(Alignment.CenterHorizontally)
-                                    )
-                                    Text(
-                                        "Android Emulator is not supported", fontSize = 22.sp, color = Colors.pasx2_blue,
-                                        modifier = Modifier.align(Alignment.CenterHorizontally)
-                                    )
-                                    Text(
-                                        "Please use a physical device", fontSize = 22.sp, color = Colors.pasx2_blue,
-                                        modifier = Modifier.align(Alignment.CenterHorizontally)
-                                    )
-                                }
-                            }
-                        } else {
-                            Box(Modifier
-                                .fillMaxSize()
-                                .background(Colors.surface.value)) {
-                                Row {
-                                    Spacer(Modifier.width(20.dp))
-                                    Column(Modifier.fillMaxSize()) {
-                                        Text("Runtime Tests: ", color = Color.Yellow)
-                                        Text("Patch: ${patchTests.value}", color = Color.Yellow)
-                                        Text("ARM64 CodeGen: ${codeGenTests.value}", color = Color.Yellow)
-                                        Text("ARM64 JIT VU: ${vuJitTests.value}", color = Color.Yellow)
-                                        Text("ARM64 JIT EE: ${eeJitTests.value}", color = Color.Yellow)
-                                        Text("VIF UNPACK: ${vifTests.value}", color = Color.Yellow)
-                                        Text("EE Sequences: ${eeSeqTests.value}", color = Color.Yellow)
+                    if (eState.value == EmuState.STOPPED || eState.value == EmuState.RENDER_UNSUPPORTED || eState.value == EmuState.EMULATOR_UNSUPPORTED) {
+                        Box(Modifier
+                            .fillMaxSize()
+                            .background(Colors.surface.value)) {
+                            if (eState.value == EmuState.EMULATOR_UNSUPPORTED) {
+                                Box(Modifier.align(Alignment.Center)) {
+                                    Column {
+                                        Image(LineAwesomeIcons.Android, "",
+                                            colorFilter = ColorFilter.tint(Colors.pasx2_blue),
+                                            modifier = Modifier
+                                                .size(150.dp)
+                                                .align(Alignment.CenterHorizontally)
+                                        )
+                                        Text(
+                                            "Android Emulator is not supported", fontSize = 22.sp, color = Colors.pasx2_blue,
+                                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                                        )
+                                        Text(
+                                            "Please use a physical device", fontSize = 22.sp, color = Colors.pasx2_blue,
+                                            modifier = Modifier.align(Alignment.CenterHorizontally)
+                                        )
                                     }
                                 }
-
+                            } else {
+                                // Games list — replaces the old runtime-test panel.
+                                // The tests still run automatically on first composition
+                                // (above); their results are now available via the bug
+                                // toolbar button instead of taking up the main screen.
+                                com.armsx2.ui.GamesList.GamesRow()
                             }
                         }
                     }
                 }
-/*                if (eState.value == EmuState.RUNNING) {
-                    Text("Hello Overlay!", color = Color.Blue)
-                }*/
+            } else {
+                SetupImpl.SetupWindow()
             }
         }
     }

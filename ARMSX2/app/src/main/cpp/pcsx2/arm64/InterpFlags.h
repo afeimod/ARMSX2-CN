@@ -65,7 +65,7 @@
 // would always agree). Slows VU0 emulation drastically — debug-only.
 // Use this to localize "JIT pair body produces wrong VF/ACC/macflag"
 // bugs that don't show up in INTERP_VU0_PAIR mode.
-//#define VU0_SHADOW_VERIFY
+#define VU0_SHADOW_VERIFY
 
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,

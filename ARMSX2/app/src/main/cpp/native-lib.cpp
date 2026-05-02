@@ -18,6 +18,7 @@
 #include "pcsx2/VMManager.h"
 #include "PerformanceMetrics.h"
 #include "GameList.h"
+#include "GameDatabase.h"
 #include "GS/GSPerfMon.h"
 #include "GSDumpReplayer.h"
 #include "ImGui/ImGuiManager.h"
@@ -32,8 +33,13 @@
 #include "SIO/Pad/PadDualshock2.h"
 #include "MTGS.h"
 #include "SDL3/SDL.h"
+#include "ps2/BiosTools.h"
 #include "native-lib.h"
+#include <algorithm>
+#include <cctype>
 #include <future>
+#include <regex>
+#include <vector>
 
 
 // Redirect stdout/stderr to Android logcat so Vixl/libc abort messages are visible.
@@ -1040,6 +1046,222 @@ extern "C" JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_runVifTests(JNIEnv*, jclass) { RunVifTests(); }
 extern "C" JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_runEeSeqTests(JNIEnv*, jclass) { RunEeSeqTests(); }
+
+// ---------------------------------------------------------------------------
+// PS2 disc serial probe via ISO9660 directory walk.
+//
+// Reads the Primary Volume Descriptor at LBA 16, walks the root directory
+// to find SYSTEM.CNF, parses its `BOOT2 = cdrom0:\SCUS_XXX.XX;1` line, and
+// returns the serial in normalized "AAAA-NNNNN" form. Used by the games-
+// list scanner to attach real game IDs to entries (instead of guessing
+// from filenames).
+//
+// Handles three on-disk sector layouts so .iso (DVD-style 2048-byte data
+// sectors) and .bin (raw CD-format 2352-byte sectors, typical for older
+// CD-ROM-format PS2 games) both work:
+//
+//   2048 / 0    plain ISO — every byte is data
+//   2352 / 16   Mode 1 raw — 12 byte sync, 4 byte header, 2048 data, 288 ECC
+//   2352 / 24   Mode 2 Form 1 raw — 16 sync+header, 8 subheader, 2048 data, 280 ECC
+//
+// We try them in order and the first one that finds a valid PVD wins.
+// CHD / CSO / GZ remain unsupported (they need libchdr / libuu1 / libz);
+// those formats fall back to filename parsing on the Kotlin side.
+//
+// fd ownership: consumed (closed via fclose on the wrapping FILE*),
+// matching the IsBIOSFromFd contract.
+// ---------------------------------------------------------------------------
+
+namespace {
+// Read `size` bytes of disc data starting at the given LBA. Each sector is
+// `sectorSize` bytes total of which `dataOffset .. dataOffset+2048` is the
+// 2048 bytes of cooked data. Reads can span multiple sectors.
+static bool ReadDiscData(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset,
+    std::uint32_t startLba, void* buf, std::size_t size)
+{
+    auto* dst = static_cast<std::uint8_t*>(buf);
+    std::uint32_t lba = startLba;
+    std::size_t left = size;
+    std::size_t skip = 0; // first sector might be partially consumed by a prior call
+
+    while (left > 0)
+    {
+        if (std::fseek(fp, static_cast<long>(static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip), SEEK_SET) != 0)
+            return false;
+        const std::size_t avail = 2048 - skip;
+        const std::size_t want = std::min<std::size_t>(left, avail);
+        if (std::fread(dst, 1, want, fp) != want) return false;
+        dst += want;
+        left -= want;
+        lba++;
+        skip = 0;
+    }
+    return true;
+}
+
+// Parse SYSTEM.CNF at the given sector layout, return serial or empty
+// string. Empty result means "this layout didn't apply" — caller tries
+// the next one.
+static std::string ProbeSerialAtLayout(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset)
+{
+    // PVD lives at LBA 16 in every ISO9660 image regardless of physical
+    // sector layout.
+    std::uint8_t pvd[2048];
+    if (!ReadDiscData(fp, sectorSize, dataOffset, 16, pvd, sizeof(pvd))) return {};
+    if (pvd[0] != 1 || std::memcmp(&pvd[1], "CD001", 5) != 0) return {};
+
+    std::uint32_t rootLba  = *reinterpret_cast<const std::uint32_t*>(&pvd[156 + 2]);
+    std::uint32_t rootSize = *reinterpret_cast<const std::uint32_t*>(&pvd[156 + 10]);
+    if (rootLba == 0 || rootSize == 0 || rootSize > 1024 * 1024) return {};
+
+    std::vector<std::uint8_t> rootData(rootSize);
+    if (!ReadDiscData(fp, sectorSize, dataOffset, rootLba, rootData.data(), rootSize)) return {};
+
+    std::uint32_t sysLba = 0;
+    std::uint32_t sysSize = 0;
+    {
+        std::size_t off = 0;
+        while (off + 33 < rootData.size())
+        {
+            std::uint8_t recLen = rootData[off];
+            if (recLen == 0)
+            {
+                // Skip to next sector boundary in the (logical) directory.
+                off = (off / 2048 + 1) * 2048;
+                continue;
+            }
+            if (off + recLen > rootData.size()) break;
+
+            std::uint8_t nameLen = rootData[off + 32];
+            if (nameLen >= 10 && nameLen <= 12 && off + 33 + nameLen <= rootData.size())
+            {
+                const char* name = reinterpret_cast<const char*>(&rootData[off + 33]);
+                if (strncasecmp(name, "SYSTEM.CNF", 10) == 0)
+                {
+                    sysLba  = *reinterpret_cast<const std::uint32_t*>(&rootData[off + 2]);
+                    sysSize = *reinterpret_cast<const std::uint32_t*>(&rootData[off + 10]);
+                    break;
+                }
+            }
+
+            off += recLen;
+        }
+    }
+
+    if (sysLba == 0 || sysSize == 0 || sysSize > 64 * 1024) return {};
+
+    std::string contents(sysSize, '\0');
+    if (!ReadDiscData(fp, sectorSize, dataOffset, sysLba, contents.data(), sysSize)) return {};
+
+    // SYSTEM.CNF format example:
+    //   BOOT2 = cdrom0:\SCUS_972.28;1
+    //   VER = 1.00
+    //   VMODE = NTSC
+    std::size_t bootPos = contents.find("BOOT2");
+    if (bootPos == std::string::npos) return {};
+
+    std::size_t lineEnd = contents.find_first_of("\r\n", bootPos);
+    if (lineEnd == std::string::npos) lineEnd = contents.size();
+    std::string bootLine = contents.substr(bootPos, lineEnd - bootPos);
+
+    // icase: rare but some discs have lowercase SYSTEM.CNF. Result is
+    // uppercased for cover-URL stability (xlenore/ps2-covers names files
+    // SLUS-20001.jpg, all caps).
+    std::regex serialRe(R"(([A-Z]{4})_([0-9]{3})\.([0-9]{2}))", std::regex::icase);
+    std::smatch m;
+    if (!std::regex_search(bootLine, m, serialRe)) return {};
+
+    std::string serial = m[1].str() + "-" + m[2].str() + m[3].str();
+    std::transform(serial.begin(), serial.end(), serial.begin(),
+        [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return serial;
+}
+} // namespace
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerialFromFd(JNIEnv* env, jclass, jint fd)
+{
+    if (fd < 0)
+        return nullptr;
+
+    std::FILE* fp = ::fdopen(fd, "rb");
+    if (!fp)
+        return nullptr;
+
+    // Try the three known PS2-disc sector layouts in order. .iso files
+    // are virtually always 2048/0; .bin files are usually 2352/16
+    // (Mode 1 raw); 2352/24 (Mode 2 Form 1) is rare on PS2 but cheap to
+    // try as a last resort.
+    std::string serial = ProbeSerialAtLayout(fp, 2048, 0);
+    if (serial.empty()) serial = ProbeSerialAtLayout(fp, 2352, 16);
+    if (serial.empty()) serial = ProbeSerialAtLayout(fp, 2352, 24);
+    std::fclose(fp);
+
+    if (serial.empty()) return nullptr;
+    return env->NewStringUTF(serial.c_str());
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility lookup — given a normalized serial like "SLUS-20312", asks
+// the bundled PCSX2 game database for the title's compatibility rating.
+// Returns one of the GameDatabaseSchema::Compatibility enum values:
+//   0 Unknown, 1 Nothing, 2 Intro, 3 Menu, 4 InGame, 5 Playable, 6 Perfect
+// Mapping to the games-list star display happens on the Kotlin side.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jint JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getCompatibilityForSerial(JNIEnv* env, jclass, jstring jSerial)
+{
+    if (!jSerial) return 0;
+    const std::string serial = GetJavaString(env, jSerial);
+    if (serial.empty()) return 0;
+
+    const GameDatabaseSchema::GameEntry* db_entry = GameDatabase::findGame(serial);
+    if (!db_entry) return 0;
+    return static_cast<jint>(db_entry->compat);
+}
+
+// ---------------------------------------------------------------------------
+// BIOS info probe — invoked from the setup wizard while the user is picking
+// a BIOS directory. Takes ownership of `fd` (the caller MUST have detached
+// it from any ParcelFileDescriptor before passing it here). Returns a
+// com.armsx2.BiosInfo on success, null if the file isn't a valid PS2 BIOS
+// or any read step fails.
+// ---------------------------------------------------------------------------
+extern "C" JNIEXPORT jobject JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getBiosInfoFromFd(JNIEnv* env, jclass, jint fd)
+{
+    u32 version = 0;
+    u32 region = 0;
+    std::string description;
+    std::string zone;
+
+    // IsBIOSFromFd consumes the fd (closes via fclose on the wrapping FILE*).
+    // If parsing fails it still closes the fd, so no leak path on either branch.
+    if (!IsBIOSFromFd(static_cast<int>(fd), version, description, region, zone))
+        return nullptr;
+
+    jclass biosCls = env->FindClass("com/armsx2/BiosInfo");
+    if (!biosCls)
+        return nullptr;
+
+    jmethodID ctor = env->GetMethodID(biosCls, "<init>",
+        "(IILjava/lang/String;Ljava/lang/String;)V");
+    if (!ctor)
+    {
+        env->DeleteLocalRef(biosCls);
+        return nullptr;
+    }
+
+    jstring jdesc = env->NewStringUTF(description.c_str());
+    jstring jzone = env->NewStringUTF(zone.c_str());
+    jobject obj = env->NewObject(biosCls, ctor, static_cast<jint>(version),
+        static_cast<jint>(region), jdesc, jzone);
+
+    env->DeleteLocalRef(jdesc);
+    env->DeleteLocalRef(jzone);
+    env->DeleteLocalRef(biosCls);
+    return obj;
+}
 
 void Native::vmSetPaused(bool paused) {
     if (!s_jvm || !s_NativeApp_class || !s_vmSetPaused_mid) return;

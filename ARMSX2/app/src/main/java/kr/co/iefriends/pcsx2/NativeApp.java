@@ -6,6 +6,7 @@ import android.net.Uri;
 import android.os.ParcelFileDescriptor;
 import android.view.Surface;
 
+import com.armsx2.BiosInfo;
 import com.armsx2.EmuState;
 import com.armsx2.Main;
 import com.armsx2.events.TestResult;
@@ -97,6 +98,34 @@ public class NativeApp {
 	public static void onTestResults(String label, int passed, int total) {
 		Main.Companion.onTestResults(new TestResult(label, passed, total));
 	}
+
+	/**
+	 * Probe a file descriptor for PS2 BIOS metadata. Used by the setup
+	 * wizard's directory-based BIOS selector to enumerate candidates and
+	 * show region/version per file. The fd MUST be detached (ownership
+	 * transferred to native) before the call — emucore wraps it in a FILE*
+	 * and closes it on return either way.
+	 *
+	 * Returns null if the file isn't a valid BIOS image.
+	 */
+	public static native BiosInfo getBiosInfoFromFd(int fd);
+
+	/**
+	 * Read enough of a PS2 disc image to extract its serial (e.g.
+	 * "SLUS-20312"). Walks the ISO9660 directory to find SYSTEM.CNF and
+	 * parses the BOOT2 line. Only handles 2048-byte-sector ISOs today —
+	 * CHD/CSO/etc. return null and the caller falls back to filename
+	 * parsing. fd is consumed (closed by native).
+	 */
+	public static native String getGameSerialFromFd(int fd);
+
+	/**
+	 * PCSX2 game-database compatibility lookup. Returns the raw 0-6
+	 * Compatibility enum value:
+	 *   0 Unknown, 1 Nothing, 2 Intro, 3 Menu, 4 InGame, 5 Playable, 6 Perfect
+	 * Caller maps to the 5-star display.
+	 */
+	public static native int getCompatibilityForSerial(String serial);
 
 	public static native boolean saveStateToSlot(int slot);
 	public static native boolean loadStateFromSlot(int slot);
