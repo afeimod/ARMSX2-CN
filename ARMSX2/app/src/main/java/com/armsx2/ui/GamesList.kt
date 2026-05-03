@@ -149,12 +149,7 @@ object GamesList {
                                     BiosCard(
                                         modifier = Modifier.weight(1f),
                                         onLaunch = {
-                                            // Force the library overlay on so the
-                                            // cards remain visible once eState flips
-                                            // to RUNNING — the STOPPED-branch list
-                                            // disappears at that point and WindowImpl
-                                            // re-paints it via the showLibrary path.
-                                            WindowImpl.showLibrary.value = true
+                                            WindowImpl.showLibrary.value = false
                                             Main.startBios()
                                         },
                                     )
