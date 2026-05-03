@@ -542,6 +542,52 @@ class Main: ComponentActivity() {
 
     var tested = false
 
+    /** Latched on first kickoffEmucoreInit so a second call (e.g. after
+     *  the user re-enters setup via the cog) is a no-op. Heavy init —
+     *  asset copy, EmuFolders setup, JIT test prelude — must run once
+     *  per process. */
+    private var emucoreInitDone = false
+
+    /**
+     * Run the heavy one-shot emucore init (asset copy + EmuFolders +
+     * SDL/HID setup + EE/VIF JIT-test prelude). MUST be called only
+     * AFTER the user has finished the setup wizard so `Main.systemDir`
+     * resolves to the chosen path before `NativeApp.initializeOnce`
+     * locks `EmuFolders::AppRoot` in for the rest of the process.
+     *
+     * Idempotent — guarded by emucoreInitDone. Safe to call from both
+     * onCreate (returning user, setupComplete already true) and the
+     * setContent LaunchedEffect (first-time user, setupComplete just
+     * flipped).
+     */
+    private fun kickoffEmucoreInit() {
+        if (emucoreInitDone) return
+        emucoreInitDone = true
+
+        // Default resources — shaders, GameIndex, fonts, fullscreenui,
+        // patches.zip, controller DB. assetCopyRoot resolves to the
+        // user's chosen systemDir (now valid post-setup) so emucore
+        // finds them at <systemDir>/resources/...
+        copyAssetAll(applicationContext, "bios")
+        copyAssetAll(applicationContext, "resources")
+
+        invoke {
+            NativeApp.initializeOnce(applicationContext)
+
+            // Set up JNI
+            SDLControllerManager.nativeSetupJNI()
+            SDLControllerManager.initialize()
+            HIDDeviceManager(applicationContext)
+
+            println("PCSX2_INIT")
+
+            // Tests that need VTLB/eeMem — run after init
+            NativeApp.runEeJitTests()
+            NativeApp.runEeSeqTests()
+            NativeApp.runVifTests()
+        }
+    }
+
     fun sendKeyAction(p_action: KeyEventType, p_keycode: Int) {
         if (p_action == KeyEventType.KeyDown) {
             var pad_force = 0
@@ -586,28 +632,24 @@ class Main: ComponentActivity() {
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
         }
 
-       // Default resources
-        copyAssetAll(applicationContext, "bios");
-        copyAssetAll(applicationContext, "resources");
-
-        invoke {
-            NativeApp.initializeOnce(applicationContext)
-
-            // Set up JNI
-            SDLControllerManager.nativeSetupJNI()
-
-            // Initialize state
-            SDLControllerManager.initialize()
-
-            HIDDeviceManager(applicationContext)
-
-            println("PCSX2_INIT")
-
-            // Tests that need VTLB/eeMem — run after init
-            NativeApp.runEeJitTests()
-            NativeApp.runEeSeqTests()
-            NativeApp.runVifTests()
+        // Defer asset copy + emucore init until setup is complete. On the
+        // first-ever run, `systemDir` isn't picked yet at onCreate time —
+        // so initializeOnce would resolve to the app-private fallback and
+        // wedge `EmuFolders::AppRoot` there for the rest of the process,
+        // even after the user finishes the wizard. Memcards then read
+        // from the wrong dir on first boot ("scary empty cards"); next
+        // app launch picks up the correct path from prefs and saves
+        // re-appear. Gating on setupComplete avoids the misroute.
+        //
+        // Idempotent guard: kickoffEmucoreInit checks emucoreInitDone so
+        // setupComplete flipping multiple times (re-entry via cog button
+        // doesn't toggle it back to false, but be defensive) only fires
+        // the heavy init once.
+        if (setupComplete.value) {
+            kickoffEmucoreInit()
         }
+        // else: setContent's LaunchedEffect(setupComplete.value) below
+        // calls kickoffEmucoreInit when the wizard finishes.
 
         val glVersion = getSupportedGLESVersion(this)
 
@@ -622,6 +664,19 @@ class Main: ComponentActivity() {
         }
         setContent {
             val ctx = androidx.compose.ui.platform.LocalContext.current
+
+            // First-time setup deferral: when the wizard finishes and
+            // setupComplete flips to true, kick off the heavy emucore
+            // init now that `Main.systemDir` reflects the user's pick.
+            // The kickoff helper is idempotent (emucoreInitDone latch),
+            // so this firing AFTER an onCreate-time call (returning user
+            // with setupComplete already true) is a no-op.
+            androidx.compose.runtime.LaunchedEffect(setupComplete.value) {
+                if (setupComplete.value) {
+                    kickoffEmucoreInit()
+                }
+            }
+
             // Setup wizard runs once. After it persists prefs and flips
             // setupComplete the main emulator UI takes over. Re-entering
             // setup requires clearing app data (or wiping the prefs key).

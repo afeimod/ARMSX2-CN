@@ -12,7 +12,7 @@ namespace BuildVersion
 	int GitTagHi = 2;
 	int GitTagMid = 7;
 	int GitTagLo = 309;
-	int ARMSX2Build = 1;
+	int ARMSX2Build = 2;
 
 	namespace
 	{
