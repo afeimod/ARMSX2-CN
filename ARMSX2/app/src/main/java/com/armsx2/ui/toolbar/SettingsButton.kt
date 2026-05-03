@@ -20,7 +20,7 @@ import compose.icons.lineawesomeicons.CogSolid
 class SettingsButton : ToolbarButton() {
     override var icon = mutableStateOf<ImageVector?>(LineAwesomeIcons.CogSolid)
 
-    override fun isVisible(): Boolean = true
+    override fun isVisible(): Boolean = (Main.eState.value != EmuState.RUNNING)
 
     override fun action() {
         if (Main.eState.value == EmuState.RUNNING || Main.eState.value == EmuState.PAUSED)

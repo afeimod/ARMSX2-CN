@@ -17,6 +17,7 @@ data class GameInfo(
     val title: String,
     val serial: String?,
     val compatibility: Int = 0,    // 0..5 (TODO: pull from gamedb)
+    val extension: String = "",    // upper-case container ext, e.g. "ISO", "CHD"
 ) {
     val coverUrl: String? get() = serial?.let {
         "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/$it.jpg"

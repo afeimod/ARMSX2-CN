@@ -35,9 +35,11 @@
 #include "SDL3/SDL.h"
 #include "ps2/BiosTools.h"
 #include "native-lib.h"
+#include "libchdr/chd.h"
 #include <algorithm>
 #include <cctype>
 #include <future>
+#include <functional>
 #include <regex>
 #include <vector>
 
@@ -97,9 +99,20 @@ std::string GetJavaString(JNIEnv *env, jstring jstr) {
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
-                                                jstring p_szpath, jint p_apiVer) {
+                                                jstring p_szpath,
+                                                jstring p_szbiosfolder,
+                                                jint p_apiVer) {
     redirect_stdout_to_logcat();
+    // p_szpath is the user's chosen system folder (memcards, savestates,
+    // configs land here) when set up via the wizard; falls back to the
+    // app's externalFilesDir when unset. p_szbiosfolder is always the
+    // app's externalFilesDir/bios — the wizard copies the user-picked
+    // BIOS there via private File APIs, which the chosen-systemDir path
+    // can't necessarily host on Android 11+ scoped storage. Pinning
+    // Folders/Bios separately keeps BIOS loading working regardless of
+    // where DataRoot points.
     std::string _szPath = GetJavaString(env, p_szpath);
+    std::string _szBiosFolder = GetJavaString(env, p_szbiosfolder);
     EmuFolders::AppRoot = _szPath;
     EmuFolders::DataRoot = _szPath;
     EmuFolders::SetResourcesDirectory();
@@ -127,6 +140,16 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
 
         si.SetStringValue("SPU2/Output", "Backend", "Oboe");
         si.SetBoolValue("EmuCore", "EnableFastBoot", false);
+
+        // Pin BIOS folder to the app's externalFilesDir/bios regardless
+        // of where the user pointed DataRoot. The setup wizard's
+        // finishBiosStep copies the chosen BIOS file there via java.io
+        // (always writable), and this absolute path bypasses the
+        // DataRoot/bios default that EmuFolders::LoadConfig would
+        // compute otherwise. Path::Combine treats absolute second args
+        // as-is, so EmuFolders::Bios resolves directly to this folder.
+        if (!_szBiosFolder.empty())
+            si.SetStringValue("Folders", "Bios", _szBiosFolder.c_str());
 
         // Renderer is left at Auto (Pcsx2Config::DEFAULT_HW_RENDERER) so
         // GSUtil::GetPreferredRenderer chooses at runtime — on Android that
@@ -289,6 +312,24 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_speedhackLimitermode(JNIEnv *env, jclass clazz,
                                                           jint p_value) {
+    // Enum values match LimiterModeType (Config.h:267):
+    //   0 Nominal, 1 Turbo, 2 Slomo, 3 Unlimited.
+    // Called from the in-game overlay's Frame Limit toggle (0 vs 3).
+    // SetLimiterMode is a small atomic update + UpdateTargetSpeed —
+    // safe to call from the JNI thread without RunOnCPUThread (the
+    // Android port doesn't have one wired anyway). No-op when no VM
+    // is running so we don't poke stale state.
+    if (!VMManager::HasValidVM())
+        return;
+    LimiterModeType mode;
+    switch (p_value) {
+        case 0: mode = LimiterModeType::Nominal; break;
+        case 1: mode = LimiterModeType::Turbo; break;
+        case 2: mode = LimiterModeType::Slomo; break;
+        case 3: mode = LimiterModeType::Unlimited; break;
+        default: return;
+    }
+    VMManager::SetLimiterMode(mode);
 }
 
 extern "C"
@@ -303,10 +344,91 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackEecycleskip(JNIEnv *env, jclass cl
                                                           jint p_value) {
 }
 
+// Generic setting writer — mirror of pcsx2-qt's settings save path.
+// Writes flow into s_settings_interface (the MemorySettingsInterface
+// installed in initialize); commitSettings flushes them through to the
+// VM. Type comes as a string from Java to keep the JNI surface flat —
+// only four primitives are supported (bool/int/float/string), enough
+// for every EmuCore key the UI needs to push.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setSetting(JNIEnv *env, jclass clazz,
+                                                 jstring p_section, jstring p_key,
+                                                 jstring p_type, jstring p_value) {
+    const std::string section = GetJavaString(env, p_section);
+    const std::string key     = GetJavaString(env, p_key);
+    const std::string type    = GetJavaString(env, p_type);
+    const std::string value   = GetJavaString(env, p_value);
+
+    // Project builds with -fno-exceptions, so std::stoi / std::stof can't
+    // be wrapped in try-catch. Use StringUtil::FromChars (the same parser
+    // MemorySettingsInterface uses internally for GetIntValue/GetFloatValue
+    // — guarantees parse-symmetry with whatever we write here).
+    if (type == "bool")
+    {
+        const bool bval = (value == "true" || value == "1");
+        Host::SetBaseBoolSettingValue(section.c_str(), key.c_str(), bval);
+    }
+    else if (type == "int")
+    {
+        if (auto parsed = StringUtil::FromChars<s32>(value, 10); parsed.has_value())
+            Host::SetBaseIntSettingValue(section.c_str(), key.c_str(), parsed.value());
+    }
+    else if (type == "float")
+    {
+        if (auto parsed = StringUtil::FromChars<float>(value); parsed.has_value())
+            Host::SetBaseFloatSettingValue(section.c_str(), key.c_str(), parsed.value());
+    }
+    else if (type == "string")
+    {
+        Host::SetBaseStringSettingValue(section.c_str(), key.c_str(), value.c_str());
+    }
+    else
+    {
+        Console.Warning("setSetting: unknown type '%s' for %s/%s", type.c_str(),
+                        section.c_str(), key.c_str());
+    }
+}
+
+// Push queued setSetting writes into the running VM. Idempotent — safe
+// to call multiple times. Logs the resolved EmuCore.Speedhacks state
+// for plumbing-verification (one-line check from logcat).
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
+    if (VMManager::HasValidVM())
+        VMManager::ApplySettings();
+    if (MTGS::IsOpen())
+        MTGS::ApplySettings();
+
+    // Plumbing roundtrip verifier — once the UI starts pushing real
+    // settings, watch logcat for these to confirm the write landed.
+    // Unary `+` promotes each bit-field to a plain int, since C++ doesn't
+    // allow forwarding references (T&&) to bind to bit-fields.
+    Console.WriteLnFmt(
+        "Settings commit: vuThread={} EECycleRate={} EECycleSkip={} "
+        "vu1Instant={} fastCDVD={} vuFlagHack={}",
+        +EmuConfig.Speedhacks.vuThread,
+        +EmuConfig.Speedhacks.EECycleRate,
+        +EmuConfig.Speedhacks.EECycleSkip,
+        +EmuConfig.Speedhacks.vu1Instant,
+        +EmuConfig.Speedhacks.fastCDVD,
+        +EmuConfig.Speedhacks.vuFlagHack);
+}
+
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderUpscalemultiplier(JNIEnv *env, jclass clazz,
                                                              jfloat p_value) {
+    // VMManager::ApplySettings (called inside Initialize) resets EmuConfig
+    // from the persistent SettingsInterface, so writing only to EmuConfig
+    // pre-launch gets clobbered. Push to the BASE layer so LoadCoreSettings
+    // picks it up. Also update EmuConfig directly + nudge MTGS so a live
+    // VM picks up the change without a settings file save round-trip.
+    Host::SetBaseFloatSettingValue("EmuCore/GS", "upscale_multiplier", p_value);
+    EmuConfig.GS.UpscaleMultiplier = p_value;
+    if (MTGS::IsOpen())
+        MTGS::ApplySettings();
 }
 
 extern "C"
@@ -339,6 +461,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderSoftware(JNIEnv *env, jclass clazz) {
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderOpenGL(JNIEnv *env, jclass clazz) {
+    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer",
+        static_cast<int>(GSRendererType::OGL));
     EmuConfig.GS.Renderer = GSRendererType::OGL;
     if(MTGS::IsOpen()) {
         MTGS::ApplySettings();
@@ -353,8 +477,10 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderVulkan(JNIEnv *env, jclass clazz) {
     // Coerce VK HW requests to SW so the SW renderer still uses the Vulkan
     // device as its display backend. Restore the line below once VK HW
     // blending is fixed.
-    // EmuConfig.GS.Renderer = GSRendererType::VK;
-    EmuConfig.GS.Renderer = GSRendererType::SW;
+    // const auto renderer = GSRendererType::VK;
+    const auto renderer = GSRendererType::SW;
+    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer", static_cast<int>(renderer));
+    EmuConfig.GS.Renderer = renderer;
     if(MTGS::IsOpen()) {
         MTGS::ApplySettings();
     }
@@ -589,74 +715,57 @@ Java_kr_co_iefriends_pcsx2_NativeApp_resume(JNIEnv *env, jclass clazz) {
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_shutdown(JNIEnv *env, jclass clazz) {
-    VMManager::SetState(VMState::Stopping);
+    // Only signal Stopping when there's actually a VM to stop. Calling
+    // SetState(Stopping) with no active VM leaves s_state stuck at Stopping,
+    // which then makes the next VMManager::Initialize fail (it requires
+    // s_state == Shutdown). Symptom was a "hang" on first card-tap launch.
+    if (VMManager::HasValidVM())
+        VMManager::SetState(VMState::Stopping);
 }
 
 
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_saveStateToSlot(JNIEnv *env, jclass clazz, jint p_slot) {
-    if (!VMManager::HasValidVM()) {
+    // Previous body was a TODO stub spinning on s_execute_exit with the
+    // actual SaveStateToSlot call commented out — that's why save was
+    // doing nothing. Now we just call straight through.
+    //
+    // Caller (Kotlin SaveStatePicker) dispatches this on a background
+    // thread and pauses the VM beforehand (overlay path), so blocking
+    // here is fine. zip_on_thread=false → the zip is finalized before
+    // we return, so the slot's Screenshot.png is on disk by the time
+    // the picker re-reads slot state. The screenshot is captured by
+    // VMManager::SaveStateToSlot from the GS framebuffer automatically
+    // — no separate GSQueueSnapshot needed.
+    if (!VMManager::HasValidVM())
         return false;
-    }
-
-    std::future<bool> ret = std::async([p_slot]
-    {
-       if(VMManager::GetDiscCRC() != 0) {
-           if(VMManager::GetState() != VMState::Paused) {
-               VMManager::SetPaused(true);
-           }
-//TODO
-/*           // wait 5 sec
-           for (int i = 0; i < 5; ++i) {
-               if (s_execute_exit) {
-                   if(VMManager::SaveStateToSlot(p_slot, false)) {
-                       return true;
-                   }
-                   break;
-               }
-               sleep(1);
-           }*/
-       }
-       return false;
-
-    });
-
-    return ret.get();
+    if (VMManager::GetDiscCRC() == 0)
+        return false;
+    // SaveStateToSlot calls error_callback on failure paths (memcard busy,
+    // bad path) — passing a null std::function would std::bad_function_call.
+    // No-op lambda swallows errors silently for now; proper UI surfacing
+    // can be wired later if needed.
+    VMManager::SaveStateToSlot(p_slot, /*zip_on_thread=*/false,
+        [](const std::string&) {});
+    return true;
 }
 
 extern "C"
 JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlot(JNIEnv *env, jclass clazz, jint p_slot) {
-    if (!VMManager::HasValidVM()) {
+    // Previous body spun for 5 seconds waiting for s_execute_exit
+    // before ever calling LoadStateFromSlot — typically the flag
+    // never flipped within the window so load was a no-op. Direct
+    // call now (caller pauses + dispatches off-thread).
+    if (!VMManager::HasValidVM())
         return false;
-    }
-
-    std::future<bool> ret = std::async([p_slot]
-    {
-       u32 _crc = VMManager::GetDiscCRC();
-       if(_crc != 0) {
-           if (VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc, p_slot)) {
-               if(VMManager::GetState() != VMState::Paused) {
-                   VMManager::SetPaused(true);
-               }
-
-               // wait 5 sec
-               for (int i = 0; i < 5; ++i) {
-                   if (s_execute_exit) {
-                       if(VMManager::LoadStateFromSlot(p_slot)) {
-                           return true;
-                       }
-                       break;
-                   }
-                   sleep(1);
-               }
-           }
-       }
-       return false;
-    });
-
-    return ret.get();
+    const u32 _crc = VMManager::GetDiscCRC();
+    if (_crc == 0)
+        return false;
+    if (!VMManager::HasSaveStateInSlot(VMManager::GetDiscSerial().c_str(), _crc, p_slot))
+        return false;
+    return VMManager::LoadStateFromSlot(p_slot);
 }
 
 extern "C"
@@ -1073,11 +1182,59 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runEeSeqTests(JNIEnv*, jclass) { RunEeSeqTe
 // ---------------------------------------------------------------------------
 
 namespace {
-// Read `size` bytes of disc data starting at the given LBA. Each sector is
-// `sectorSize` bytes total of which `dataOffset .. dataOffset+2048` is the
-// 2048 bytes of cooked data. Reads can span multiple sectors.
-static bool ReadDiscData(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset,
-    std::uint32_t startLba, void* buf, std::size_t size)
+// Reader abstraction so the SYSTEM.CNF probe is independent of the
+// underlying container (flat ISO/BIN via FILE*, CHD via libchdr). Each
+// implementation knows how to fetch up to 2048 bytes of cooked data
+// starting at a given LBA + intra-sector offset.
+using DiscReader = std::function<bool(std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size)>;
+
+// FILE*-backed reader for plain ISO (2048/0) and raw .bin (2352/16, 2352/24).
+static DiscReader MakeFileReader(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset)
+{
+    return [fp, sectorSize, dataOffset](std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size) -> bool {
+        const std::uint64_t off = static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
+        if (std::fseek(fp, static_cast<long>(off), SEEK_SET) != 0) return false;
+        return std::fread(buf, 1, size, fp) == size;
+    };
+}
+
+// CHD-backed reader. Pulls hunks via chd_read and indexes into them. The
+// caller owns `chd` and the cached hunk buffer (so this lambda can be
+// rebuilt cheaply across layout retries).
+static DiscReader MakeChdReader(chd_file* chd, std::uint32_t hunkBytes,
+    std::vector<std::uint8_t>& hunkBuf, std::int64_t& cachedHunk,
+    std::uint32_t sectorSize, std::uint32_t dataOffset)
+{
+    return [chd, hunkBytes, &hunkBuf, &cachedHunk, sectorSize, dataOffset](
+               std::uint32_t lba, std::uint32_t skip, void* buf, std::size_t size) -> bool {
+        std::uint64_t byte_off = static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip;
+        auto* dst = static_cast<std::uint8_t*>(buf);
+        std::size_t left = size;
+        while (left > 0)
+        {
+            const std::int64_t hunk_id = static_cast<std::int64_t>(byte_off / hunkBytes);
+            const std::uint32_t in_hunk = static_cast<std::uint32_t>(byte_off % hunkBytes);
+            if (cachedHunk != hunk_id)
+            {
+                if (chd_read(chd, static_cast<int>(hunk_id), hunkBuf.data()) != CHDERR_NONE)
+                    return false;
+                cachedHunk = hunk_id;
+            }
+            const std::size_t avail = hunkBytes - in_hunk;
+            const std::size_t want = std::min(left, avail);
+            std::memcpy(dst, hunkBuf.data() + in_hunk, want);
+            dst += want;
+            byte_off += want;
+            left -= want;
+        }
+        return true;
+    };
+}
+
+// Read `size` bytes of disc data starting at the given LBA, walking
+// sectors via the supplied reader callback. Reads can span multiple
+// sectors.
+static bool ReadDiscData(const DiscReader& read, std::uint32_t startLba, void* buf, std::size_t size)
 {
     auto* dst = static_cast<std::uint8_t*>(buf);
     std::uint32_t lba = startLba;
@@ -1086,11 +1243,9 @@ static bool ReadDiscData(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t 
 
     while (left > 0)
     {
-        if (std::fseek(fp, static_cast<long>(static_cast<std::uint64_t>(lba) * sectorSize + dataOffset + skip), SEEK_SET) != 0)
-            return false;
         const std::size_t avail = 2048 - skip;
         const std::size_t want = std::min<std::size_t>(left, avail);
-        if (std::fread(dst, 1, want, fp) != want) return false;
+        if (!read(lba, static_cast<std::uint32_t>(skip), dst, want)) return false;
         dst += want;
         left -= want;
         lba++;
@@ -1099,15 +1254,14 @@ static bool ReadDiscData(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t 
     return true;
 }
 
-// Parse SYSTEM.CNF at the given sector layout, return serial or empty
-// string. Empty result means "this layout didn't apply" — caller tries
-// the next one.
-static std::string ProbeSerialAtLayout(std::FILE* fp, std::uint32_t sectorSize, std::uint32_t dataOffset)
+// Parse SYSTEM.CNF using the supplied reader. Empty return = "this layout
+// didn't apply" — caller tries the next one.
+static std::string ProbeSerialWithReader(const DiscReader& read)
 {
     // PVD lives at LBA 16 in every ISO9660 image regardless of physical
     // sector layout.
     std::uint8_t pvd[2048];
-    if (!ReadDiscData(fp, sectorSize, dataOffset, 16, pvd, sizeof(pvd))) return {};
+    if (!ReadDiscData(read, 16, pvd, sizeof(pvd))) return {};
     if (pvd[0] != 1 || std::memcmp(&pvd[1], "CD001", 5) != 0) return {};
 
     std::uint32_t rootLba  = *reinterpret_cast<const std::uint32_t*>(&pvd[156 + 2]);
@@ -1115,7 +1269,7 @@ static std::string ProbeSerialAtLayout(std::FILE* fp, std::uint32_t sectorSize, 
     if (rootLba == 0 || rootSize == 0 || rootSize > 1024 * 1024) return {};
 
     std::vector<std::uint8_t> rootData(rootSize);
-    if (!ReadDiscData(fp, sectorSize, dataOffset, rootLba, rootData.data(), rootSize)) return {};
+    if (!ReadDiscData(read, rootLba, rootData.data(), rootSize)) return {};
 
     std::uint32_t sysLba = 0;
     std::uint32_t sysSize = 0;
@@ -1151,7 +1305,7 @@ static std::string ProbeSerialAtLayout(std::FILE* fp, std::uint32_t sectorSize, 
     if (sysLba == 0 || sysSize == 0 || sysSize > 64 * 1024) return {};
 
     std::string contents(sysSize, '\0');
-    if (!ReadDiscData(fp, sectorSize, dataOffset, sysLba, contents.data(), sysSize)) return {};
+    if (!ReadDiscData(read, sysLba, contents.data(), sysSize)) return {};
 
     // SYSTEM.CNF format example:
     //   BOOT2 = cdrom0:\SCUS_972.28;1
@@ -1176,6 +1330,75 @@ static std::string ProbeSerialAtLayout(std::FILE* fp, std::uint32_t sectorSize, 
         [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
     return serial;
 }
+
+// Minimal core_file wrapper around an existing FILE*. libchdr only needs
+// fsize/fread/fseek/fclose; we hand-roll them to avoid bringing in the
+// emulator's heavyweight ChdCoreFileWrapper (which deals with parents and
+// precaching that we don't need for a one-shot serial probe).
+struct ChdProbeCoreFile
+{
+    core_file core{};
+    std::FILE* fp = nullptr;
+};
+
+static std::uint64_t ChdProbe_FSize(core_file* f)
+{
+    auto* w = static_cast<ChdProbeCoreFile*>(f->argp);
+    if (std::fseek(w->fp, 0, SEEK_END) != 0) return static_cast<std::uint64_t>(-1);
+    long sz = std::ftell(w->fp);
+    return sz < 0 ? static_cast<std::uint64_t>(-1) : static_cast<std::uint64_t>(sz);
+}
+static std::size_t ChdProbe_FRead(void* buf, std::size_t elm, std::size_t cnt, core_file* f)
+{
+    auto* w = static_cast<ChdProbeCoreFile*>(f->argp);
+    return std::fread(buf, elm, cnt, w->fp);
+}
+static int ChdProbe_FSeek(core_file* f, std::int64_t offset, int whence)
+{
+    auto* w = static_cast<ChdProbeCoreFile*>(f->argp);
+    return std::fseek(w->fp, static_cast<long>(offset), whence);
+}
+static int ChdProbe_FClose(core_file* f)
+{
+    auto* w = static_cast<ChdProbeCoreFile*>(f->argp);
+    if (w->fp) std::fclose(w->fp);
+    delete w;
+    return 0;
+}
+
+// Detect "MComprHD" magic at the head of the file.
+static bool IsChdMagic(std::FILE* fp)
+{
+    char hdr[8];
+    if (std::fseek(fp, 0, SEEK_SET) != 0) return false;
+    if (std::fread(hdr, 1, 8, fp) != 8) return false;
+    std::fseek(fp, 0, SEEK_SET);
+    return std::memcmp(hdr, "MComprHD", 8) == 0;
+}
+
+// Open a CHD on top of `fp` (ownership transferred on success — libchdr
+// closes the file via the core_file's fclose). Returns null on any
+// error and leaves `fp` open for the caller to close.
+static chd_file* OpenChdFromFile(std::FILE* fp)
+{
+    auto* wrapper = new ChdProbeCoreFile();
+    wrapper->fp = fp;
+    wrapper->core.argp = wrapper;
+    wrapper->core.fsize = ChdProbe_FSize;
+    wrapper->core.fread = ChdProbe_FRead;
+    wrapper->core.fseek = ChdProbe_FSeek;
+    wrapper->core.fclose = ChdProbe_FClose;
+
+    chd_file* chd = nullptr;
+    chd_error err = chd_open_core_file(&wrapper->core, CHD_OPEN_READ, nullptr, &chd);
+    if (err != CHDERR_NONE)
+    {
+        // libchdr always calls our core_file fclose on its failure paths,
+        // which deletes the wrapper and closes fp. Don't double-free.
+        return nullptr;
+    }
+    return chd;
+}
 } // namespace
 
 extern "C" JNIEXPORT jstring JNICALL
@@ -1188,14 +1411,70 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getGameSerialFromFd(JNIEnv* env, jclass, ji
     if (!fp)
         return nullptr;
 
-    // Try the three known PS2-disc sector layouts in order. .iso files
-    // are virtually always 2048/0; .bin files are usually 2352/16
-    // (Mode 1 raw); 2352/24 (Mode 2 Form 1) is rare on PS2 but cheap to
-    // try as a last resort.
-    std::string serial = ProbeSerialAtLayout(fp, 2048, 0);
-    if (serial.empty()) serial = ProbeSerialAtLayout(fp, 2352, 16);
-    if (serial.empty()) serial = ProbeSerialAtLayout(fp, 2352, 24);
-    std::fclose(fp);
+    std::string serial;
+
+    if (IsChdMagic(fp))
+    {
+        // CHD path. libchdr takes ownership of fp via the core_file
+        // wrapper — on success it'll be closed when chd_close runs; on
+        // failure libchdr's internal cleanup also closes it. Either way
+        // we must NOT fclose(fp) on this branch.
+        chd_file* chd = OpenChdFromFile(fp);
+        if (chd)
+        {
+            const chd_header* hdr = chd_get_header(chd);
+            const std::uint32_t hunk_bytes = hdr->hunkbytes;
+            const std::uint32_t unit_bytes = hdr->unitbytes;
+            std::vector<std::uint8_t> hunk_buf(hunk_bytes);
+            std::int64_t cached_hunk = -1;
+
+            // CHD frames are `unit_bytes` long and the 2048 bytes of
+            // cooked data sits somewhere inside each frame. chdman packs
+            // PS2 DVD ISOs as 2448-byte units with a +24 offset (per the
+            // pattern emucore's ChdFileReader/InputIsoFile uses). PS2 CDs
+            // use 2448 + 16 (Mode 1) or +24 (Mode 2 Form 1). Some DVD
+            // CHDs also come through as 2048-byte units with 0 offset.
+            // Try every plausible offset in the actual unit size — these
+            // are cheap (a couple of hunk reads) and the first match
+            // wins.
+            auto tryLayout = [&](std::uint32_t sectorSize, std::uint32_t dataOffset) {
+                if (!serial.empty()) return;
+                cached_hunk = -1; // forget the previous attempt's hunk
+                auto reader = MakeChdReader(chd, hunk_bytes, hunk_buf, cached_hunk, sectorSize, dataOffset);
+                serial = ProbeSerialWithReader(reader);
+            };
+
+            tryLayout(unit_bytes, 0);
+            tryLayout(unit_bytes, 16);
+            tryLayout(unit_bytes, 24);
+            // Fallbacks for CHDs whose unit_bytes doesn't match the
+            // canonical layouts (defensive — shouldn't normally hit).
+            if (unit_bytes != 2048) tryLayout(2048, 0);
+            if (unit_bytes != 2352)
+            {
+                tryLayout(2352, 16);
+                tryLayout(2352, 24);
+            }
+
+            chd_close(chd); // closes the wrapped core_file (and thus fp)
+        }
+        else
+        {
+            // libchdr's cleanup path already closed fp via fclose on the
+            // wrapper. Don't double-close.
+        }
+    }
+    else
+    {
+        // Plain ISO / raw .bin path. .iso files are virtually always
+        // 2048/0; .bin files are usually 2352/16 (Mode 1 raw); 2352/24
+        // (Mode 2 Form 1) is rare on PS2 but cheap to try as a last
+        // resort.
+        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2048, 0));
+        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2352, 16));
+        if (serial.empty()) serial = ProbeSerialWithReader(MakeFileReader(fp, 2352, 24));
+        std::fclose(fp);
+    }
 
     if (serial.empty()) return nullptr;
     return env->NewStringUTF(serial.c_str());

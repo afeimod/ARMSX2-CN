@@ -17,11 +17,17 @@
 #include "common/Perf.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <vector>
+#ifdef VU0_SHADOW_VERIFY
+#include <dlfcn.h>
+#include <unwind.h>
+#endif
 
 using namespace vixl::aarch64;
 
@@ -236,6 +242,29 @@ static bool isVU0LowerNOP(u32 lower)
 	return false;
 }
 
+// Runtime state probe — dumps VU0 state + select externals so the user can
+// diff "native" vs "fallback" runs at a specific pc. The JIT emits a call
+// to this around the suspect pair body in both paths. Tag distinguishes
+// pre/post so the diff knows which dump to compare against which.
+static void vu0ProbeState(VURegs* VU, u32 pc, u32 tag)
+{
+	const char* label = (tag == 0) ? "PRE " : "POST";
+	Console.WriteLn("VU0 PROBE [%s] pc=0x%04x  cycle=%llu  tpc=0x%08x  ebit=%u  branch=%u  branchpc=0x%04x",
+		label, pc, (unsigned long long)VU->cycle,
+		VU->VI[REG_TPC].UL, VU->ebit, VU->branch, VU->branchpc);
+	Console.WriteLn("  ACC={%08x %08x %08x %08x}  Q=%08x  P=%08x  flags=%08x  VPU_STAT=%08x",
+		VU->ACC.UL[0], VU->ACC.UL[1], VU->ACC.UL[2], VU->ACC.UL[3],
+		VU->q.UL, VU->p.UL, VU->flags, VU->VI[REG_VPU_STAT].UL);
+	Console.WriteLn("  macflag=%08x  statusflag=%08x  clipflag=%08x  fmacwritepos=%u  fmaccount=%u",
+		VU->macflag, VU->statusflag, VU->clipflag,
+		VU->fmacwritepos, VU->fmaccount);
+	// Read FPCR — JIT NEON ops + interp scalar ops both honor FPCR; if it
+	// drifts (FZ/RM bits) results diverge silently. Useful sanity-check.
+	uint64_t fpcr = 0;
+	asm volatile("mrs %0, fpcr" : "=r"(fpcr));
+	Console.WriteLn("  fpcr=0x%016llx", (unsigned long long)fpcr);
+}
+
 static void vu0DecrementVIBackup(VURegs* VU, u64 cyclesBefore)
 {
 	if (VU->VIBackupCycles > 0)
@@ -274,10 +303,111 @@ static void vu0DecrementVIBackup(VURegs* VU, u64 cyclesBefore)
 #ifdef VU0_SHADOW_VERIFY
 alignas(16) static u8 s_shadow_pre[sizeof(VURegs)];
 alignas(16) static u8 s_shadow_post[sizeof(VURegs)];
+// Latched on the first detected divergence. Once set, vu0_shadow_verify
+// becomes a no-op so a bad 3D scene doesn't flood logcat with thousands
+// of follow-on errors before the user can see the original failure. The
+// halt path also sets it before aborting (belt and braces in case any
+// other thread is mid-verify when we abort).
+static std::atomic<bool> s_shadow_diverged{false};
 
 static void vu0_shadow_snapshot()
 {
+	if (s_shadow_diverged.load(std::memory_order_relaxed))
+		return;
 	std::memcpy(s_shadow_pre, &VU0, sizeof(VURegs));
+}
+
+static void vu0_shadow_dump_state(const char* label, const VURegs* state)
+{
+	Console.Error("--- %s ---", label);
+	for (u32 v = 0; v < 32; v++)
+	{
+		Console.Error("  VF[%2u] = {%08x %08x %08x %08x}", v,
+			state->VF[v].UL[0], state->VF[v].UL[1], state->VF[v].UL[2], state->VF[v].UL[3]);
+	}
+	Console.Error("  ACC    = {%08x %08x %08x %08x}",
+		state->ACC.UL[0], state->ACC.UL[1], state->ACC.UL[2], state->ACC.UL[3]);
+	for (u32 v = 0; v < 32; v++)
+		Console.Error("  VI[%2u] = %08x", v, state->VI[v].UL);
+	Console.Error("  Q=%08x  P=%08x  I=%08x  R=%08x",
+		state->q.UL, state->p.UL, state->VI[REG_I].UL, state->VI[REG_R].UL);
+	Console.Error("  cycle=%llu  macflag=%08x  statusflag=%08x  clipflag=%08x",
+		(unsigned long long)state->cycle, state->macflag, state->statusflag, state->clipflag);
+	Console.Error("  ebit=%u  branch=%u  branchpc=0x%04x  flags=%08x",
+		state->ebit, state->branch, state->branchpc, state->flags);
+	Console.Error("  fmacwritepos=%u  fmaccount=%u",
+		state->fmacwritepos, state->fmaccount);
+}
+
+struct ShadowUnwindCtx
+{
+	u32 frames_seen = 0;
+	static constexpr u32 kMaxFrames = 32;
+};
+
+static _Unwind_Reason_Code vu0_shadow_unwind_cb(struct _Unwind_Context* ctx, void* arg)
+{
+	auto* state = static_cast<ShadowUnwindCtx*>(arg);
+	if (state->frames_seen >= ShadowUnwindCtx::kMaxFrames)
+		return _URC_END_OF_STACK;
+
+	const uintptr_t pc = _Unwind_GetIP(ctx);
+	if (!pc)
+		return _URC_END_OF_STACK;
+
+	Dl_info info{};
+	const char* sym = "?";
+	uintptr_t off = 0;
+	if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname)
+	{
+		sym = info.dli_sname;
+		off = pc - reinterpret_cast<uintptr_t>(info.dli_saddr);
+	}
+	else if (info.dli_fname)
+	{
+		sym = info.dli_fname;
+		off = pc - reinterpret_cast<uintptr_t>(info.dli_fbase);
+	}
+	Console.Error("  #%2u  pc=0x%016lx  %s+0x%lx",
+		state->frames_seen, (unsigned long)pc, sym, (unsigned long)off);
+	state->frames_seen++;
+	return _URC_NO_REASON;
+}
+
+static void vu0_shadow_halt(u32 pc, const char* first_field, const char* first_detail)
+{
+	// Single-shot: if another invocation beats us in, just return.
+	if (s_shadow_diverged.exchange(true, std::memory_order_acq_rel))
+		return;
+
+	const u32 lower = *reinterpret_cast<const u32*>(VU0.Micro + pc);
+	const u32 upper = *reinterpret_cast<const u32*>(VU0.Micro + pc + 4);
+
+	Console.Error("============================================================");
+	Console.Error(" VU0 SHADOW DIVERGENCE  pc=0x%04x", pc);
+	Console.Error("   first divergent field: %s  %s", first_field, first_detail);
+	Console.Error("   pair opcodes: lower=0x%08x  upper=0x%08x", lower, upper);
+	Console.Error("============================================================");
+
+	// Three snapshots so the user can see what changed and on what input:
+	//   PRE   = VU0 just before the JIT pair body ran
+	//   JIT   = VU0 after the JIT pair body ran
+	//   INTERP= VU0 after vu0Exec ran the same pair on the same input
+	const VURegs* pre   = reinterpret_cast<const VURegs*>(s_shadow_pre);
+	const VURegs* jit   = reinterpret_cast<const VURegs*>(s_shadow_post);
+	vu0_shadow_dump_state("PRE-PAIR (input state)", pre);
+	vu0_shadow_dump_state("JIT RESULT", jit);
+	vu0_shadow_dump_state("INTERP RESULT (truth)", &VU0);
+
+	Console.Error("--- Native C++ backtrace ---");
+	ShadowUnwindCtx ctx;
+	_Unwind_Backtrace(&vu0_shadow_unwind_cb, &ctx);
+
+	Console.Error("============================================================");
+	Console.Error(" Aborting — tombstone will follow");
+	Console.Error("============================================================");
+	// SIGABRT → debuggerd → tombstone with full unwound C++ backtrace.
+	std::abort();
 }
 
 static void vu0_shadow_log(u32 pc, const char* field, const char* fmt, ...)
@@ -287,13 +417,54 @@ static void vu0_shadow_log(u32 pc, const char* field, const char* fmt, ...)
 	va_start(ap, fmt);
 	std::vsnprintf(detail, sizeof(detail), fmt, ap);
 	va_end(ap);
-	Console.Error("VU0 SHADOW: pc=0x%04x field=%s %s", pc, field, detail);
+	// Halt path takes the first divergence and aborts. Anything else is
+	// suppressed — see s_shadow_diverged.
+	vu0_shadow_halt(pc, field, detail);
 }
 
 static void vu0_shadow_verify(u32 pc)
 {
+	if (s_shadow_diverged.load(std::memory_order_relaxed))
+	{
+		// Already halted (or about to halt). Restore JIT result so the
+		// VM doesn't drift further and skip the comparison.
+		std::memcpy(&VU0, s_shadow_post, sizeof(VURegs));
+		return;
+	}
+
+	// Cycle-window gate: skip the vu0Exec re-run + memcmp when this pair
+	// is outside the user's target cycle range. The JIT pair body has
+	// ALREADY run by this point (we're called post-pair); the snapshot
+	// at the start of the pair captured s_shadow_pre. We just don't
+	// bother running the comparison interp pair, saving the dominant
+	// cost of the harness in normal operation.
+#if defined(VU0_SHADOW_VERIFY_FROM_CYCLE) || defined(VU0_SHADOW_VERIFY_TO_CYCLE)
+	{
+		const u64 cur = VU0.cycle;
+#ifdef VU0_SHADOW_VERIFY_FROM_CYCLE
+		if (cur < (VU0_SHADOW_VERIFY_FROM_CYCLE)) return;
+#endif
+#ifdef VU0_SHADOW_VERIFY_TO_CYCLE
+		if (cur > (VU0_SHADOW_VERIFY_TO_CYCLE))   return;
+#endif
+	}
+#endif
 	// Snapshot post-JIT state.
 	std::memcpy(s_shadow_post, &VU0, sizeof(VURegs));
+
+	// Patch s_shadow_pre's TPC to match the JIT's compile-time-known `pc`.
+	// vu0Exec reads its pair from Micro[VI[REG_TPC]] — and at the moment
+	// the snapshot was taken, TPC may be stale relative to this pair's pc.
+	// Specifically: when a linked block enters via direct B (not through
+	// Execute), the previous block's TPC store leaves TPC pointing at THAT
+	// block's tail, not the new block's head. The JIT itself runs the
+	// correct pair (compile-time-baked pc) but vu0Exec would otherwise run
+	// whatever pair Micro[stale_TPC] points at — comparing two different
+	// pairs and producing meaningless divergences (e.g. branch flag flips,
+	// VI scratch register noise). Force TPC = pc here so vu0Exec runs the
+	// SAME pair the JIT just executed.
+	auto* pre_regs = reinterpret_cast<VURegs*>(s_shadow_pre);
+	pre_regs->VI[REG_TPC].UL = pc;
 
 	// Restore pre-pair state and run interp on the same pair.
 	std::memcpy(&VU0, s_shadow_pre, sizeof(VURegs));
@@ -364,12 +535,188 @@ static void vu0_shadow_verify(u32 pc)
 	if (!diverged) diverged = check_u32("branch",       jit->branch,       iref->branch);
 	if (!diverged) diverged = check_u32("branchpc",     jit->branchpc,     iref->branchpc);
 	if (!diverged) diverged = check_u32("flags",        jit->flags,        iref->flags);
-	if (!diverged) diverged = check_u32("fmacwritepos", jit->fmacwritepos, iref->fmacwritepos);
-	if (!diverged) diverged = check_u32("fmaccount",    jit->fmaccount,    iref->fmaccount);
 
-	// Q register (FDIV result).
+	// Delay-branch state (matters for branch-in-branch-delay-slot edge cases).
+	if (!diverged) diverged = check_u32("delaybranchpc",   jit->delaybranchpc, iref->delaybranchpc);
+	if (!diverged) diverged = check_u32("takedelaybranch",
+		(u32)jit->takedelaybranch, (u32)iref->takedelaybranch);
+
+	// VIBackup state (rolls back VI on branch backup-cycles unwind).
+	if (!diverged) diverged = check_u32("VIBackupCycles",
+		(u32)jit->VIBackupCycles, (u32)iref->VIBackupCycles);
+	if (!diverged) diverged = check_u32("VIOldValue",  jit->VIOldValue,  iref->VIOldValue);
+	if (!diverged) diverged = check_u32("VIRegNumber", jit->VIRegNumber, iref->VIRegNumber);
+
+	// Pending Q/P (set by start-of-FDIV/EFU; consumed when result retires).
+	if (!diverged) diverged = check_u32("pending_q", jit->pending_q, iref->pending_q);
+	if (!diverged) diverged = check_u32("pending_p", jit->pending_p, iref->pending_p);
+
+	// Q / P registers (FDIV / EFU committed results).
 	if (!diverged && jit->q.UL != iref->q.UL)
 		diverged = check_u32("q", jit->q.UL, iref->q.UL);
+	if (!diverged && jit->p.UL != iref->p.UL)
+		diverged = check_u32("p", jit->p.UL, iref->p.UL);
+
+	// FMAC pipeline scalars.
+	if (!diverged) diverged = check_u32("fmacwritepos", jit->fmacwritepos, iref->fmacwritepos);
+	if (!diverged) diverged = check_u32("fmacreadpos",  jit->fmacreadpos,  iref->fmacreadpos);
+	if (!diverged) diverged = check_u32("fmaccount",    jit->fmaccount,    iref->fmaccount);
+
+	// FMAC pipeline slot contents — each queued writeback. Critical: the
+	// JIT may store a slot with subtly wrong sCycle / Cycle / flagreg /
+	// macflag content. Per-pair output state can match while a slot's
+	// retire-time effect diverges from interp's. This is the "cumulative
+	// drift" the per-pair scalar checks miss.
+	//
+	// Normalization before compare: when regupper/reglower is 0 the slot
+	// has NO actual VF writeback for that half (VF[0] is hardwired and
+	// writes to it are no-ops). The xyzwupper/xyzwlower mask in that case
+	// is don't-care — the hazard checker looks at `reg == query_reg`
+	// before consulting the mask. The interp's `_vuRegsMTIR` and
+	// similar non-VF-writing handlers leave `VFwxyzw` uninitialized in
+	// the stack-local `_VURegsNum`, so it carries 0xff from prior frames;
+	// the JIT's pre-baked analyze structs are zero-init. Mask to 0 when
+	// reg=0 so the compare focuses on slots with real VF writebacks.
+	for (u32 i = 0; i < 4 && !diverged; i++)
+	{
+		fmacPipe jp = jit->fmac[i];
+		fmacPipe ip = iref->fmac[i];
+		if (jp.regupper == 0) jp.xyzwupper = 0;
+		if (jp.reglower == 0) jp.xyzwlower = 0;
+		if (ip.regupper == 0) ip.xyzwupper = 0;
+		if (ip.reglower == 0) ip.xyzwlower = 0;
+		if (std::memcmp(&jp, &ip, sizeof(fmacPipe)) != 0)
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "fmac[%u]", i);
+			vu0_shadow_log(pc, fname,
+				"jit{ru=%u rl=%u fr=%d xu=%u xl=%u sC=%llu C=%u m=%08x s=%08x c=%08x} "
+				"interp{ru=%u rl=%u fr=%d xu=%u xl=%u sC=%llu C=%u m=%08x s=%08x c=%08x}",
+				jp.regupper, jp.reglower, jp.flagreg, jp.xyzwupper, jp.xyzwlower,
+				(unsigned long long)jp.sCycle, jp.Cycle, jp.macflag, jp.statusflag, jp.clipflag,
+				ip.regupper, ip.reglower, ip.flagreg, ip.xyzwupper, ip.xyzwlower,
+				(unsigned long long)ip.sCycle, ip.Cycle, ip.macflag, ip.statusflag, ip.clipflag);
+			diverged = true;
+		}
+	}
+
+	// IALU pipeline scalars + slot contents.
+	if (!diverged) diverged = check_u32("ialuwritepos", jit->ialuwritepos, iref->ialuwritepos);
+	if (!diverged) diverged = check_u32("ialureadpos",  jit->ialureadpos,  iref->ialureadpos);
+	if (!diverged) diverged = check_u32("ialucount",    jit->ialucount,    iref->ialucount);
+	for (u32 i = 0; i < 4 && !diverged; i++)
+	{
+		const ialuPipe& jp = jit->ialu[i];
+		const ialuPipe& ip = iref->ialu[i];
+		if (std::memcmp(&jp, &ip, sizeof(ialuPipe)) != 0)
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "ialu[%u]", i);
+			vu0_shadow_log(pc, fname,
+				"jit{r=%d sC=%llu C=%u} interp{r=%d sC=%llu C=%u}",
+				jp.reg, (unsigned long long)jp.sCycle, jp.Cycle,
+				ip.reg, (unsigned long long)ip.sCycle, ip.Cycle);
+			diverged = true;
+		}
+	}
+
+	// FDIV pipeline state.
+	if (!diverged && std::memcmp(&jit->fdiv, &iref->fdiv, sizeof(fdivPipe)) != 0)
+	{
+		vu0_shadow_log(pc, "fdiv",
+			"jit{en=%d reg=%08x sC=%llu C=%u sf=%08x} interp{en=%d reg=%08x sC=%llu C=%u sf=%08x}",
+			jit->fdiv.enable, jit->fdiv.reg.UL,
+			(unsigned long long)jit->fdiv.sCycle, jit->fdiv.Cycle, jit->fdiv.statusflag,
+			iref->fdiv.enable, iref->fdiv.reg.UL,
+			(unsigned long long)iref->fdiv.sCycle, iref->fdiv.Cycle, iref->fdiv.statusflag);
+		diverged = true;
+	}
+
+	// EFU pipeline state.
+	if (!diverged && std::memcmp(&jit->efu, &iref->efu, sizeof(efuPipe)) != 0)
+	{
+		vu0_shadow_log(pc, "efu",
+			"jit{en=%d reg=%08x sC=%llu C=%u} interp{en=%d reg=%08x sC=%llu C=%u}",
+			jit->efu.enable, jit->efu.reg.UL,
+			(unsigned long long)jit->efu.sCycle, jit->efu.Cycle,
+			iref->efu.enable, iref->efu.reg.UL,
+			(unsigned long long)iref->efu.sCycle, iref->efu.Cycle);
+		diverged = true;
+	}
+
+	// micro_macflags / micro_clipflags / micro_statusflags ring buffers
+	// (used by the interpreter for end-of-program flag commit). These
+	// shouldn't drift if everything else matches, but checking catches
+	// subtle ring-write-position bugs.
+	for (u32 i = 0; i < 4 && !diverged; i++)
+	{
+		if (jit->micro_macflags[i] != iref->micro_macflags[i])
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "micro_macflags[%u]", i);
+			diverged = check_u32(fname, jit->micro_macflags[i], iref->micro_macflags[i]);
+		}
+		else if (jit->micro_clipflags[i] != iref->micro_clipflags[i])
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "micro_clipflags[%u]", i);
+			diverged = check_u32(fname, jit->micro_clipflags[i], iref->micro_clipflags[i]);
+		}
+		else if (jit->micro_statusflags[i] != iref->micro_statusflags[i])
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "micro_statusflags[%u]", i);
+			diverged = check_u32(fname, jit->micro_statusflags[i], iref->micro_statusflags[i]);
+		}
+	}
+
+	// Catchall: full struct memcmp with known-don't-care fields zeroed.
+	// If any state I haven't enumerated above diverges, this fires with
+	// a byte offset that can be mapped back to the field via offsetof.
+	// Don't-care fields:
+	//   - Mem / Micro: shared backing memory pointers
+	//   - code: transient current opcode word, set per-pair
+	//   - start_pc: program start, constant per VU program
+	//   - nextBlockCycles: JIT block-dispatcher accounting, deliberately
+	//     not maintained by interp's vu0Exec
+	//   - idx: VU index, constant 0/1
+	//   - fmac[*].xyzwupper/xyzwlower when the corresponding reg is 0
+	//     (interp _vuRegsMTIR etc. leave VFwxyzw uninitialized — see
+	//     normalization above for the per-slot check; same applied here).
+	if (!diverged)
+	{
+		alignas(16) VURegs jitNorm;
+		alignas(16) VURegs irefNorm;
+		std::memcpy(&jitNorm, jit, sizeof(VURegs));
+		std::memcpy(&irefNorm, iref, sizeof(VURegs));
+		jitNorm.Mem = nullptr;          irefNorm.Mem = nullptr;
+		jitNorm.Micro = nullptr;        irefNorm.Micro = nullptr;
+		jitNorm.code = 0;               irefNorm.code = 0;
+		jitNorm.start_pc = 0;           irefNorm.start_pc = 0;
+		jitNorm.nextBlockCycles = 0;    irefNorm.nextBlockCycles = 0;
+		jitNorm.idx = 0;                irefNorm.idx = 0;
+		for (int k = 0; k < 4; k++)
+		{
+			if (jitNorm.fmac[k].regupper == 0) jitNorm.fmac[k].xyzwupper = 0;
+			if (jitNorm.fmac[k].reglower == 0) jitNorm.fmac[k].xyzwlower = 0;
+			if (irefNorm.fmac[k].regupper == 0) irefNorm.fmac[k].xyzwupper = 0;
+			if (irefNorm.fmac[k].reglower == 0) irefNorm.fmac[k].xyzwlower = 0;
+		}
+		const u8* jbytes = reinterpret_cast<const u8*>(&jitNorm);
+		const u8* ibytes = reinterpret_cast<const u8*>(&irefNorm);
+		for (size_t off = 0; off < sizeof(VURegs); off++)
+		{
+			if (jbytes[off] != ibytes[off])
+			{
+				vu0_shadow_log(pc, "catchall_byte",
+					"first divergent byte at offset=%zu jit=%02x interp=%02x "
+					"(check VURegs layout in VU.h to map offset to field)",
+					off, jbytes[off], ibytes[off]);
+				diverged = true;
+				break;
+			}
+		}
+	}
 
 	// Restore JIT result so the game continues with whatever JIT produced.
 	std::memcpy(&VU0, s_shadow_post, sizeof(VURegs));
@@ -873,6 +1220,33 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 		const _VURegsNum& uregs = uregs_data[i];
 		const _VURegsNum& lregs = lregs_data[i];
 
+		// One-shot dump for the buggy pair surfaced by the bisect.
+		// Logs upper + lower opcode words plus the analyze-pass register
+		// metadata so we can decode the pair without rebuilding with
+		// VU0_SHADOW_VERIFY on. Remove once the bug is fixed.
+		if (pc == 0x04D8u)
+		{
+			static std::atomic<bool> s_dumped{false};
+			if (!s_dumped.exchange(true, std::memory_order_acq_rel))
+			{
+				Console.WriteLn("VU0 BISECT TARGET pc=0x04D8: lower=0x%08x upper=0x%08x "
+					"ibit=%d ebit=%d dbit=%d tbit=%d",
+					lower, upper, (int)ibit, (int)ebit_set, (int)dbit_set, (int)tbit_set);
+				Console.WriteLn("  uregs: pipe=%u VFwrite=%u VFwxyzw=%u VFread0=%u VFr0xyzw=%u "
+					"VFread1=%u VFr1xyzw=%u VIwrite=0x%08x VIread=0x%08x",
+					(u32)uregs.pipe, (u32)uregs.VFwrite, (u32)uregs.VFwxyzw,
+					(u32)uregs.VFread0, (u32)uregs.VFr0xyzw,
+					(u32)uregs.VFread1, (u32)uregs.VFr1xyzw,
+					uregs.VIwrite, uregs.VIread);
+				Console.WriteLn("  lregs: pipe=%u VFwrite=%u VFwxyzw=%u VFread0=%u VFr0xyzw=%u "
+					"VFread1=%u VFr1xyzw=%u VIwrite=0x%08x VIread=0x%08x",
+					(u32)lregs.pipe, (u32)lregs.VFwrite, (u32)lregs.VFwxyzw,
+					(u32)lregs.VFread0, (u32)lregs.VFr0xyzw,
+					(u32)lregs.VFread1, (u32)lregs.VFr1xyzw,
+					lregs.VIwrite, lregs.VIread);
+			}
+		}
+
 		// Hazard detection — match every save/restore/discard case in
 		// _vu0Exec (VU0microInterp.cpp:104-158). Anything that needs the
 		// "lower sees pre-upper state" or "lower discarded" semantics must
@@ -924,6 +1298,27 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 #ifdef INTERP_VU0_BRANCH
 		if (branch_pipe) fallback = true;
 #endif
+#if defined(INTERP_VU0_PC_LOW) && defined(INTERP_VU0_PC_HIGH)
+		// TPC-range bisect: pairs in [LOW, HIGH] take the fallback path
+		// so the user can binary-search the buggy pair when shadow-verify
+		// is silent but INTERP_VU0_PAIR fixes the bug.
+		if (pc >= (INTERP_VU0_PC_LOW) && pc <= (INTERP_VU0_PC_HIGH))
+			fallback = true;
+#endif
+
+		// Runtime probe around the suspect pair (pc=0x4D8, MGS2 collision).
+		// User runs once with INTERP_VU0_PC range covering 0x4D8 (forces
+		// fallback path → physics OK), once without (forces native →
+		// physics broken). Diff the PRE+POST dumps from each run; first
+		// field that differs is the JIT's hidden side-effect.
+		const bool probe_this_pair = (pc == 0x04D8u);
+		if (probe_this_pair)
+		{
+			armAsm->Mov(x0, VU0_BASE_REG);
+			armAsm->Mov(w1, pc);
+			armAsm->Mov(w2, 0u); // tag = PRE
+			armEmitCall(reinterpret_cast<const void*>(vu0ProbeState));
+		}
 
 		if (fallback)
 		{
@@ -932,6 +1327,21 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 			// value, so the JIT must NOT touch cycle/TPC here.
 			armAsm->Mov(x0, VU0_BASE_REG);
 			armEmitCall(reinterpret_cast<const void*>(vu0Exec));
+#ifdef VU0_SHADOW_VERIFY
+			// Log fallback pairs at JIT-emit time so we know which pairs
+			// the harness DOESN'T audit (snapshot/verify only fire on the
+			// native branch). If `INTERP_VU0_PAIR` fixes a bug but the
+			// harness stays silent, the buggy pair is almost certainly in
+			// this list (or its native neighbor's wrong output silently
+			// becomes the input to one of these fallback pairs and it
+			// looks correct in isolation).
+			Console.WriteLn("VU0 SHADOW: FALLBACK pair at pc=0x%04x  (vf_haz=%d vi_haz=%d "
+				"mbit=%d dbit=%d tbit=%d ebit=%d branch=%d ibit=%d) "
+				"upper=0x%08x lower=0x%08x",
+				pc, (int)vf_hazard, (int)vi_hazard, (int)mbit_set,
+				(int)dbit_set, (int)tbit_set, (int)ebit_set,
+				(int)branch_pipe, (int)ibit, upper, lower);
+#endif
 		}
 		else
 		{
@@ -1134,6 +1544,15 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU0BlockEntry* out_block)
 			armAsm->Mov(w0, pc);
 			armEmitCall(reinterpret_cast<const void*>(vu0_shadow_verify));
 #endif
+		}
+
+		// POST-pair runtime probe — see PRE comment above.
+		if (probe_this_pair)
+		{
+			armAsm->Mov(x0, VU0_BASE_REG);
+			armAsm->Mov(w1, pc);
+			armAsm->Mov(w2, 1u); // tag = POST
+			armEmitCall(reinterpret_cast<const void*>(vu0ProbeState));
 		}
 
 		pc = (pc + 8) & (VU0_PROGSIZE - 1);

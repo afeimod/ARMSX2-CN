@@ -65,7 +65,48 @@
 // would always agree). Slows VU0 emulation drastically — debug-only.
 // Use this to localize "JIT pair body produces wrong VF/ACC/macflag"
 // bugs that don't show up in INTERP_VU0_PAIR mode.
-#define VU0_SHADOW_VERIFY
+//#define VU0_SHADOW_VERIFY
+
+// Diagnostic: gate the shadow-verify comparison to a cycle window so the
+// harness doesn't tank perf during long boot sequences. Uncomment ONE
+// (or both) to limit when the comparison fires. Snapshots/verify
+// emit ALWAYS at compile time; the GATE is at runtime in vu0_shadow_verify
+// — out-of-window pairs skip the vu0Exec call + memcmp entirely.
+//
+//   FROM: skip until VU->cycle reaches this value. Use to bypass init / BIOS.
+//   TO:   stop after VU->cycle exceeds this value. Use to abort once past
+//         the area of interest.
+//
+// Find your target cycle via the OSD (no exact cycle counter shown there)
+// or by enabling shadow-verify with a permissive window first, noting the
+// cycle in the divergence log, then narrowing on the next run.
+//#define VU0_SHADOW_VERIFY_FROM_CYCLE 24148000000ULL
+//#define VU0_SHADOW_VERIFY_TO_CYCLE   24148999999ULL
+
+// Diagnostic: TPC-range fallback bisection. Pairs whose pc falls in
+// [INTERP_VU0_PC_LOW, INTERP_VU0_PC_HIGH] route to vu0Exec; others go
+// through the native JIT body. Use to BINARY-SEARCH a buggy pair when
+// INTERP_VU0_PAIR fixes the bug but per-pair shadow-verify is silent.
+//
+// Workflow:
+//   1. Set range = whole 4KB program (LOW=0, HIGH=0xFFF). Verify physics
+//      are correct → equivalent to INTERP_VU0_PAIR.
+//   2. Halve the range. Re-run. If physics break, the bug is in the OTHER
+//      half. Otherwise it's in this half.
+//   3. Repeat until you've narrowed to ~8 bytes (one pair).
+//   4. Disable VU0_SHADOW_VERIFY and INTERP_VU0_PC range; manually inspect
+//      the JIT emit for that pair against x86 microVU.
+//
+// The bug is in a pair the harness can't observe — likely a hazard pair
+// fallback (the harness skips fallback pairs entirely) or external state
+// the per-pair compare doesn't capture (vif0Regs, EE memory, etc.).
+// Bisect result: BUGGY PAIR ISOLATED at pc=0x4D8.
+// pc=0x4D0 was native-buggy → bug is in the second pair of 0x4D0-0x4DF.
+// Confirming by routing only that one pair through interp.
+//   physics OK → confirmed. Read upper at Micro[0x4DC], lower at
+//                Micro[0x4D8] and inspect JIT emit vs x86 microVU.
+#define INTERP_VU0_PC_LOW  0x04D8u
+#define INTERP_VU0_PC_HIGH 0x04DFu
 
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,

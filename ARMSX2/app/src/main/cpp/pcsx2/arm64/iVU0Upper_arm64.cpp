@@ -274,18 +274,58 @@ static void emitTernaryFmac(bool subtract, u32 fs, int64_t dst_off, u32 xyzw)
 	emitFmacWriteback(dst_off, xyzw);
 }
 
-// --- MAX/MINI: VF[fd] = fmaxnm/fminnm(VF[fs], src2) ---
-// ARM64 FMAXNM/FMINNM: returns the non-NaN operand when one is NaN,
-// matching PS2 VU MAX/MINI semantics (no invalid-operation exceptions).
+// --- MAX/MINI: VF[fd] = max/min(VF[fs], src2) using sign-aware integer compare ---
+//
+// Mirrors the VU1 implementation in iVU1Upper_arm64.cpp:1107 (and x86 microVU's
+// MIN_MAX_PS at microVU_Misc.inl:380 plus interp fp_max/fp_min at VUops.cpp:813).
+// All three use bit-pattern comparisons that PRESERVE denormal values rather
+// than flushing them to ±0.
+//
+// Why not Fmaxnm/Fminnm: with FPCR FZ enabled (the default for VU emulation),
+// NEON Fmaxnm flushes denormal operands to signed zero before comparison. PS2
+// VU does NOT flush — denormal bit patterns pass through MAX/MIN unchanged.
+// VU0 used to use Fmaxnm + FZ and that diverged from x86 + interp on
+// denormal-vs-zero, surfaced by the VU0 shadow harness in Killzone (player
+// model corruption at character select). VU1 was already fixed (the comment
+// at the VU1 emit notes "San Andreas shadow corruption"); VU0 was missed.
+//
+// Algorithm: for both-positive and mixed-sign cases, signed-int max/min on
+// the float bit patterns gives the correct FP ordering. For both-negative,
+// the int order is reversed w.r.t. FP order, so we have to swap (use Smin
+// when we want FP max, and vice versa). A "both-negative" mask drives a
+// per-lane Bif select.
+//
 // MUST use emitNoFlagWriteback — MAX/MINI on PS2 don't update MAC/Status.
 static void emitMaxFmac(bool isMini, u32 fs, u32 fd, u32 xyzw)
 {
 	armAsm->Ldr(q0, MemOperand(VU0_BASE_REG, vfOff(fs)));
-	// v1 must already be loaded with src2
+	// v1 must already be loaded with src2.
+
+	// Signed integer max/min on 32-bit lanes.
+	armAsm->Smax(v2.V4S(), v0.V4S(), v1.V4S());
+	armAsm->Smin(v3.V4S(), v0.V4S(), v1.V4S());
+
+	// Build "both negative" mask in v6: arithmetic-shift right by 31 splats
+	// the sign bit, AND of the two splats is 0xFFFFFFFF per lane iff both
+	// inputs had the sign bit set.
+	armAsm->Sshr(v4.V4S(), v0.V4S(), 31);
+	armAsm->Sshr(v6.V4S(), v1.V4S(), 31);
+	armAsm->And(v6.V16B(), v4.V16B(), v6.V16B());
+
+	// Select per lane: result = both_neg ? swapped : signed_(max|min).
+	// BIF Vd, Vn, Vm copies Vn into Vd where Vm bit is 0, else keeps Vd.
 	if (isMini)
-		armAsm->Fminnm(v5.V4S(), v0.V4S(), v1.V4S());
+	{
+		// fp_min: both_neg → signed_max ; otherwise → signed_min
+		armAsm->Mov(v5.V16B(), v2.V16B());            // start = signed_max
+		armAsm->Bif(v5.V16B(), v3.V16B(), v6.V16B()); // mask=0 → signed_min
+	}
 	else
-		armAsm->Fmaxnm(v5.V4S(), v0.V4S(), v1.V4S());
+	{
+		// fp_max: both_neg → signed_min ; otherwise → signed_max
+		armAsm->Mov(v5.V16B(), v3.V16B());            // start = signed_min
+		armAsm->Bif(v5.V16B(), v2.V16B(), v6.V16B()); // mask=0 → signed_max
+	}
 	emitNoFlagWriteback(fd, xyzw);
 }
 

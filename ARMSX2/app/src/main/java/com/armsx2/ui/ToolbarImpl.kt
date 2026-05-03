@@ -13,12 +13,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.armsx2.ui.toolbar.LoadGameButton
+import com.armsx2.ui.toolbar.ToggleLibraryButton
 import com.armsx2.ui.toolbar.PauseButton
 import com.armsx2.ui.toolbar.RenderModeButton
 import com.armsx2.ui.toolbar.RestartButton
 import com.armsx2.ui.toolbar.SettingsButton
-import com.armsx2.ui.toolbar.StartButton
 import com.armsx2.ui.toolbar.StopButton
 import com.armsx2.ui.toolbar.TestsButton
 import com.armsx2.ui.toolbar.ToolbarButton
@@ -32,13 +31,13 @@ object ToolbarImpl {
     val drawerContext = mutableStateOf<ToolbarButton?>(null)
 
     init {
-        upperButtons.addAll(arrayOf(LoadGameButton(), RenderModeButton()))
+        upperButtons.addAll(arrayOf(ToggleLibraryButton(), RenderModeButton()))
         // Settings (cog) and Tests (bug) sit at the bottom of the lower
         // stack so they don't shift the run-control buttons when added.
         // TestsButton uses the drawer pattern (the only button that does),
         // exposing the runtime-test pass/fail counts on demand instead of
         // taking up the main screen.
-        lowerButtons.addAll(arrayOf(StartButton(), PauseButton(), RestartButton(), StopButton(), TestsButton(), SettingsButton()))
+        lowerButtons.addAll(arrayOf(PauseButton(), RestartButton(), StopButton(), TestsButton(), SettingsButton()))
     }
 
     @Composable

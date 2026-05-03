@@ -8,6 +8,25 @@
 #include "MTVU.h"
 
 #include <cmath>
+
+// Disable host-FMA contraction for the entire VU interpreter.
+//
+// Why: the EE/VU codepath is built with `-ffp-contract=fast`, which lets
+// Clang fuse `a + b * c` patterns in `_vuOpMADD` / `_vuOpMSUB` etc. into
+// a single FMADD/FMSUB instruction with single-rounding semantics. The
+// arm64 and x86 JITs both EXPLICITLY emit separate FMUL + FADD with two
+// roundings (the PS2 VU has no fused multiply-add), so the contracted
+// interp diverges from the JITs by 1+ ULP per FMAC op. That makes the
+// VU0 shadow-verify harness flag JIT outputs as "wrong" against an
+// interp result that doesn't match real PS2 hardware either. Turning
+// contraction off here gives the interp matching two-rounding semantics,
+// so the harness becomes a useful arm64-vs-truth comparison again.
+//
+// `#pragma STDC FP_CONTRACT OFF` is the standard form Clang honors for
+// both C and C++; scoping it file-wide here is fine because the VU
+// interp is a debug/slow-path. JITted hot paths are unaffected.
+#pragma STDC FP_CONTRACT OFF
+
 u32 laststall = 0;
 //Lower/Upper instructions can use that..
 #define _Ft_ ((VU->code >> 16) & 0x1F)  // The rt part of the instruction register
@@ -705,7 +724,12 @@ static __fi void applyTernaryMACOpBroadcast(VURegs* VU, u32 bc)
 
 static __fi float _vuOpMADD(u32 acc, u32 fs, u32 ft)
 {
-	return vuDouble(acc) + vuDouble(fs) * vuDouble(ft);
+	// Force separate FMUL + FADD with two roundings so this matches the
+	// JIT's NEON FMUL/FADD pair (PS2 VU has no fused MAC). volatile on the
+	// intermediate product is belt-and-braces vs the file-scope
+	// FP_CONTRACT pragma — ensures no toolchain version silently re-fuses.
+	volatile float prod = vuDouble(fs) * vuDouble(ft);
+	return vuDouble(acc) + prod;
 }
 
 static __fi void _vuMADD(VURegs* VU)
@@ -744,7 +768,9 @@ static __fi void _vuMADDAw(VURegs* VU) { vuMADDAbc(VU, VU->VF[_Ft_].i.w); }
 
 static __fi float _vuOpMSUB(u32 acc, u32 fs, u32 ft)
 {
-	return vuDouble(acc) - vuDouble(fs) * vuDouble(ft);
+	// See _vuOpMADD comment — volatile forces separate FMUL + FSUB.
+	volatile float prod = vuDouble(fs) * vuDouble(ft);
+	return vuDouble(acc) - prod;
 }
 
 static __fi void _vuMSUB(VURegs* VU)

@@ -13,6 +13,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -28,11 +29,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -474,11 +478,123 @@ object SetupImpl {
     fun Welcome() {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
             Text("Welcome to ARMSX2 setup!", Modifier.align(Alignment.CenterHorizontally),
-                fontSize = 32.sp, color = Color.White, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(12.dp))
+                fontSize = 28.sp, color = Color.White, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
             Text("Hit Next to get started", Modifier.align(Alignment.CenterHorizontally),
-                fontSize = 18.sp, color = Color.LightGray)
+                fontSize = 14.sp, color = Color.LightGray)
+
+            Spacer(Modifier.height(28.dp))
+
+            // Renderer selector — segmented OpenGL / Vulkan toggle.
+            Text(
+                "Renderer backend",
+                Modifier.align(Alignment.CenterHorizontally),
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            Row(
+                Modifier.align(Alignment.CenterHorizontally),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                RendererOption("OpenGL", "opengl")
+                RendererOption("Vulkan", "vulkan")
+            }
+
+            Spacer(Modifier.height(20.dp))
+
+            // Upscale dropdown — 1x..5x. Each option shows the resulting
+            // internal resolution so the user can gauge the perf cost.
+            Text(
+                "Upscale multiplier",
+                Modifier.align(Alignment.CenterHorizontally),
+                color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(6.dp))
+            UpscaleDropdown()
         }
+    }
+
+    /** PS2-blue squared-rounded option for the renderer choice. */
+    @Composable
+    private fun RendererOption(label: String, value: String) {
+        val selected = Main.renderer.value == value
+        Button(
+            onClick = {
+                Main.renderer.value = value
+                Main.prefs.edit().putString("renderer", value).apply()
+            },
+            shape = RoundedCornerShape(8.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = if (selected) Colors.pasx2_blue else Color(0xFF333333),
+                contentColor = Color.White,
+            ),
+            contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+        ) {
+            Text(label)
+        }
+    }
+
+    /** Anchor button + DropdownMenu listing 1x..5x upscale options with
+     *  their resulting internal resolution. PS2 native is 640×448 NTSC.
+     *  The button + menu are wrapped in a content-sized Box so the menu
+     *  anchors directly under the button instead of the parent's far-left
+     *  edge. */
+    @Composable
+    private fun UpscaleDropdown() {
+        val expanded = remember { mutableStateOf(false) }
+        val options = listOf(1, 2, 3, 4, 5)
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.Center,
+        ) {
+            // Inner content-sized box anchors the DropdownMenu under the
+            // button itself, not the outer fillMaxWidth row.
+            Box {
+                Button(
+                    onClick = { expanded.value = true },
+                    shape = RoundedCornerShape(8.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Colors.pasx2_blue,
+                        contentColor = Color.White,
+                    ),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+                ) {
+                    Text(upscaleLabel(Main.upscale.value))
+                }
+                DropdownMenu(
+                    expanded = expanded.value,
+                    onDismissRequest = { expanded.value = false },
+                    // Dark surface to match the rest of the wizard. The
+                    // default Material surface is near-white and clashes
+                    // with the dark wizard background.
+                    modifier = Modifier.background(Color(0xFF1F1F1F)),
+                ) {
+                    for (m in options) {
+                        DropdownMenuItem(
+                            text = {
+                                Text(
+                                    upscaleLabel(m),
+                                    color = Color.White,
+                                    fontSize = 14.sp,
+                                )
+                            },
+                            onClick = {
+                                Main.upscale.value = m
+                                Main.prefs.edit().putInt("upscale", m).apply()
+                                expanded.value = false
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun upscaleLabel(mult: Int): String {
+        // PS2 NTSC native = 640×448. Multiplier scales both axes.
+        val w = 640 * mult
+        val h = 448 * mult
+        return "${mult}x  ${w}×${h}"
     }
 
     /** BIOS page content — single scrollable list. The pick button lives in

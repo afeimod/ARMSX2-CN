@@ -7,6 +7,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -116,13 +117,49 @@ object GamesList {
                         modifier = Modifier.fillMaxSize(),
                     ) {
                         item(key = "__refresh__") {
-                            RefreshCard(
-                                isScanning = scanning.value,
-                                onRefresh = {
-                                    if (!scanning.value && romsDir != null)
-                                        scanRoms(context, romsDir)
-                                },
-                            )
+                            // LazyVerticalGrid hands items unbounded height,
+                            // so fillMaxHeight() inside an item collapses to
+                            // zero — siblings can't be matched implicitly.
+                            // Use BoxWithConstraints to read the cell width,
+                            // then size this slot to the same intrinsic
+                            // height a GameCard would have at that width:
+                            //   hero box (aspect 0.7 → width / 0.7) +
+                            //   ~64dp label/serial/stars column.
+                            BoxWithConstraints {
+                                // Hero (aspect 0.7 → width/0.7) + label
+                                // column. With minLines=2 on the title the
+                                // label is now always:
+                                //   8dp pad + 2×13sp title (~36dp) +
+                                //   2dp + 10sp serial (~14dp) +
+                                //   4dp + 12sp stars (~16dp) + 8dp pad
+                                //   ≈ 88dp.
+                                val gameCardHeight = maxWidth / 0.7f + 88.dp
+                                Column(
+                                    Modifier.height(gameCardHeight),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    RefreshCard(
+                                        modifier = Modifier.weight(1f),
+                                        isScanning = scanning.value,
+                                        onRefresh = {
+                                            if (!scanning.value && romsDir != null)
+                                                scanRoms(context, romsDir)
+                                        },
+                                    )
+                                    BiosCard(
+                                        modifier = Modifier.weight(1f),
+                                        onLaunch = {
+                                            // Force the library overlay on so the
+                                            // cards remain visible once eState flips
+                                            // to RUNNING — the STOPPED-branch list
+                                            // disappears at that point and WindowImpl
+                                            // re-paints it via the showLibrary path.
+                                            WindowImpl.showLibrary.value = true
+                                            Main.startBios()
+                                        },
+                                    )
+                                }
+                            }
                         }
                         items(games, key = { it.uri.toString() }) { game ->
                             GameCard(game)
@@ -159,24 +196,30 @@ object GamesList {
         }
     }
 
-    /** First grid slot — a refresh button styled like a game card. */
+    /** First grid slot — a refresh button styled like a game card.
+     *  Caller passes Modifier.weight(1f) so this card and the BIOS card
+     *  split the slot evenly. The icon Box uses weight(1f) too so the
+     *  icon centers in whatever vertical space is left after the label. */
     @Composable
-    private fun RefreshCard(isScanning: Boolean, onRefresh: () -> Unit) {
+    private fun RefreshCard(
+        modifier: Modifier = Modifier,
+        isScanning: Boolean,
+        onRefresh: () -> Unit,
+    ) {
         Column(
-            Modifier
+            modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
+                // Already partial-alpha at 0.20, leave as-is; matches the
+                // see-through aesthetic of the regular GameCard chrome.
                 .background(Colors.pasx2_blue.copy(alpha = 0.20f))
-                .border(2.dp, Colors.pasx2_blue, RoundedCornerShape(8.dp))
+                .border(2.dp, Colors.pasx2_blue.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
                 .clickable(enabled = !isScanning, onClick = onRefresh),
         ) {
-            // Square hero box mirrors the GameCard cover area so all grid
-            // slots line up nicely. PS2 covers are roughly 4:3 (1.33) but
-            // we use 1:1 here to keep the refresh icon centered.
             Box(
                 Modifier
                     .fillMaxWidth()
-                    .aspectRatio(1f),
+                    .weight(1f),
                 contentAlignment = Alignment.Center,
             ) {
                 if (isScanning) {
@@ -210,6 +253,50 @@ object GamesList {
         }
     }
 
+    /** Stacked under RefreshCard in the first grid slot — boots the
+     *  PS2 BIOS without a disc, leaving the library/toolbar visible.
+     *  The caller passes Modifier.weight(1f) so this card stretches to
+     *  match the height of adjacent GameCards. The icon is centered in
+     *  the flexible region; the label sits at the bottom. */
+    @Composable
+    private fun BiosCard(modifier: Modifier = Modifier, onLaunch: () -> Unit) {
+        Column(
+            modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Colors.pasx2_blue.copy(alpha = 0.20f))
+                .border(2.dp, Colors.pasx2_blue.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                .clickable(onClick = onLaunch),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("▶", color = Color.White, fontSize = 56.sp)
+            }
+            Column(Modifier.padding(8.dp)) {
+                Text(
+                    "Start BIOS",
+                    color = Color.White,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    "Boot without a disc",
+                    color = Color.LightGray,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+
     @Composable
     private fun GameCard(game: GameInfo) {
         val context = LocalContext.current
@@ -217,18 +304,29 @@ object GamesList {
             Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(Color(0xFF272525))
-                .border(1.dp, Color(0xFF3A3A3A), RoundedCornerShape(8.dp))
+                // Card chrome (background + border) is partial-alpha so the
+                // live game surface shows through when the library is
+                // overlaid mid-play. The cover image painted into the inner
+                // Box and the title/serial Text below stay fully opaque
+                // because they're separate paint layers — alpha here only
+                // affects the chrome, not the children.
+                .background(Color(0xFF272525).copy(alpha = 0.3f))
+                .border(1.dp, Color(0xFF3A3A3A).copy(alpha = 0.3f), RoundedCornerShape(8.dp))
                 .clickable {
-                    // TODO: hook into VMManager.runVMThread once SAF-aware
-                    // load is wired (LoadGameButton equivalent for URI).
+                    // Clear the library overlay (set by LoadGameButton while
+                    // a game was running) so the surface for the new game
+                    // comes up uncovered. No-op when starting from idle.
+                    // Pass GameInfo so the in-game overlay has cover art /
+                    // extension badge / pre-resolved compat stars ready.
+                    WindowImpl.showLibrary.value = false
+                    Main.launchGame(game.uri.toString(), game)
                 },
         ) {
             Box(
                 Modifier
                     .fillMaxWidth()
                     .aspectRatio(0.7f) // PS2 cover boxart is taller than wide
-                    .background(Color(0xFF1B1A1A)),
+                    .background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
                 contentAlignment = Alignment.Center,
             ) {
                 val coverUrl = game.coverUrl
@@ -259,6 +357,10 @@ object GamesList {
                     color = Color.White,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.Bold,
+                    // Always reserve 2 lines so 1-line titles don't make
+                    // their cards shorter than 2-line ones — keeps the
+                    // grid rows uniform.
+                    minLines = 2,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
@@ -271,8 +373,35 @@ object GamesList {
                     overflow = TextOverflow.Ellipsis,
                 )
                 Spacer(Modifier.height(4.dp))
-                CompatibilityStars(game.compatibility)
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CompatibilityStars(game.compatibility)
+                    if (game.extension.isNotEmpty()) ExtensionBadge(game.extension)
+                }
             }
+        }
+    }
+
+    /** Small PS2-blue rounded chip showing the container format (ISO /
+     *  CHD / BIN / etc.). Sits to the right of the compatibility stars. */
+    @Composable
+    private fun ExtensionBadge(ext: String) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(Colors.pasx2_blue)
+                .padding(horizontal = 5.dp, vertical = 1.dp),
+        ) {
+            Text(
+                ext,
+                color = Color.White,
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
         }
     }
 
@@ -282,7 +411,7 @@ object GamesList {
     @Composable
     private fun CoverLoadingTile() {
         Box(
-            Modifier.fillMaxSize().background(Color(0xFF1B1A1A)),
+            Modifier.fillMaxSize().background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
             contentAlignment = Alignment.Center,
         ) {
             CircularProgressIndicator(
@@ -303,7 +432,7 @@ object GamesList {
     @Composable
     private fun NoCoverTile(missingSerial: Boolean) {
         Box(
-            Modifier.fillMaxSize().background(Color(0xFF1B1A1A)),
+            Modifier.fillMaxSize().background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
             contentAlignment = Alignment.Center,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -356,11 +485,11 @@ object GamesList {
                     if (ext !in GAME_EXTENSIONS) continue
 
                     // Try the real ISO9660 probe first. Native handles
-                    // 2048/0 (.iso) and 2352/{16,24} (.bin Mode 1/Mode 2
-                    // raw) layouts, so both formats can yield real serials.
-                    // CHD/CSO/GZ/etc. need a decompressor — not yet wired
-                    // — so they fall through to filename parsing.
-                    val realSerial = if (ext == "iso" || ext == "bin")
+                    // 2048/0 (.iso), 2352/{16,24} (.bin Mode 1/Mode 2 raw),
+                    // and CHD via libchdr (DVD + CD frame sizes). Other
+                    // compressed formats (CSO/GZ/etc.) still fall through
+                    // to filename parsing.
+                    val realSerial = if (ext == "iso" || ext == "bin" || ext == "chd")
                         probeDiscSerial(context, f.uri) else null
                     val (titleFromName, serialFromName) = FilenameParser.parse(name)
                     val finalSerial = realSerial ?: serialFromName
@@ -376,6 +505,7 @@ object GamesList {
                         title = titleFromName,
                         serial = finalSerial,
                         compatibility = compatStars,
+                        extension = ext.uppercase(),
                     )
                 }
                 collected.sortBy { it.title.lowercase() }
@@ -411,6 +541,7 @@ object GamesList {
                 put("title", g.title)
                 put("serial", g.serial ?: JSONObject.NULL)
                 put("compat", g.compatibility)
+                put("ext", g.extension)
             })
         }
         Main.prefs.edit()
@@ -434,6 +565,12 @@ object GamesList {
                     title = obj.getString("title"),
                     serial = rawSerial,
                     compatibility = obj.optInt("compat", 0),
+                    // Older caches won't have "ext" — fall back to deriving
+                    // it from the URI path so existing entries still get a
+                    // badge without forcing a refresh.
+                    extension = obj.optString("ext", "").ifEmpty {
+                        obj.getString("uri").substringAfterLast('.', "").uppercase()
+                    },
                 ))
             }
             cachedDir to list

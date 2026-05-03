@@ -16,6 +16,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.armsx2.EmuState
+import com.armsx2.Main
 import com.armsx2.codeGenTests
 import com.armsx2.eeJitTests
 import com.armsx2.eeSeqTests
@@ -36,7 +38,7 @@ class TestsButton : ToolbarButton() {
     override var icon = mutableStateOf<ImageVector?>(LineAwesomeIcons.BugSolid)
     override var drawerSize = mutableIntStateOf(280)
 
-    override fun isVisible(): Boolean = true
+    override fun isVisible(): Boolean = (Main.eState.value != EmuState.RUNNING)
 
     @Composable
     override fun DrawerContent() {

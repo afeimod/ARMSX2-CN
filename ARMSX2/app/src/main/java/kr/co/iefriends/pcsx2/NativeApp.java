@@ -35,14 +35,49 @@ public class NativeApp {
 
 	public static void initializeOnce(Context context) {
 		mContext = new WeakReference<>(context);
+
+		// Compute the app's externalFilesDir up front — it's the BIOS
+		// folder (always app-owned + writable, where the setup wizard's
+		// finishBiosStep deposits the BIOS file) and the fallback for
+		// DataRoot when the user hasn't picked one.
 		File externalFilesDir = context.getExternalFilesDir(null);
 		if (externalFilesDir == null) {
 			externalFilesDir = context.getDataDir();
 		}
-		initialize(externalFilesDir.getAbsolutePath(), android.os.Build.VERSION.SDK_INT);
+		String biosFolder = externalFilesDir.getAbsolutePath() + java.io.File.separator + "bios";
+
+		// DataRoot: prefer the user-chosen system folder (SAF tree URI in
+		// the `systemDir` pref, resolved to POSIX by Main.systemDirPosix).
+		// Falls back to externalFilesDir when unset / unresolvable.
+		String chosen = Main.Companion.systemDirPosix();
+		String dataPath = (chosen != null) ? chosen : externalFilesDir.getAbsolutePath();
+
+		initialize(dataPath, biosFolder, android.os.Build.VERSION.SDK_INT);
 	}
 
-	public static native void initialize(String path, int apiVer);
+	public static native void initialize(String path, String biosFolder, int apiVer);
+
+	/**
+	 * Push one EmuCore setting into the base settings layer. Mirrors
+	 * pcsx2-qt's Settings save flow — Host::SetBase*SettingValue sticks
+	 * in s_settings_interface. type ∈ {"bool","int","float","string"};
+	 * value is the stringified payload (e.g. "true", "2", "2.5").
+	 *
+	 * Setting writes here are NOT live until commitSettings() is called.
+	 * Batch the writes, then commit once so the VM applies them atomically.
+	 */
+	public static native void setSetting(String section, String key, String type, String value);
+
+	/**
+	 * Apply queued settings to a running VM (and the GS thread). Calls
+	 * VMManager::ApplySettings + MTGS::ApplySettings. No-op when no VM
+	 * is running — settings still take effect on the next runVMThread
+	 * because they were pushed to the persistent base settings layer.
+	 *
+	 * Some settings need a VM restart (recompiler enables, EE cycle rate);
+	 * the UI layer should flag those.
+	 */
+	public static native void commitSettings();
 	public static native String getGameTitle(String path);
 	public static native String getGameSerial();
 	public static native float getFPS();
