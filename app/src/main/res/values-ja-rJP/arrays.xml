@@ -40,7 +40,7 @@
     </string-array>
     <string-array name="bilinear_present">
         <item>オフ</item>
-        <item>バイリニア (なめらか)</item>
+        <item>バイリニア (スムーズ)</item>
         <item>バイリニア (シャープ)</item>
     </string-array>
     <string-array name="trilinear_filtering">
@@ -102,7 +102,7 @@
     <string-array name="network_ethapi">
         <item>解除</item>
         <item>PCAPブリッジ</item>
-        <item>PCAP スイッチ</item>
+        <item>PCAPスイッチ</item>
         <item>ソケット</item>
     </string-array>
 </resources>
