@@ -2657,6 +2657,20 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 	// into w26 first so the arg is correct.
 	emitDrainFmaccountReg();
 
+	// Round-2 fast-path: fmaccount==0 means the helper's ring-walk loop has
+	// no iterations and returns cycle unchanged. Skip the entire BL+cache-
+	// flush+arg-setup machinery in that case. Hits the start of every FMAC
+	// sequence (before the pipe has filled) and any time the pipe drains
+	// fully between sequences — common on bursty FMAC code. Same shape as
+	// the case-VUPIPE_BRANCH ialucount==0 gate.
+	//
+	// Cache state: vfCacheFlushAndInvalidate (called inside emitVu1Call) is
+	// a runtime no-op under Phase 2.5 write-through (dirty_lanes always 0);
+	// the compile-time tracker reset still applies to downstream emit, which
+	// the post-bind code handles regardless of which path runs at runtime.
+	Label fmac_stall_skip;
+	armAsm->Cbz(VU1_FMACCOUNT_REG, &fmac_stall_skip);
+
 	if (active0 && active1)
 	{
 		// Combined: one BL handles both reads. Args: VU=x0, fmaccount=w1,
@@ -2670,30 +2684,32 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		armAsm->Mov(x0, VU1_BASE_REG);
 		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
 		armAsm->Mov(VU1_CYCLE_REG, x0);
-		return;
 	}
-
-	if (active0)
+	else
 	{
-		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
-		armAsm->Mov(x2, VU1_CYCLE_REG);
-		armAsm->Mov(w3, regs.VFread0);
-		armAsm->Mov(w4, regs.VFr0xyzw);
-		armAsm->Mov(x0, VU1_BASE_REG);
-		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
-		armAsm->Mov(VU1_CYCLE_REG, x0);
+		if (active0)
+		{
+			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+			armAsm->Mov(x2, VU1_CYCLE_REG);
+			armAsm->Mov(w3, regs.VFread0);
+			armAsm->Mov(w4, regs.VFr0xyzw);
+			armAsm->Mov(x0, VU1_BASE_REG);
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			armAsm->Mov(VU1_CYCLE_REG, x0);
+		}
+		if (active1)
+		{
+			emitDrainFmaccountReg(); // active0 path may have deferred again — defensive
+			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
+			armAsm->Mov(x2, VU1_CYCLE_REG);
+			armAsm->Mov(w3, regs.VFread1);
+			armAsm->Mov(w4, regs.VFr1xyzw);
+			armAsm->Mov(x0, VU1_BASE_REG);
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			armAsm->Mov(VU1_CYCLE_REG, x0);
+		}
 	}
-	if (active1)
-	{
-		emitDrainFmaccountReg(); // active0 path may have deferred again — defensive
-		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
-		armAsm->Mov(x2, VU1_CYCLE_REG);
-		armAsm->Mov(w3, regs.VFread1);
-		armAsm->Mov(w4, regs.VFr1xyzw);
-		armAsm->Mov(x0, VU1_BASE_REG);
-		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
-		armAsm->Mov(VU1_CYCLE_REG, x0);
-	}
+	armAsm->Bind(&fmac_stall_skip);
 }
 
 // Inline replacement for BL _vuTestUpperStalls.
@@ -2767,10 +2783,38 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 			emitFMACStallChecks(lregs, skipFMACStall0, skipFMACStall1);
 			if (!skipEFUWait)
 			{
-				emitFlushCycleReg(cycle_off);
-				armAsm->Mov(x0, VU1_BASE_REG);
-				emitVu1Call(reinterpret_cast<const void*>(vu1_TestEFUPipeWait));
-				emitReloadCycleReg(cycle_off);
+				// Inline of vu1_TestEFUPipeWait. Same shape as the FDIV
+				// inline above with one twist: when enable!=0 the helper
+				// MUST decrement efu.Cycle by 1 (see VUops.cpp:269 — it's
+				// part of the pipeline-drain semantics, not a no-op skip).
+				// The decrement is preserved by the Sub+Str pair before
+				// the cycle-max selection.
+				//
+				// C reference (iVU1micro_arm64.cpp:1094):
+				//   if (VU->efu.enable == 0) return;
+				//   VU->efu.Cycle -= 1;
+				//   u64 newCycle = VU->efu.sCycle + VU->efu.Cycle;
+				//   if (newCycle > VU->cycle) VU->cycle = newCycle;
+				//
+				// Worst-case taken: 9 insns. efu-idle fast-path: 2 insns.
+				const int64_t efu_off = (int64_t)offsetof(VURegs, efu);
+				const int64_t e_enable = (int64_t)offsetof(efuPipe, enable);
+				const int64_t e_sCycle = (int64_t)offsetof(efuPipe, sCycle);
+				const int64_t e_Cycle  = (int64_t)offsetof(efuPipe, Cycle);
+
+				Label efu_skip;
+				armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, efu_off + e_enable));
+				armAsm->Cbz(w4, &efu_skip);
+				// efu.Cycle -= 1 (mandatory side effect)
+				armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, efu_off + e_Cycle));
+				armAsm->Sub(w4, w4, 1);
+				armAsm->Str(w4, MemOperand(VU1_BASE_REG, efu_off + e_Cycle));
+				// newCycle (x4) = sCycle (u64) + Cycle (post-decrement, zero-ext)
+				armAsm->Ldr(x5, MemOperand(VU1_BASE_REG, efu_off + e_sCycle));
+				armAsm->Add(x4, x5, x4);
+				armAsm->Cmp(x4, VU1_CYCLE_REG);
+				armAsm->Csel(VU1_CYCLE_REG, x4, VU1_CYCLE_REG, hi);
+				armAsm->Bind(&efu_skip);
 			}
 			break;
 		case VUPIPE_BRANCH:
@@ -2778,11 +2822,30 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 			// would be a no-op, so skip the BL entirely.
 			if (!skipALUStall && lregs.VIread != 0)
 			{
+				// Runtime fast-path: ialucount==0 (IALU pipe empty) → the
+				// helper's ring loop is a no-op. Skip the BL machinery
+				// entirely (cycle Str/Ldr, Mov x0/w1, BL, return). Common
+				// after back-to-back branches without intervening IALU
+				// writes. Cost on the skip path: 2 insns (Ldr+Cbz). Cost
+				// on the taken path: same as before plus the Ldr+Cbz
+				// (~2 extra). Worth it because the fast-path is the
+				// dominant case on branch-heavy code.
+				//
+				// Cache state: vfCacheFlushAndInvalidate (called inside
+				// emitVu1Call) is a runtime no-op under Phase 2.5
+				// write-through (dirty_lanes always 0); only its compile-
+				// time tracker reset matters, which still applies to
+				// downstream emit regardless of which runtime path runs.
+				const int64_t ialucount_off = (int64_t)offsetof(VURegs, ialucount);
+				Label alu_skip;
+				armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ialucount_off));
+				armAsm->Cbz(w4, &alu_skip);
 				emitFlushCycleReg(cycle_off);
 				armAsm->Mov(x0, VU1_BASE_REG);
 				armAsm->Mov(w1, lregs.VIread);
 				emitVu1Call(reinterpret_cast<const void*>(vu1_TestALUStallReg));
 				emitReloadCycleReg(cycle_off);
+				armAsm->Bind(&alu_skip);
 			}
 			break;
 		default:
@@ -4234,7 +4297,14 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		//    decrement at step 6b. Both x21 and x22 are callee-saved and
 		//    already saved/restored in our prologue/epilogue. No memory
 		//    store here; the block-end flush writes x21 to VU->cycle once.
-		armAsm->Mov(x22, VU1_CYCLE_REG);
+		//
+		//    The latch into x22 is dead code when step 6b is elided block-
+		//    wide (skip_vibackup_decrement: no IBxx reader and no
+		//    emitBackupVI-triggering writer). Gating on the same flag saves
+		//    1 insn per pair across every block that doesn't carry a
+		//    VIBackupCycles dependency.
+		if (!skip_vibackup_decrement)
+			armAsm->Mov(x22, VU1_CYCLE_REG);
 		armAsm->Add(VU1_CYCLE_REG, VU1_CYCLE_REG, 1);
 
 		// 2. Advance TPC to next pair (compile-time constant).
