@@ -1152,10 +1152,29 @@ static void vu1_TestALUStallReg(VURegs* VU, u32 VIread)
 // cold paths like _vuFlushAll/vu1Exec).
 static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 {
+	// Fast-path: all rings empty / no FDIV/EFU enabled. Common case under
+	// MTVU on simple geometry blocks. Pre-perfape (Ape Escape 3 main menu)
+	// this function was ~15% of MTVU thread; the bulk of that was 3 dead
+	// Strs on the all-empty exit path (fmacreadpos/ialureadpos/ialucount
+	// each rewritten with their unchanged loaded value). Early-return
+	// avoids the Strs and the IALU-loop setup entirely.
+	//
+	// The fdiv/efu/ialucount loads here CSE with the loads in the slow
+	// path below (same VURegs* base), so the fast-path adds 3 cmp+branch
+	// insns to the slow path — cheap.
+	if (fmaccount_in == 0
+		&& VU->fdiv.enable == 0
+		&& VU->efu.enable == 0
+		&& VU->ialucount == 0)
+	{
+		return 0;
+	}
+
 	u32 fmaccount = fmaccount_in;
 
 	// --- FMAC flush ---
 	int fmacreadpos = VU->fmacreadpos;
+	const u32 fmacreadpos_in = static_cast<u32>(fmacreadpos);
 	while (fmaccount > 0)
 	{
 		const fmacPipe& slot = VU->fmac[fmacreadpos];
@@ -1178,7 +1197,9 @@ static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 		fmacreadpos = (fmacreadpos + 1) & 3;
 		fmaccount--;
 	}
-	VU->fmacreadpos = fmacreadpos;
+	// Only Str when actually advanced — the unchanged-write was hot.
+	if (static_cast<u32>(fmacreadpos) != fmacreadpos_in)
+		VU->fmacreadpos = fmacreadpos;
 
 	// --- FDIV flush ---
 	if (VU->fdiv.enable != 0
@@ -1201,6 +1222,7 @@ static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 	// --- IALU flush (pop only, no flag writes) ---
 	int ialureadpos = VU->ialureadpos;
 	u32 ialucount = VU->ialucount;
+	const u32 ialucount_in = ialucount;
 	while (ialucount > 0)
 	{
 		const ialuPipe& slot = VU->ialu[ialureadpos];
@@ -1209,8 +1231,11 @@ static u32 vu1_TestPipes_VU1(VURegs* VU, u32 fmaccount_in, u64 cycle)
 		ialureadpos = (ialureadpos + 1) & 3;
 		ialucount--;
 	}
-	VU->ialureadpos = ialureadpos;
-	VU->ialucount = ialucount;
+	if (ialucount != ialucount_in)
+	{
+		VU->ialureadpos = ialureadpos;
+		VU->ialucount = ialucount;
+	}
 
 	return fmaccount;
 }
