@@ -4392,11 +4392,47 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// (x2 / w1) → no Str+Ldr round-trip through memory. Helper
 			// returns new fmaccount in w0; cycle is read-only so no reload.
 			emitDrainFmaccountReg();
+
+			// Runtime fast-path gate. perfape (Ape Escape 3 main menu)
+			// showed `vu1_TestPipes_VU1` accounting for ~15% of MTVU
+			// thread time, much of it the BL machinery — emitVu1Call
+			// emits `vfCacheFlushAndInvalidate + viCacheInvalidateAll +
+			// BL` even when at runtime the helper would immediately
+			// return because all rings are empty / FDIV+EFU disabled.
+			//
+			// Skip the entire emitVu1Call when at runtime we can prove
+			// the helper would no-op:
+			//   fmaccount (w26) == 0 AND fdiv.enable == 0 AND
+			//   efu.enable == 0 AND ialucount == 0
+			//
+			// Net win in the empty case: no BL, no cache flushes, no
+			// helper-internal loads. The 4 ldrs + 4 cbzs of the gate
+			// cost ~4 cycles in the empty path; the slow path picks up
+			// the same loads via L1 (already-warm cache lines). VF/VI
+			// caches stay resident across the gated path, eliminating
+			// post-BL reload pressure when nothing actually retires.
+			Label call_helper, skip_helper;
+			const int64_t fdiv_enable_off = (int64_t)offsetof(VURegs, fdiv)
+				+ (int64_t)offsetof(fdivPipe, enable);
+			const int64_t efu_enable_off  = (int64_t)offsetof(VURegs, efu)
+				+ (int64_t)offsetof(efuPipe, enable);
+			const int64_t ialucount_off   = (int64_t)offsetof(VURegs, ialucount);
+			armAsm->Cbnz(VU1_FMACCOUNT_REG, &call_helper);
+			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fdiv_enable_off));
+			armAsm->Cbnz(w4, &call_helper);
+			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, efu_enable_off));
+			armAsm->Cbnz(w4, &call_helper);
+			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, ialucount_off));
+			armAsm->Cbz(w4, &skip_helper);
+
+			armAsm->Bind(&call_helper);
 			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 			armAsm->Mov(x2, VU1_CYCLE_REG);
 			armAsm->Mov(x0, VU1_BASE_REG);
 			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 			armAsm->Mov(VU1_FMACCOUNT_REG, w0);
+
+			armAsm->Bind(&skip_helper);
 			VU1_PERF_END(_pp_s6, "VU1_TestPipes_0x%04x", pc);
 		}
 
