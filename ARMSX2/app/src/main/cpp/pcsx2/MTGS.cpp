@@ -494,6 +494,7 @@ void MTGS::MainLoop()
 							{
 								const u8* tagp = &path.buffer[cur];
 								const u64 lo = *(const u64*)(tagp + 0);
+								const u64 hi = *(const u64*)(tagp + 8);
 								const u32 nloop = static_cast<u32>(lo & 0x7FFF);
 								const bool eop = (lo >> 15) & 1;
 								const u32 flg = static_cast<u32>((lo >> 58) & 3);
@@ -520,7 +521,7 @@ void MTGS::MainLoop()
 								{
 									tags_ok = false;
 									Console.Error("MTVU GSPacket malformed tag at offset=0x%x: "
-												  "nloop=%u nreg=%u flg=%u eop=%u -> reg_qwc=%u "
+												  "nloop=%u nreg=%u flg=%u eop=%u → reg_qwc=%u "
 												  "(extends to 0x%llx, packet ends at 0x%x)",
 												  cur - 16, nloop, nreg, flg, eop ? 1 : 0,
 												  reg_qwc, (unsigned long long)next, stop);
