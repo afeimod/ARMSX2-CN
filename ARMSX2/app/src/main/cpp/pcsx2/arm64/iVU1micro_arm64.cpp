@@ -2729,10 +2729,38 @@ static void emitTestLowerStalls(const _VURegsNum& lregs,
 			emitFMACStallChecks(lregs, skipFMACStall0, skipFMACStall1);
 			if (!skipFDIVWait)
 			{
-				emitFlushCycleReg(cycle_off);
-				armAsm->Mov(x0, VU1_BASE_REG);
-				emitVu1Call(reinterpret_cast<const void*>(vu1_TestFDIVPipeWait));
-				emitReloadCycleReg(cycle_off);
+				// Inline of vu1_TestFDIVPipeWait. Helper body is 5 lines of
+				// straight-line math, but the BL machinery (cycle flush +
+				// vfCacheFlushAndInvalidate + viCacheInvalidateAll + BL +
+				// cycle reload) dominated the actual work. Inlining keeps
+				// VU1_CYCLE_REG (x21) live and skips both cache flushes.
+				//
+				// C reference (iVU1micro_arm64.cpp:1082):
+				//   if (VU->fdiv.enable != 0) {
+				//       u64 newCycle = VU->fdiv.Cycle + VU->fdiv.sCycle;
+				//       if (newCycle > VU->cycle) VU->cycle = newCycle;
+				//   }
+				//
+				// Worst-case taken: 7 insns. fdiv-idle fast-path: 2 insns.
+				// Scratch x4/x5 are caller-saved and unused at this point
+				// in the per-pair emit (only fmacstall checks ran above and
+				// they don't preserve x4/x5 across the next pair).
+				const int64_t fdiv_off = (int64_t)offsetof(VURegs, fdiv);
+				const int64_t d_enable = (int64_t)offsetof(fdivPipe, enable);
+				const int64_t d_sCycle = (int64_t)offsetof(fdivPipe, sCycle);
+				const int64_t d_Cycle  = (int64_t)offsetof(fdivPipe, Cycle);
+
+				Label fdiv_skip;
+				armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fdiv_off + d_enable));
+				armAsm->Cbz(w4, &fdiv_skip);
+				// newCycle (x4) = sCycle (u64) + Cycle (u32, zero-extended via Wreg load)
+				armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fdiv_off + d_Cycle));
+				armAsm->Ldr(x5, MemOperand(VU1_BASE_REG, fdiv_off + d_sCycle));
+				armAsm->Add(x4, x5, x4);
+				// VU->cycle (VU1_CYCLE_REG = x21) = max(cycle, newCycle)
+				armAsm->Cmp(x4, VU1_CYCLE_REG);
+				armAsm->Csel(VU1_CYCLE_REG, x4, VU1_CYCLE_REG, hi);
+				armAsm->Bind(&fdiv_skip);
 			}
 			break;
 		case VUPIPE_EFU:
