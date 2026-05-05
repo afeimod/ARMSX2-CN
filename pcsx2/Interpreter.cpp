@@ -12,7 +12,6 @@
 #include "common/FastJmp.h"
 
 #if defined(__aarch64__) || defined(_M_ARM64)
-#include "arm64/intNativeOps.h"
 #include "arm64/TraceBlocks.h"
 #endif
 
@@ -218,11 +217,7 @@ static void execI()
 
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-
-#if defined(__aarch64__) || defined(_M_ARM64)
-	if (!arm64TryNativeExec())
-#endif
-		opcode.interpret();
+	opcode.interpret();
 }
 
 static __fi void _doBranch_shared(u32 tar)

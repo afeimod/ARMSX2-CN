@@ -103,10 +103,7 @@ namespace MipsStackWalk
 		// TODO: Check if found entry is in the same symbol?  Might be wrong sometimes...
 
 		int ra_offset = -1;
-
-		// The instruction pointed to by pc hasn't been executed yet,
-		// so we don't want to consider it here
-		const u32 start = frame.pc - 4;
+		const u32 start = frame.pc;
 		u32 stop = entry;
 
 		if (entry == INVALIDTARGET)
@@ -186,7 +183,7 @@ namespace MipsStackWalk
 		return ScanForEntry(cpu, frame, newPossibleEntry, ra);
 	}
 
-	std::vector<StackFrame> Walk(DebugInterface* cpu, u32 pc, u32 ra, u32 sp, u32 threadEntry)
+	std::vector<StackFrame> Walk(DebugInterface* cpu, u32 pc, u32 ra, u32 sp, u32 threadEntry, u32 threadStackTop)
 	{
 		std::vector<StackFrame> frames;
 		StackFrame current;

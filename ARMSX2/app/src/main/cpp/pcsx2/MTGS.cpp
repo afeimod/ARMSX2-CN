@@ -470,7 +470,80 @@ void MTGS::MainLoop()
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
 					GS_Packet gsPack = path.GetGSPacketMTVU(); // Get vu1 program's xgkick packet(s)
 					if (gsPack.size)
-						GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
+					{
+						const u64 end = static_cast<u64>(gsPack.offset) + static_cast<u64>(gsPack.size);
+						const bool out_of_range = end > path.buffSize;
+						const bool bad_alignment = (gsPack.size & 0xF) != 0;
+						bool tags_ok = true;
+						if (!out_of_range && !bad_alignment)
+						{
+							// Pre-walk GIF tags inside the packet to catch malformed
+							// NLOOP/NREG that would make GSState::Transfer walk past
+							// the QWC count we hand it (or, if size is artificially
+							// inflated, off the end of path.buffer entirely). The
+							// renderer's `Transfer` does bound itself to `size`, but
+							// only if `size` matches the actual tag content; if a
+							// tag's nloop*nreg overruns `size` and the renderer is
+							// in TYPE_STQRGBAXYZF2/etc paths it stages a single bulk
+							// `mem += total * sizeof(GIFPackedReg)` that, while it
+							// honors the size check, can read malformed regs in the
+							// chunked-handler before the size check triggers.
+							u32 cur = gsPack.offset;
+							const u32 stop = gsPack.offset + gsPack.size;
+							while (cur + 16 <= stop)
+							{
+								const u8* tagp = &path.buffer[cur];
+								const u64 lo = *(const u64*)(tagp + 0);
+								const u32 nloop = static_cast<u32>(lo & 0x7FFF);
+								const bool eop = (lo >> 15) & 1;
+								const u32 flg = static_cast<u32>((lo >> 58) & 3);
+								u32 nreg = static_cast<u32>((lo >> 60) & 0xF);
+								if (nreg == 0)
+									nreg = 16;
+								cur += 16;
+								u32 reg_qwc = 0;
+								switch (flg)
+								{
+									case 0: // PACKED — 1 QWC per (nreg) per loop
+										reg_qwc = nloop * nreg;
+										break;
+									case 1: // REGLIST — 1 QWC per 2 (nreg) per loop, rounded up
+										reg_qwc = (nloop * nreg + 1) / 2;
+										break;
+									case 2: // IMAGE
+									case 3: // disabled / image
+										reg_qwc = nloop;
+										break;
+								}
+								const u64 next = static_cast<u64>(cur) + static_cast<u64>(reg_qwc) * 16;
+								if (next > stop)
+								{
+									tags_ok = false;
+									Console.Error("MTVU GSPacket malformed tag at offset=0x%x: "
+												  "nloop=%u nreg=%u flg=%u eop=%u -> reg_qwc=%u "
+												  "(extends to 0x%llx, packet ends at 0x%x)",
+												  cur - 16, nloop, nreg, flg, eop ? 1 : 0,
+												  reg_qwc, (unsigned long long)next, stop);
+									break;
+								}
+								cur += reg_qwc * 16;
+								if (eop)
+									break;
+							}
+						}
+						if (out_of_range || bad_alignment || !tags_ok)
+						{
+							Console.Error("MTVU GSPacket bad: offset=0x%x size=0x%x buffSize=0x%x "
+										  "out_of_range=%d bad_alignment=%d tags_ok=%d",
+										  gsPack.offset, gsPack.size, path.buffSize,
+										  out_of_range ? 1 : 0, bad_alignment ? 1 : 0,
+										  tags_ok ? 1 : 0);
+						}
+						else
+						{
+							GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
+						}
+					}
 					path.readAmount.fetch_sub(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
 					path.PopGSPacketMTVU(); // Should be done last, for proper Gif_MTGS_Wait()
 					break;

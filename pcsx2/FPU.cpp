@@ -290,7 +290,16 @@ void MADD_S() {
 }
 
 void MADDA_S() {
-	_FAValf_ += fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	// `acc += a * b` is the canonical FMA pattern — Clang under
+	// pcsx2 CMake's `-ffp-contract=fast` will fuse it into a single-
+	// rounding FMADD. The PS2 EE FPU has no fused MAC (separate mul +
+	// add with one guard bit each); the arm64 + x86 JITs both emit
+	// explicit Fmul + Fadd. `volatile` on the intermediate forces two
+	// roundings and keeps the interp bit-consistent with the JITs.
+	// Sibling fix: VUops.cpp `_vuOpMADD` (the VU equivalent that
+	// previously surfaced as MGS2/Killzone divergence).
+	volatile float prod = fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	_FAValf_ += prod;
 	if (checkOverflow( _FAValUl_, FPUflagO | FPUflagSO)) return;
 	checkUnderflow( _FAValUl_, FPUflagU | FPUflagSU);
 }
@@ -323,7 +332,10 @@ void MSUB_S() {
 }
 
 void MSUBA_S() {
-	_FAValf_ -= fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	// See MADDA_S above — `acc -= a * b` fuses to FMSUB; volatile
+	// intermediate forces two-rounding to match JIT semantics.
+	volatile float prod = fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	_FAValf_ -= prod;
 	if (checkOverflow( _FAValUl_, FPUflagO | FPUflagSO)) return;
 	checkUnderflow( _FAValUl_, FPUflagU | FPUflagSU);
 }

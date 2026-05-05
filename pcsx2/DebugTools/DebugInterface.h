@@ -7,7 +7,6 @@
 #include "ExpressionParser.h"
 #include "SymbolGuardian.h"
 #include "SymbolImporter.h"
-#include "MipsStackWalk.h"
 
 #include "common/MemoryInterface.h"
 
@@ -73,7 +72,6 @@ public:
 	virtual SymbolGuardian& GetSymbolGuardian() const = 0;
 	virtual SymbolImporter* GetSymbolImporter() const = 0;
 	virtual std::vector<std::unique_ptr<BiosThread>> GetThreadList() const = 0;
-	virtual std::vector<MipsStackWalk::StackFrame> StackTrace(const BiosThread& thread) = 0;
 	virtual std::vector<IopMod> GetModuleList() const = 0;
 
 	bool isAlive();
@@ -137,7 +135,6 @@ public:
 	SymbolGuardian& GetSymbolGuardian() const override;
 	SymbolImporter* GetSymbolImporter() const override;
 	std::vector<std::unique_ptr<BiosThread>> GetThreadList() const override;
-	std::vector<MipsStackWalk::StackFrame> StackTrace(const BiosThread& thread) override;
 	std::vector<IopMod> GetModuleList() const override;
 
 	std::string disasm(u32 address, bool simplify) override;
@@ -183,7 +180,6 @@ public:
 	SymbolGuardian& GetSymbolGuardian() const override;
 	SymbolImporter* GetSymbolImporter() const override;
 	std::vector<std::unique_ptr<BiosThread>> GetThreadList() const override;
-	std::vector<MipsStackWalk::StackFrame> StackTrace(const BiosThread& thread) override;
 	std::vector<IopMod> GetModuleList() const override;
 
 	std::string disasm(u32 address, bool simplify) override;

@@ -58,6 +58,72 @@
 // entry (measurable cost on linked-chain entries), so keep off unless profiling.
 //#define VU1_PROFILE_BLOCKS
 
+// Diagnostic: shadow-compare every native VU0 pair against a parallel
+// _vu0Exec interp run on a snapshot of VU0 state. Logs the first divergent
+// field per pair (jit value vs interp value + pc) to Console.Error. Fires
+// only on the native pair path (fallback pairs use vu0Exec themselves and
+// would always agree). Slows VU0 emulation drastically — debug-only.
+// Use this to localize "JIT pair body produces wrong VF/ACC/macflag"
+// bugs that don't show up in INTERP_VU0_PAIR mode.
+//#define VU0_SHADOW_VERIFY
+
+// Diagnostic: gate the shadow-verify comparison to a cycle window so the
+// harness doesn't tank perf during long boot sequences. Uncomment ONE
+// (or both) to limit when the comparison fires. Snapshots/verify
+// emit ALWAYS at compile time; the GATE is at runtime in vu0_shadow_verify
+// — out-of-window pairs skip the vu0Exec call + memcmp entirely.
+//
+//   FROM: skip until VU->cycle reaches this value. Use to bypass init / BIOS.
+//   TO:   stop after VU->cycle exceeds this value. Use to abort once past
+//         the area of interest.
+//
+// Find your target cycle via the OSD (no exact cycle counter shown there)
+// or by enabling shadow-verify with a permissive window first, noting the
+// cycle in the divergence log, then narrowing on the next run.
+//#define VU0_SHADOW_VERIFY_FROM_CYCLE 24148000000ULL
+//#define VU0_SHADOW_VERIFY_TO_CYCLE   24148999999ULL
+
+// Diagnostic: TPC-range fallback bisection. Pairs whose pc falls in
+// [INTERP_VU0_PC_LOW, INTERP_VU0_PC_HIGH] route to vu0Exec; others go
+// through the native JIT body. Use to BINARY-SEARCH a buggy pair when
+// INTERP_VU0_PAIR fixes the bug but per-pair shadow-verify is silent.
+//
+// Workflow:
+//   1. Set range = whole 4KB program (LOW=0, HIGH=0xFFF). Verify physics
+//      are correct → equivalent to INTERP_VU0_PAIR.
+//   2. Halve the range. Re-run. If physics break, the bug is in the OTHER
+//      half. Otherwise it's in this half.
+//   3. Repeat until you've narrowed to ~8 bytes (one pair).
+//   4. Disable VU0_SHADOW_VERIFY and INTERP_VU0_PC range; manually inspect
+//      the JIT emit for that pair against x86 microVU.
+//
+// The bug is in a pair the harness can't observe — likely a hazard pair
+// fallback (the harness skips fallback pairs entirely) or external state
+// the per-pair compare doesn't capture (vif0Regs, EE memory, etc.).
+// Symptom #1 (MGS2 ledge teleport + back-facing invisible walls): pinned
+// to pc=0x4D8 — keep this range stable across symptom #2 bisect rounds.
+//#define INTERP_VU0_PC_LOW  0x04D8u
+//#define INTERP_VU0_PC_HIGH 0x04DFu
+
+// Symptom #2 (MGS2 bullets hit invisible walls, cannot descend stairs):
+// INTERACTING-PAIR bug at pc=0x168 + pc=0x170. Routing either pair alone
+// is NOT enough — both must take the vu0Exec fallback simultaneously.
+// Bisect cascade summary:
+//   0x140-0x17F OK; 0x140-0x15F BROKEN; 0x160-0x17F OK
+//   0x160-0x16F BROKEN; 0x170-0x17F BROKEN; 0x168-0x17F OK
+//   0x168-0x177 OK (covers both 0x168 + 0x170 pairs, drops 0x178)
+// → both 0x168 and 0x170 pairs are critical and interact. Likely one
+//   writes a VF/VI/ACC value the other reads, with a JIT-emit bug at the
+//   data handoff. To investigate: disassemble VU0 micro at:
+//     pc=0x168: lower at Micro[0x168], upper at Micro[0x16C]
+//     pc=0x170: lower at Micro[0x170], upper at Micro[0x174]
+//   and audit the JIT emit vs x86 microVU.
+//
+// Range 2 below pins both pairs through interp until the JIT bug is fixed.
+// Range1 (above) pins symptom #1 at 0x4D8.
+//#define INTERP_VU0_PC_LOW2  0x0168u
+//#define INTERP_VU0_PC_HIGH2 0x0177u
+
 // Diagnostic: per-op JIT symbol registration with simpleperf. When defined,
 // each emitted op is registered as a separate symbol (e.g. `EE_OP_lui_0x123`,
 // `VU1_U_05_0x0040`). The next simpleperf trace then attributes samples

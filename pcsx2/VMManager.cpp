@@ -725,8 +725,8 @@ void VMManager::WarnAboutUnconfiguredController()
 	if (!si || HasAnyBindingsForPad(*si, 0))
 		return;
 
-	Host::AddIconOSDMessage("ControllerNotConfigured", ICON_FA_GAMEPAD,
-		TRANSLATE_STR("VMManager", "Controller 1 has no input bindings configured."), Host::OSD_WARNING_DURATION);
+/*	Host::AddIconOSDMessage("ControllerNotConfigured", ICON_FA_GAMEPAD,
+		TRANSLATE_STR("VMManager", "Controller 1 has no input bindings configured."), Host::OSD_WARNING_DURATION);*/
 }
 
 void VMManager::ApplyGameFixes()

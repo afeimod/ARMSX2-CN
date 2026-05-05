@@ -49,8 +49,7 @@ std::vector<std::unique_ptr<BiosThread>> getIOPThreads()
 			return {};
 		}
 
-		data.stacMem = iopMemRead32(item + 0x3c);
-		data.stackSize = iopMemRead32(item + 0x40);
+		data.stackTop = iopMemRead32(item + 0x3c);
 		data.status = iopMemRead8(item + 0xc);
 		data.tid = iopMemRead16(item + 0xa);
 		data.entrypoint = iopMemRead32(item + 0x38);
@@ -58,9 +57,9 @@ std::vector<std::unique_ptr<BiosThread>> getIOPThreads()
 		data.waitId = iopMemRead32(item + 0x20);
 		data.initPriority = iopMemRead16(item + 0xe);
 
-		data.regCtx = iopMemRead32(item + 0x10);
+		data.SavedSP = iopMemRead32(item + 0x10);
 
-		data.PC = iopMemRead32(data.regCtx + 0x8c);
+		data.PC = iopMemRead32(data.SavedSP + 0x8c);
 
 		threads.emplace_back(std::make_unique<IOPThread>(data));
 

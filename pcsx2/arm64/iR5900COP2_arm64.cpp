@@ -25,6 +25,11 @@ using namespace R5900;
 
 extern void recompileNextInstruction(bool delayslot, bool swapped_delay_slot);
 
+// Defined in iR5900_arm64.cpp; consumes & clears s_nBlockCycles, returns the
+// scaled cycle count to bump cpuRegs.cycle by. Used by the native COP2 sync
+// emit (mirrors x86 mVUSyncVU0's scaleblockcycles_clear() injection point).
+extern u32 scaleblockcycles_clear();
+
 // Forward declarations for VU0 per-op emit functions. These are defined at
 // GLOBAL scope in iVU0Upper_arm64.cpp / iVU0Lower_arm64.cpp, so the externs
 // must live outside the R5900::Dynarec::OpcodeImpl namespace. The link errors
@@ -461,7 +466,16 @@ namespace OpcodeImpl {
 // [[maybe_unused]] because all per-op ISTUBs defaulting to 1 means no caller
 // is instantiated — keep the symbol around so flipping any per-op flag picks
 // it up without re-enabling a preprocessor gate.
-[[maybe_unused]] static void emitVU0MacroEnter()
+//
+// Reverted to minimal entry — no Q-load / status-denorm. Earlier work
+// added mode-bit-driven entry pre-load (mirroring x86 setupMacroOp) to
+// chase MGS2 collision physics, but that bug turned out to be the VU0
+// linkEntry carryover-branch issue (see armsx2_vu0_carryover_branch_fix
+// memory). The added per-FMAC-op emit (~4-7 ARM insns per call site)
+// pushed EE blocks over the per-block code-buffer budget, tripping a
+// vixl `managed_` assert in CodeBuffer::Grow. Re-enable only if we find
+// a separate bug whose actual cause is missing entry pre-load.
+[[maybe_unused]] static void emitVU0MacroEnter(int /*mode*/ = 0)
 {
     armAsm->Str(RFASTMEMBASE, a64::MemOperand(a64::sp, -16, a64::PreIndex));
     armMoveAddressToReg(RFASTMEMBASE, &VU0);
@@ -537,6 +551,124 @@ namespace OpcodeImpl {
     armEmitCall(reinterpret_cast<const void*>(vu0_macro_sync_fdiv_helper));
 }
 
+// ============================================================================
+//  Native VU0 sync emit — port of x86 mVUSyncVU0 / mVUFinishVU0
+// ============================================================================
+// Used in the analysis-flag-only sync path of recCFC2/recCTC2/recQMFC2/recQMTC2
+// (NO i-bit). The i-bit case still falls back to the interpreter — the full
+// COP2_Interlock heavy path includes _vu0WaitMicro / s_nBlockInterlocked
+// bookkeeping that's tied to the recompile-time interlock state.
+//
+// Why native vs the previous armCallInterpreter fallback:
+//   The interp's vu0Sync (VU0.cpp:88) calls _vu0run(0, 0, 1) which loops
+//   `do { CpuVU0->Execute(runCycles); } while (...)` — running multiple VU0
+//   blocks until the EE-VU0 cycle gap closes. x86 mVUSyncVU0 runs AT MOST
+//   ONE block via BaseVUmicroCPU::ExecuteBlockJIT, only when gap >= 4. arm64
+//   was over-syncing on every COP2 read/write, causing VF/macflag state to
+//   advance ahead of what the COP2 reader expects (suspected source of MGS2
+//   collision corruption — bullets through invisible walls, stair geometry).
+
+// Mirror of x86 mVUSyncVU0 (microVU_Macro.inl:365-385):
+//   1) Bump cpuRegs.cycle by scaleblockcycles_clear() (compile-time scale).
+//   2) If VPU_STAT bit 0 clear (VU0 idle), skip.
+//   3) If gap = cpuRegs.cycle - VU0.cycle (- nextBlockCycles if VUSyncHack)
+//      >= 4: invoke ExecuteBlockJIT(CpuVU0, s_nBlockInterlocked) for ONE
+//      block. Else skip.
+// Pre: caller has done iFlushCall-equivalent (FlushPC/FlushCode/FlushConst).
+// Post: RCYCLE has been bumped to match cpuRegs.cycle, then reloaded from
+// memory (idempotent if no C call ran, refreshed if ExecuteBlockJIT ran).
+[[maybe_unused]] static void emitVU0SyncVU0()
+{
+    armFlushPC();
+    armFlushCode();
+    armFlushConstRegs();
+
+    // x86 stores the scaled bump into cpuRegs.cycle directly. arm64 keeps the
+    // JIT-current cycle in RCYCLE; bump it first, then flush so the in-memory
+    // cpuRegs.cycle that ExecuteBlockJIT reads is up-to-date.
+    const u32 scale = scaleblockcycles_clear();
+    if (scale != 0)
+        armAsm->Add(RCYCLE, RCYCLE, scale);
+    armEmitFlushCycleBeforeCall();
+
+    a64::Label skipvuidle;
+    armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.VI[REG_VPU_STAT].UL));
+    armAsm->Ldr(RWSCRATCH, a64::MemOperand(RSCRATCHGPR));
+    armAsm->Tbz(RWSCRATCH, 0, &skipvuidle);
+
+    // gap = cpuRegs.cycle - VU0.cycle
+    a64::Label skip;
+    armAsm->Ldr(a64::x9, a64::MemOperand(RCPUSTATE, CYCLE_OFFSET));
+    armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.cycle));
+    armAsm->Ldr(a64::x10, a64::MemOperand(RSCRATCHGPR));
+    armAsm->Sub(a64::x9, a64::x9, a64::x10);
+
+    // VUSyncHack / FullVU0SyncHack tighten the gap by VU0.nextBlockCycles
+    // (Ratchet flickering polygons, per microVU_Macro.inl:344-348 comment).
+    if (EmuConfig.Gamefixes.VUSyncHack || EmuConfig.Gamefixes.FullVU0SyncHack)
+    {
+        armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.nextBlockCycles));
+        armAsm->Ldr(a64::x10, a64::MemOperand(RSCRATCHGPR));
+        armAsm->Sub(a64::x9, a64::x9, a64::x10);
+    }
+
+    armAsm->Cmp(a64::x9, 4);
+    armAsm->B(&skip, a64::lt);
+
+    // ExecuteBlockJIT(CpuVU0, s_nBlockInterlocked)
+    armAsm->Mov(a64::x0, reinterpret_cast<uintptr_t>(CpuVU0));
+    armAsm->Mov(a64::w1, static_cast<int>(s_nBlockInterlocked));
+    armEmitCall(reinterpret_cast<const void*>(&BaseVUmicroCPU::ExecuteBlockJIT));
+
+    armAsm->Bind(&skip);
+    armAsm->Bind(&skipvuidle);
+
+    armEmitReloadCycleAfterCall();
+
+    // Conservatively invalidate EE const-prop state — the C call (when taken)
+    // may have changed cpuRegs state. Matches armCallInterpreter's post-call
+    // bookkeeping (iR5900_arm64.cpp:920-921).
+    g_cpuHasConstReg = 1;
+    g_cpuFlushedConstReg = 1;
+}
+
+// Mirror of x86 mVUFinishVU0 (microVU_Macro.inl:387-394):
+//   if VPU_STAT bit 0 set: call _vu0FinishMicro (runs VU0 until E-bit).
+// Used when the analysis flagged EEINST_COP2_FINISH_VU0 (deeper sync than
+// SYNC — needs VU0 to fully retire before the COP2 reader fires).
+//
+// Currently unused: the FINISH path falls back to the interpreter (see
+// recQMFC2 / recQMTC2 / recCFC2 / recCTC2). Calling _vu0FinishMicro from
+// the EE thread races with the GUI thread's pause-time vu1Thread.WaitVU()
+// — the deep VU0 micro execution can hit a VU0 LQ/SQ on a VU1-aliased
+// address (vu0MTVUSyncVU1Reg in iVU0Lower_arm64.cpp:281), which calls
+// vu1Thread.WaitVU() concurrently and trips the WorkSema single-waiter
+// assert (Semaphore.cpp:105). x86 has the same theoretical race; arm64
+// hits it more reliably during touch-driven pauses on Android. Re-enable
+// once the race is fixed at the source (e.g. proper EE-stop-then-drain
+// ordering in VMManager::SetState).
+[[maybe_unused]] static void emitVU0FinishVU0()
+{
+    armFlushPC();
+    armFlushCode();
+    armFlushConstRegs();
+    armEmitFlushCycleBeforeCall();
+
+    a64::Label skipvuidle;
+    armAsm->Mov(RSCRATCHGPR, reinterpret_cast<uintptr_t>(&VU0.VI[REG_VPU_STAT].UL));
+    armAsm->Ldr(RWSCRATCH, a64::MemOperand(RSCRATCHGPR));
+    armAsm->Tbz(RWSCRATCH, 0, &skipvuidle);
+
+    armEmitCall(reinterpret_cast<const void*>(&_vu0FinishMicro));
+
+    armAsm->Bind(&skipvuidle);
+
+    armEmitReloadCycleAfterCall();
+
+    g_cpuHasConstReg = 1;
+    g_cpuFlushedConstReg = 1;
+}
+
 // Dispatch a COP2 op through the VU0 microrecompiler's per-op emit function.
 // At EMIT time: sets VU0.code = cpuRegs.code so the per-op function decodes
 // the right fs/ft/fd/dest fields.
@@ -553,13 +685,34 @@ namespace OpcodeImpl {
 // MOVE/MR32 don't touch those flags — use REC_COP2_MVU0_NOFLAGS. CLIP updates
 // clipflag instead — use REC_COP2_MVU0_CLIP. DIV/SQRT/RSQRT update the FDIV
 // status bits — not yet ported (stay on interp).
+// FMAC arith (writes mac/status). Mode 0x10 mirrors x86 mode 0x110 mask
+// for status — denormalize VI[REG_STATUS_FLAG] into VU0.statusflag at entry
+// so the post-op flag-mirror sync composes correct sticky bits.
 #define REC_COP2_MVU0(cop2_name, vu_rec_fn) \
     void recV##cop2_name() { \
         if constexpr (ISTUB_VU0_##cop2_name) { \
             armCallInterpreter(::V##cop2_name); \
         } else { \
             VU0.code = cpuRegs.code; \
-            emitVU0MacroEnter(); \
+            emitVU0MacroEnter(0x10); \
+            vu_rec_fn(); \
+            emitVU0MacroSyncFlags(); \
+            emitVU0MacroExit(); \
+        } \
+    }
+
+// FMAC arith *q variants (ADDq/SUBq/MULq/MADDq/MSUBq + A variants). Mode
+// 0x11 = Q-read + status-write — mirrors x86 mode 0x111. Pre-loads
+// VU0.q.UL ← VI[REG_Q].UL so the per-op emit reads the EE-canonical Q
+// (the FDIV result that any prior CTC2/VDIV/VSQRT/VRSQRT placed in the VI
+// mirror), not whatever the local FDIV pipe slot last held.
+#define REC_COP2_MVU0_Q(cop2_name, vu_rec_fn) \
+    void recV##cop2_name() { \
+        if constexpr (ISTUB_VU0_##cop2_name) { \
+            armCallInterpreter(::V##cop2_name); \
+        } else { \
+            VU0.code = cpuRegs.code; \
+            emitVU0MacroEnter(0x11); \
             vu_rec_fn(); \
             emitVU0MacroSyncFlags(); \
             emitVU0MacroExit(); \
@@ -568,14 +721,15 @@ namespace OpcodeImpl {
 
 // Same as REC_COP2_MVU0 but skips the MAC/STATUS flag sync. For MAX/MINI/ABS/
 // ITOF/FTOI/MOVE/MR32 — the interpreter wrappers for these ops don't call
-// SYNCMSFLAGS, so neither should we.
+// SYNCMSFLAGS, so neither should we. Mode 0 = no entry pre-load (matches
+// x86 mode 0x000).
 #define REC_COP2_MVU0_NOFLAGS(cop2_name, vu_rec_fn) \
     void recV##cop2_name() { \
         if constexpr (ISTUB_VU0_##cop2_name) { \
             armCallInterpreter(::V##cop2_name); \
         } else { \
             VU0.code = cpuRegs.code; \
-            emitVU0MacroEnter(); \
+            emitVU0MacroEnter(0); \
             vu_rec_fn(); \
             emitVU0MacroExit(); \
         } \
@@ -583,30 +737,32 @@ namespace OpcodeImpl {
 
 // Same as REC_COP2_MVU0 but syncs clipflag instead of macflag/statusflag.
 // CLIPw's interpreter wrapper calls SYNCCLIPFLAG; the lower-op readers
-// (FCAND/FCEQ/FCOR/FCGET) read VI[REG_CLIP_FLAG].UL.
+// (FCAND/FCEQ/FCOR/FCGET) read VI[REG_CLIP_FLAG].UL. Mode 0x008 in x86
+// touches no entry state.
 #define REC_COP2_MVU0_CLIP(cop2_name, vu_rec_fn) \
     void recV##cop2_name() { \
         if constexpr (ISTUB_VU0_##cop2_name) { \
             armCallInterpreter(::V##cop2_name); \
         } else { \
             VU0.code = cpuRegs.code; \
-            emitVU0MacroEnter(); \
+            emitVU0MacroEnter(0); \
             vu_rec_fn(); \
             emitVU0MacroSyncClipFlag(); \
             emitVU0MacroExit(); \
         } \
     }
 
-// For DIV/SQRT/RSQRT: syncs VU0.q → VI[REG_Q] and the FDIV bits of statusflag
-// (matches SYNCFDIV). The native emits write VU0.q and VU0.statusflag bits
-// [5:4]; lower-op readers (CFC2 on Q, VWAITQ, FSAND) read the VI mirrors.
+// For DIV/SQRT/RSQRT: writes Q + writes FDIV status bits (x86 mode 0x112).
+// We don't need a Q-PRE-load (mode bit 0x01) because FDIV ops produce Q;
+// mode 0x10 still applies for status denormalization. emitVU0MacroSyncFdiv
+// at exit copies VU0.q → VI[REG_Q] and merges D/I status bits [5:4]/[11:10].
 #define REC_COP2_MVU0_FDIV(cop2_name, vu_rec_fn) \
     void recV##cop2_name() { \
         if constexpr (ISTUB_VU0_##cop2_name) { \
             armCallInterpreter(::V##cop2_name); \
         } else { \
             VU0.code = cpuRegs.code; \
-            emitVU0MacroEnter(); \
+            emitVU0MacroEnter(0x10); \
             vu_rec_fn(); \
             emitVU0MacroSyncFdiv(); \
             emitVU0MacroExit(); \
@@ -623,8 +779,11 @@ void recQMFC2()
 #else
     if (!_Rt_)
         return;
-    // I-bit (bit 0 of instruction) or sync/finish flag → fall back to interpreter
-    // so the interlock and VU0 micro-execution are handled correctly.
+    // I-bit or analysis-flag SYNC/FINISH → fall back to interp. Native sync
+    // emit was tried (port of x86 mVUSyncVU0) but added per-call-site emit
+    // bloat that pushed EE blocks over the per-block code-buffer budget,
+    // tripping a vixl `managed_` assert in CodeBuffer::Grow. Reverted in
+    // favor of the simpler full-interp fallback.
     if ((cpuRegs.code & 1) ||
         (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))))
     {
@@ -649,7 +808,8 @@ void recQMTC2()
 #else
     if (!_Rd_)
         return;
-    // I-bit or sync/finish → interpreter handles interlock.
+    // I-bit or analysis-flag SYNC/FINISH → interp fallback (see recQMFC2
+    // comment for rationale on the native-sync revert).
     if ((cpuRegs.code & 1) ||
         (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))))
     {
@@ -684,8 +844,8 @@ void recCFC2() { armCallInterpreter(::CFC2); }
 #else
 void recCFC2()
 {
-    // Interpreter handles interlock / sync / finish (I-bit set, or analysis
-    // flagged that VU0 needs to be synced/finished before the read).
+    // I-bit or analysis-flag SYNC/FINISH → interp fallback (see recQMFC2
+    // comment for rationale on the native-sync revert).
     if ((cpuRegs.code & 1) ||
         (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))))
     {
@@ -750,7 +910,7 @@ void recCTC2() { armCallInterpreter(::CTC2); }
 #else
 void recCTC2()
 {
-    // Interpreter handles interlock / sync / finish.
+    // I-bit or analysis-flag SYNC/FINISH → interp fallback.
     if ((cpuRegs.code & 1) ||
         (g_pCurInstInfo && (g_pCurInstInfo->info & (EEINST_COP2_SYNC_VU0 | EEINST_COP2_FINISH_VU0))))
     {
@@ -915,8 +1075,8 @@ REC_COP2_MVU0_NOFLAGS(MAXx,  recVU0_MAXx)   REC_COP2_MVU0_NOFLAGS(MAXy,  recVU0_
 REC_COP2_MVU0_NOFLAGS(MINIx, recVU0_MINIx)  REC_COP2_MVU0_NOFLAGS(MINIy, recVU0_MINIy)  REC_COP2_MVU0_NOFLAGS(MINIz, recVU0_MINIz)  REC_COP2_MVU0_NOFLAGS(MINIw, recVU0_MINIw)
 
 // Q-register FMAC
-REC_COP2_MVU0(ADDq,  recVU0_ADDq)   REC_COP2_MVU0(SUBq,  recVU0_SUBq)   REC_COP2_MVU0(MULq,  recVU0_MULq)
-REC_COP2_MVU0(MADDq, recVU0_MADDq)  REC_COP2_MVU0(MSUBq, recVU0_MSUBq)
+REC_COP2_MVU0_Q(ADDq,  recVU0_ADDq)   REC_COP2_MVU0_Q(SUBq,  recVU0_SUBq)   REC_COP2_MVU0_Q(MULq,  recVU0_MULq)
+REC_COP2_MVU0_Q(MADDq, recVU0_MADDq)  REC_COP2_MVU0_Q(MSUBq, recVU0_MSUBq)
 
 // I-register FMAC
 REC_COP2_MVU0(ADDi,  recVU0_ADDi)   REC_COP2_MVU0(SUBi,  recVU0_SUBi)   REC_COP2_MVU0(MULi,  recVU0_MULi)
@@ -971,16 +1131,16 @@ REC_COP2_MVU0_NOFLAGS(FTOI12, recVU0_FTOI12)  REC_COP2_MVU0_NOFLAGS(FTOI15, recV
 REC_COP2_MVU0(MULAx,  recVU0_MULAx)   REC_COP2_MVU0(MULAy,  recVU0_MULAy)
 REC_COP2_MVU0(MULAz,  recVU0_MULAz)   REC_COP2_MVU0(MULAw,  recVU0_MULAw)
 // MULAq / MULAi (Q/I register broadcast, toACC=true)
-REC_COP2_MVU0(MULAq,  recVU0_MULAq)   REC_COP2_MVU0(MULAi,  recVU0_MULAi)
+REC_COP2_MVU0_Q(MULAq,  recVU0_MULAq)   REC_COP2_MVU0(MULAi,  recVU0_MULAi)
 // ABS + CLIPw
 REC_COP2_MVU0_NOFLAGS(ABS,   recVU0_ABS)
 REC_COP2_MVU0_CLIP(   CLIPw, recVU0_CLIP)
 
 // Accumulator Q/I FMAC (toACC=true)
-REC_COP2_MVU0(ADDAq,  recVU0_ADDAq)   REC_COP2_MVU0(MADDAq, recVU0_MADDAq)
-REC_COP2_MVU0(ADDAi,  recVU0_ADDAi)   REC_COP2_MVU0(MADDAi, recVU0_MADDAi)
-REC_COP2_MVU0(SUBAq,  recVU0_SUBAq)   REC_COP2_MVU0(MSUBAq, recVU0_MSUBAq)
-REC_COP2_MVU0(SUBAi,  recVU0_SUBAi)   REC_COP2_MVU0(MSUBAi, recVU0_MSUBAi)
+REC_COP2_MVU0_Q(ADDAq,  recVU0_ADDAq)   REC_COP2_MVU0_Q(MADDAq, recVU0_MADDAq)
+REC_COP2_MVU0(  ADDAi,  recVU0_ADDAi)   REC_COP2_MVU0(  MADDAi, recVU0_MADDAi)
+REC_COP2_MVU0_Q(SUBAq,  recVU0_SUBAq)   REC_COP2_MVU0_Q(MSUBAq, recVU0_MSUBAq)
+REC_COP2_MVU0(  SUBAi,  recVU0_SUBAi)   REC_COP2_MVU0(  MSUBAi, recVU0_MSUBAi)
 
 // Full-vector accumulator FMAC
 REC_COP2_MVU0(ADDA,   recVU0_ADDA)    REC_COP2_MVU0(MADDA,  recVU0_MADDA)   REC_COP2_MVU0(MULA,  recVU0_MULA)
