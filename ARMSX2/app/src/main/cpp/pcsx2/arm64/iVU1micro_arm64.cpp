@@ -157,6 +157,376 @@ static inline bool isVU1LowerNOP(u32 lower)
 }
 
 // ============================================================================
+//  Shadow-compare debug harness (VU1_SHADOW_VERIFY).
+//
+//  Mirrors the VU0 harness in iVU0micro_arm64.cpp. Hooks into the native
+//  (non-fallback) per-pair path. Pre-pair: snapshots VU1+Mem to s_v1_shadow_pre.
+//  Post-pair: saves VU1 (the JIT result) to s_v1_shadow_post, restores VU1
+//  from s_v1_shadow_pre, runs vu1Exec(&VU1) for the SAME pair via interp,
+//  then compares interp result (VU1) against JIT result (s_v1_shadow_post)
+//  field-by-field. Logs the first divergent field per pair, dumps state, and
+//  aborts via std::abort (debuggerd → tombstone with native backtrace).
+//
+//  Constraints:
+//    - MUST be used with THREAD_VU1 = false (MTVU off). Under MTVU, VU1 runs
+//      on a separate thread and the interp re-run would race with cross-
+//      thread state mutations. The verify function runtime-checks THREAD_VU1
+//      and bails when it's true.
+//    - XGKICK pairs are skipped — re-running interp would emit duplicate GIF
+//      packet data. The hook gates on isXgkickOp(lower) at compile time.
+//    - Hazard-fallback pairs (vu1Exec) are not verified — interp result
+//      trivially equals JIT.
+//
+//  Limitations:
+//    - VU1.Mem is 16KB (vs VU0's 4KB); snapshot cost is 4x higher per pair.
+//      Use the cycle window in InterpFlags.h to scope to the area of interest.
+//    - GIF / vif1Regs / cpuRegs.cycle are NOT snapshotted in v1. Pairs that
+//      mutate those (XGKICK, certain D/T-bit firings) need extension if
+//      they're suspected of hosting the divergence.
+// ============================================================================
+#ifdef VU1_SHADOW_VERIFY
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <unwind.h>
+#include <dlfcn.h>
+
+alignas(16) static u8 s_v1_shadow_pre [sizeof(VURegs)];
+alignas(16) static u8 s_v1_shadow_post[sizeof(VURegs)];
+// VU1.Mem (16KB data memory) is allocated separately from VURegs and only
+// referenced by pointer inside the struct. SQ/SQI/SQD/ISWR ops write here;
+// a buggy JIT codegen for any of those would silently corrupt VU1.Mem
+// without tripping any VURegs comparison. Mirror snapshot/restore/compare
+// for the Mem buffer so the harness covers stores too.
+alignas(16) static u8 s_v1_shadow_pre_mem [VU1_MEMSIZE];
+alignas(16) static u8 s_v1_shadow_post_mem[VU1_MEMSIZE];
+
+// Latched on the first detected divergence. Once set, vu1_shadow_verify
+// becomes a no-op so a bad scene doesn't flood logcat with thousands of
+// follow-on errors before the user can see the original failure. Halt path
+// also sets it before std::abort.
+static std::atomic<bool> s_v1_shadow_diverged{false};
+
+static void vu1_shadow_snapshot()
+{
+	if (s_v1_shadow_diverged.load(std::memory_order_relaxed))
+		return;
+	// MTVU bail: under THREAD_VU1, the interp re-run would race with the
+	// MTVU thread's other VU1 work. Skip the harness entirely. The verify
+	// hook also bails for symmetry.
+	if (THREAD_VU1)
+		return;
+	std::memcpy(s_v1_shadow_pre, &VU1, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(s_v1_shadow_pre_mem, VU1.Mem, VU1_MEMSIZE);
+}
+
+static void vu1_shadow_dump_state(const char* label, const VURegs* state)
+{
+	Console.Error("--- %s ---", label);
+	for (u32 v = 0; v < 32; v++)
+	{
+		Console.Error("  VF[%2u] = {%08x %08x %08x %08x}", v,
+			state->VF[v].UL[0], state->VF[v].UL[1], state->VF[v].UL[2], state->VF[v].UL[3]);
+	}
+	Console.Error("  ACC    = {%08x %08x %08x %08x}",
+		state->ACC.UL[0], state->ACC.UL[1], state->ACC.UL[2], state->ACC.UL[3]);
+	for (u32 v = 0; v < 32; v++)
+		Console.Error("  VI[%2u] = %08x", v, state->VI[v].UL);
+	Console.Error("  Q=%08x  P=%08x  I=%08x  R=%08x",
+		state->q.UL, state->p.UL, state->VI[REG_I].UL, state->VI[REG_R].UL);
+	Console.Error("  cycle=%llu  macflag=%08x  statusflag=%08x  clipflag=%08x",
+		(unsigned long long)state->cycle, state->macflag, state->statusflag, state->clipflag);
+	Console.Error("  ebit=%u  branch=%u  branchpc=0x%04x  flags=%08x",
+		state->ebit, state->branch, state->branchpc, state->flags);
+	Console.Error("  fmacwritepos=%u  fmacreadpos=%u  fmaccount=%u",
+		state->fmacwritepos, state->fmacreadpos, state->fmaccount);
+	Console.Error("  ialuwritepos=%u  ialureadpos=%u  ialucount=%u",
+		state->ialuwritepos, state->ialureadpos, state->ialucount);
+	Console.Error("  xgkickenable=%u  xgkickaddr=%08x  xgkickdiff=%u  xgkicksizeremaining=%u",
+		state->xgkickenable, state->xgkickaddr, state->xgkickdiff, state->xgkicksizeremaining);
+}
+
+struct ShadowUnwindCtx
+{
+	u32 frames_seen = 0;
+	static constexpr u32 kMaxFrames = 32;
+};
+
+static _Unwind_Reason_Code vu1_shadow_unwind_cb(struct _Unwind_Context* ctx, void* arg)
+{
+	auto* state = static_cast<ShadowUnwindCtx*>(arg);
+	if (state->frames_seen >= ShadowUnwindCtx::kMaxFrames)
+		return _URC_END_OF_STACK;
+
+	const uintptr_t pc = _Unwind_GetIP(ctx);
+	if (!pc)
+		return _URC_END_OF_STACK;
+
+	Dl_info info{};
+	const char* sym = "?";
+	uintptr_t off = 0;
+	if (dladdr(reinterpret_cast<void*>(pc), &info) && info.dli_sname)
+	{
+		sym = info.dli_sname;
+		off = pc - reinterpret_cast<uintptr_t>(info.dli_saddr);
+	}
+	else if (info.dli_fname)
+	{
+		sym = info.dli_fname;
+		off = pc - reinterpret_cast<uintptr_t>(info.dli_fbase);
+	}
+	Console.Error("  #%2u  pc=0x%016lx  %s+0x%lx",
+		state->frames_seen, (unsigned long)pc, sym, (unsigned long)off);
+	state->frames_seen++;
+	return _URC_NO_REASON;
+}
+
+static void vu1_shadow_halt(u32 pc, const char* first_field, const char* first_detail)
+{
+	if (s_v1_shadow_diverged.exchange(true, std::memory_order_acq_rel))
+		return;
+
+	const u32 lower = *reinterpret_cast<const u32*>(VU1.Micro + (pc & VU1_PROGMASK));
+	const u32 upper = *reinterpret_cast<const u32*>(VU1.Micro + ((pc + 4) & VU1_PROGMASK));
+
+	Console.Error("============================================================");
+	Console.Error(" VU1 SHADOW DIVERGENCE  pc=0x%04x", pc);
+	Console.Error("   first divergent field: %s  %s", first_field, first_detail);
+	Console.Error("   pair opcodes: lower=0x%08x  upper=0x%08x", lower, upper);
+	Console.Error("============================================================");
+
+	const VURegs* pre   = reinterpret_cast<const VURegs*>(s_v1_shadow_pre);
+	const VURegs* jit   = reinterpret_cast<const VURegs*>(s_v1_shadow_post);
+	vu1_shadow_dump_state("PRE-PAIR (input state)", pre);
+	vu1_shadow_dump_state("JIT RESULT", jit);
+	vu1_shadow_dump_state("INTERP RESULT (truth)", &VU1);
+
+	Console.Error("--- Native C++ backtrace ---");
+	ShadowUnwindCtx ctx;
+	_Unwind_Backtrace(&vu1_shadow_unwind_cb, &ctx);
+
+	Console.Error("============================================================");
+	Console.Error(" Aborting — tombstone will follow");
+	Console.Error("============================================================");
+	std::abort();
+}
+
+static void vu1_shadow_log(u32 pc, const char* field, const char* fmt, ...)
+{
+	char detail[224];
+	va_list ap;
+	va_start(ap, fmt);
+	std::vsnprintf(detail, sizeof(detail), fmt, ap);
+	va_end(ap);
+	vu1_shadow_halt(pc, field, detail);
+}
+
+static void vu1_shadow_verify(u32 pc)
+{
+	if (s_v1_shadow_diverged.load(std::memory_order_relaxed))
+	{
+		// Already halted — but the abort hasn't fired on this thread yet.
+		// Restore JIT result so the VM doesn't drift further while we wait.
+		std::memcpy(&VU1, s_v1_shadow_post, sizeof(VURegs));
+		if (VU1.Mem)
+			std::memcpy(VU1.Mem, s_v1_shadow_post_mem, VU1_MEMSIZE);
+		return;
+	}
+	if (THREAD_VU1)
+		return;
+
+#if defined(VU1_SHADOW_VERIFY_FROM_CYCLE) || defined(VU1_SHADOW_VERIFY_TO_CYCLE)
+	{
+		const u64 cur = VU1.cycle;
+#ifdef VU1_SHADOW_VERIFY_FROM_CYCLE
+		if (cur < (VU1_SHADOW_VERIFY_FROM_CYCLE)) return;
+#endif
+#ifdef VU1_SHADOW_VERIFY_TO_CYCLE
+		if (cur > (VU1_SHADOW_VERIFY_TO_CYCLE))   return;
+#endif
+	}
+#endif
+
+	// Snapshot post-JIT state.
+	std::memcpy(s_v1_shadow_post, &VU1, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(s_v1_shadow_post_mem, VU1.Mem, VU1_MEMSIZE);
+
+	// Patch s_v1_shadow_pre's TPC to match the JIT's compile-time-known pc —
+	// vu1Exec reads its pair from Micro[VI[REG_TPC]], and a stale TPC from
+	// a prior block's tail would point at the wrong pair. Force TPC = pc so
+	// interp runs the SAME pair the JIT just executed. Same fix as VU0.
+	auto* pre_regs = reinterpret_cast<VURegs*>(s_v1_shadow_pre);
+	pre_regs->VI[REG_TPC].UL = pc;
+
+	// Restore pre-pair state and run interp on the same pair. Mem rolled
+	// back so interp's stores land on the same starting buffer.
+	std::memcpy(&VU1, s_v1_shadow_pre, sizeof(VURegs));
+	if (VU1.Mem)
+		std::memcpy(VU1.Mem, s_v1_shadow_pre_mem, VU1_MEMSIZE);
+	vu1Exec(&VU1);
+
+	// Compare. Same field list as VU0 (excluding VPU_STAT — see VU0 comment
+	// for why VI[REG_VPU_STAT] is excluded from per-pair compare).
+	const VURegs* jit  = reinterpret_cast<const VURegs*>(s_v1_shadow_post);
+	const VURegs* iref = &VU1;
+	bool diverged = false;
+
+	auto check_u32 = [&](const char* name, u32 j, u32 i) -> bool {
+		if (j != i) {
+			vu1_shadow_log(pc, name, "jit=0x%08x interp=0x%08x", j, i);
+			return true;
+		}
+		return false;
+	};
+
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (std::memcmp(&jit->VF[v], &iref->VF[v], sizeof(VECTOR)) != 0)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VF[%u]", v);
+			vu1_shadow_log(pc, fname,
+				"jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+				jit->VF[v].UL[0], jit->VF[v].UL[1], jit->VF[v].UL[2], jit->VF[v].UL[3],
+				iref->VF[v].UL[0], iref->VF[v].UL[1], iref->VF[v].UL[2], iref->VF[v].UL[3]);
+			diverged = true;
+		}
+	}
+
+	if (!diverged && std::memcmp(&jit->ACC, &iref->ACC, sizeof(VECTOR)) != 0)
+	{
+		vu1_shadow_log(pc, "ACC",
+			"jit={%08x,%08x,%08x,%08x} interp={%08x,%08x,%08x,%08x}",
+			jit->ACC.UL[0], jit->ACC.UL[1], jit->ACC.UL[2], jit->ACC.UL[3],
+			iref->ACC.UL[0], iref->ACC.UL[1], iref->ACC.UL[2], iref->ACC.UL[3]);
+		diverged = true;
+	}
+
+	if (!diverged) diverged = check_u32("macflag",    jit->macflag,    iref->macflag);
+	if (!diverged) diverged = check_u32("statusflag", jit->statusflag, iref->statusflag);
+	if (!diverged) diverged = check_u32("clipflag",   jit->clipflag,   iref->clipflag);
+
+	for (u32 v = 0; v < 32 && !diverged; v++)
+	{
+		if (v == REG_VPU_STAT) continue;
+		if (jit->VI[v].UL != iref->VI[v].UL)
+		{
+			char fname[16];
+			std::snprintf(fname, sizeof(fname), "VI[%u]", v);
+			diverged = check_u32(fname, jit->VI[v].UL, iref->VI[v].UL);
+		}
+	}
+
+	if (!diverged && jit->cycle != iref->cycle)
+	{
+		vu1_shadow_log(pc, "cycle", "jit=%llu interp=%llu",
+			(unsigned long long)jit->cycle, (unsigned long long)iref->cycle);
+		diverged = true;
+	}
+	if (!diverged) diverged = check_u32("ebit",         jit->ebit,         iref->ebit);
+	if (!diverged) diverged = check_u32("branch",       jit->branch,       iref->branch);
+	if (!diverged) diverged = check_u32("branchpc",     jit->branchpc,     iref->branchpc);
+	if (!diverged) diverged = check_u32("flags",        jit->flags,        iref->flags);
+
+	// Delay-branch state (matters for branch-in-branch-delay-slot edge cases).
+	if (!diverged) diverged = check_u32("delaybranchpc",   jit->delaybranchpc, iref->delaybranchpc);
+	if (!diverged) diverged = check_u32("takedelaybranch",
+		(u32)jit->takedelaybranch, (u32)iref->takedelaybranch);
+
+	// VIBackup state (rolls back VI on branch backup-cycles unwind).
+	if (!diverged) diverged = check_u32("VIBackupCycles",
+		(u32)jit->VIBackupCycles, (u32)iref->VIBackupCycles);
+	if (!diverged) diverged = check_u32("VIOldValue",  jit->VIOldValue,  iref->VIOldValue);
+	if (!diverged) diverged = check_u32("VIRegNumber", jit->VIRegNumber, iref->VIRegNumber);
+
+	// Pending Q/P (set by start-of-FDIV/EFU; consumed when result retires).
+	if (!diverged) diverged = check_u32("pending_q", jit->pending_q, iref->pending_q);
+	if (!diverged) diverged = check_u32("pending_p", jit->pending_p, iref->pending_p);
+
+	if (!diverged && jit->q.UL != iref->q.UL)
+		diverged = check_u32("q", jit->q.UL, iref->q.UL);
+	if (!diverged && jit->p.UL != iref->p.UL)
+		diverged = check_u32("p", jit->p.UL, iref->p.UL);
+
+	if (!diverged) diverged = check_u32("fmacwritepos", jit->fmacwritepos, iref->fmacwritepos);
+	if (!diverged) diverged = check_u32("fmacreadpos",  jit->fmacreadpos,  iref->fmacreadpos);
+	if (!diverged) diverged = check_u32("fmaccount",    jit->fmaccount,    iref->fmaccount);
+
+	for (u32 i = 0; i < 4 && !diverged; i++)
+	{
+		fmacPipe jp = jit->fmac[i];
+		fmacPipe ip = iref->fmac[i];
+		// Normalize: when reg=0 (no real VF writeback), xyzw mask is don't-care.
+		if (jp.regupper == 0) jp.xyzwupper = 0;
+		if (jp.reglower == 0) jp.xyzwlower = 0;
+		if (ip.regupper == 0) ip.xyzwupper = 0;
+		if (ip.reglower == 0) ip.xyzwlower = 0;
+		if (std::memcmp(&jp, &ip, sizeof(fmacPipe)) != 0)
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "fmac[%u]", i);
+			vu1_shadow_log(pc, fname,
+				"jit{ru=%u rl=%u fr=%d xu=%u xl=%u sC=%llu C=%u m=%08x s=%08x c=%08x} "
+				"interp{ru=%u rl=%u fr=%d xu=%u xl=%u sC=%llu C=%u m=%08x s=%08x c=%08x}",
+				jp.regupper, jp.reglower, jp.flagreg, jp.xyzwupper, jp.xyzwlower,
+				(unsigned long long)jp.sCycle, jp.Cycle, jp.macflag, jp.statusflag, jp.clipflag,
+				ip.regupper, ip.reglower, ip.flagreg, ip.xyzwupper, ip.xyzwlower,
+				(unsigned long long)ip.sCycle, ip.Cycle, ip.macflag, ip.statusflag, ip.clipflag);
+			diverged = true;
+		}
+	}
+
+	if (!diverged) diverged = check_u32("ialuwritepos", jit->ialuwritepos, iref->ialuwritepos);
+	if (!diverged) diverged = check_u32("ialureadpos",  jit->ialureadpos,  iref->ialureadpos);
+	if (!diverged) diverged = check_u32("ialucount",    jit->ialucount,    iref->ialucount);
+	for (u32 i = 0; i < 4 && !diverged; i++)
+	{
+		const ialuPipe& jp = jit->ialu[i];
+		const ialuPipe& ip = iref->ialu[i];
+		if (std::memcmp(&jp, &ip, sizeof(ialuPipe)) != 0)
+		{
+			char fname[24];
+			std::snprintf(fname, sizeof(fname), "ialu[%u]", i);
+			vu1_shadow_log(pc, fname, "ialu slot mismatch (compare ialuPipe struct)");
+			diverged = true;
+		}
+	}
+
+	if (!diverged && std::memcmp(VU1.Mem, s_v1_shadow_post_mem, VU1_MEMSIZE) != 0)
+	{
+		// Mem mismatch: SQ/SQI/SQD/ISWR JIT emit produced a different store
+		// than interp. Find the first differing byte for the log.
+		u32 first_diff = 0;
+		for (u32 b = 0; b < VU1_MEMSIZE; b++)
+		{
+			if (VU1.Mem[b] != s_v1_shadow_post_mem[b])
+			{
+				first_diff = b;
+				break;
+			}
+		}
+		vu1_shadow_log(pc, "Mem",
+			"first byte mismatch at offset 0x%04x  jit=0x%02x interp=0x%02x",
+			first_diff, s_v1_shadow_post_mem[first_diff], VU1.Mem[first_diff]);
+		diverged = true;
+	}
+
+	// Restore JIT result so the VM continues with whatever JIT produced —
+	// we want to find the bug, not silently fix it. Only matters if we
+	// haven't aborted (no divergence detected).
+	if (!diverged)
+	{
+		std::memcpy(&VU1, s_v1_shadow_post, sizeof(VURegs));
+		if (VU1.Mem)
+			std::memcpy(VU1.Mem, s_v1_shadow_post_mem, VU1_MEMSIZE);
+	}
+}
+#endif // VU1_SHADOW_VERIFY
+
+// ============================================================================
 //  microIR Pass 1 — analyze
 // ============================================================================
 //
@@ -4317,6 +4687,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			continue;
 		}
 
+#ifdef VU1_SHADOW_VERIFY
+		// Snapshot VU1 state before the native pair runs. Skipped for XGKICK
+		// pairs (re-running interp would duplicate GIF packet writes); the
+		// matching verify hook below applies the same gate. THREAD_VU1
+		// runtime check lives inside vu1_shadow_snapshot itself.
+		if (!ir_op.isKick)
+		{
+			armEmitCall(reinterpret_cast<const void*>(vu1_shadow_snapshot));
+		}
+#endif
+
 		// 1. VU->cycle++ — Stage C2 uses the cached VU1_CYCLE_REG (x21).
 		//    x22 latches "cycle before this pair" for the VIBackupCycles
 		//    decrement at step 6b. Both x21 and x22 are callee-saved and
@@ -4859,6 +5240,29 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// Track E-bit for next pair's branch suppression (step 8).
 		// Same reasoning: delay-slot context applies regardless of path.
 		prev_was_ebit = ebit_set;
+
+#ifdef VU1_SHADOW_VERIFY
+		// Run interp on the snapshot, compare to JIT result, halt+abort on
+		// first divergence. Same gate as snapshot above. Pinned regs need
+		// to be flushed/reloaded around the BL since the interp re-run
+		// inside vu1_shadow_verify mutates VU1.cycle / fmaccount / wpos /
+		// flags / ACC and our pinned views would otherwise drift.
+		if (!ir_op.isKick)
+		{
+			emitFlushCycleReg(cycle_off);
+			emitFlushWposRegs(fmacwpos_off, ialuwpos_off);
+			emitFlushFmaccountReg(fmaccount_off);
+			emitFlushFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitFlushAccReg(acc_off);
+			armAsm->Mov(w0, pc);
+			armEmitCall(reinterpret_cast<const void*>(vu1_shadow_verify));
+			emitReloadCycleReg(cycle_off);
+			emitReloadWposRegs(fmacwpos_off, ialuwpos_off);
+			emitReloadFmaccountReg(fmaccount_off);
+			emitReloadFlagRegs(macflag_off, statusflag_off, clipflag_off);
+			emitReloadAccReg(acc_off);
+		}
+#endif
 
 		pc = (pc + 8) & (VU1_PROGSIZE - 1);
 	}

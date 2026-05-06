@@ -108,6 +108,38 @@
 //#define VU0_SHADOW_VERIFY_FROM_CYCLE 24148000000ULL
 //#define VU0_SHADOW_VERIFY_TO_CYCLE   24148999999ULL
 
+// Diagnostic: VU1 shadow-compare. Mirrors the VU0 design — pre-pair snapshot
+// of VURegs+VU1.Mem(16KB), post-pair restore + interp re-run via vu1Exec,
+// field-by-field compare, halt-on-first-divergence with state dump and
+// native backtrace. Use this to validate Phase-2-deferred-VF-write attempts
+// or any other JIT-body change suspected of producing wrong per-pair output.
+//
+// Constraints:
+//   - MUST run with THREAD_VU1 = false (MTVU off). The harness re-runs
+//     interp on the same thread that ran JIT; under MTVU the comparison
+//     would race with cross-thread state mutations.
+//   - XGKICK pairs are SKIPPED — re-running interp would duplicate GIF
+//     writes. Tradeoff: vertex-upload pairs aren't validated by the harness.
+//   - Hazard-fallback pairs (VF/CLIP read-after-write that go through
+//     vu1Exec) are NOT verified — interp result trivially equals JIT.
+//   - Slows VU1 emulation drastically. Debug-only.
+//
+// Recommended workflow when chasing a Phase-2 deferred-write coherence bug:
+//   1. Set EmuConfig.Speedhacks.vuThread = false (MTVU off) in your run.
+//   2. Rebuild with VU1_SHADOW_VERIFY defined.
+//   3. Reproduce the symptom. The harness aborts on the first per-pair
+//      divergence and dumps PRE / JIT / INTERP state for the offending pair.
+//   4. The first divergent field maps to the JIT bug (e.g. VF[N] mismatch
+//      → wrong writeback for that pair's upper op).
+//#define VU1_SHADOW_VERIFY
+
+// Cycle-window gate for VU1_SHADOW_VERIFY. Same shape as the VU0 version —
+// snapshot and compare are emitted unconditionally; the runtime gate inside
+// vu1_shadow_verify skips the vu1Exec re-run + memcmp when VU1.cycle is
+// outside [FROM, TO]. Use to bypass long init/menu boots when reproducing.
+//#define VU1_SHADOW_VERIFY_FROM_CYCLE 0ULL
+//#define VU1_SHADOW_VERIFY_TO_CYCLE   0ULL
+
 // Diagnostic: TPC-range fallback bisection. Pairs whose pc falls in
 // [INTERP_VU0_PC_LOW, INTERP_VU0_PC_HIGH] route to vu0Exec; others go
 // through the native JIT body. Use to BINARY-SEARCH a buggy pair when

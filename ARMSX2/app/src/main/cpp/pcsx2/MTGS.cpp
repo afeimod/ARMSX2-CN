@@ -463,8 +463,12 @@ void MTGS::MainLoop()
 					if (!vu1Thread.semaXGkick.TryWait())
 					{
 						mtvu_lock.unlock();
-						// Wait for MTVU to complete vu1 program
-						vu1Thread.semaXGkick.Wait();
+						// Wait for MTVU to complete vu1 program. Adaptive
+						// spin-before-block: under heavy MTVU traffic, MTVU
+						// usually finishes within microseconds — skip the
+						// futex syscall when possible (perfape data showed
+						// ~27% MTVU thread time was in sem_wait→futex).
+						vu1Thread.semaXGkick.WaitWithSpin();
 						mtvu_lock.lock();
 					}
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];

@@ -270,6 +270,21 @@ namespace Threading
 				m_sema.Wait();
 		}
 
+		/// Adaptive spin-before-block. Same semantics as Wait(), but spends up
+		/// to SPIN_TIME_NS in a userspace busy-wait checking the counter
+		/// before falling back to the kernel sema. Designed for high-frequency
+		/// producer-consumer pairs where the producer typically posts within
+		/// microseconds of the consumer's wait — avoids the futex syscall on
+		/// the common case (perf data showed ~27% of MTVU thread time was
+		/// inside `syscall` for sem_wait → futex).
+		///
+		/// Implementation note: peek-and-CAS BEFORE the fetch_sub, so a
+		/// successful spin acquisition doesn't race with concurrent Posts the
+		/// way a fetch_sub-then-rollback would. If the spin window expires
+		/// without seeing a positive counter, fall through to the same code
+		/// path as Wait() (fetch_sub + m_sema.Wait()).
+		void WaitWithSpin();
+
 		bool TryWait()
 		{
 			int32_t counter = m_counter.load(std::memory_order_relaxed);
