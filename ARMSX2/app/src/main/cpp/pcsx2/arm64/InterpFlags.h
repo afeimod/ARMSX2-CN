@@ -58,6 +58,31 @@
 // entry (measurable cost on linked-chain entries), so keep off unless profiling.
 //#define VU1_PROFILE_BLOCKS
 
+// EXPERIMENT: force cpuRegs.cycle writeback to memory at every EE block-end
+// iBranchTest path (both linked and unlinked exits). Native EE branches keep
+// cycle as a delta in RCYCLE (x19); cpuRegs.cycle in memory only updates when
+// DispatcherEvent fires (event budget exhausted). On long direct-B linked
+// chains, that's many blocks of stale memory — async hardware (VU1, GIF,
+// MTGS) reading cpuRegs.cycle through the EE↔VU1 handshake sees an outdated
+// "now" and may decide nothing's due, even when work has piled up.
+//
+// armBranchCallInterpreter (used under INTERP_BRANCH) writes cycle to memory
+// AND sets nec=cycle, forcing event dispatch on the very next iBranchTest.
+// armCallInterpreter (used under INTERP_LOAD) writes cycle to memory before
+// each BL. Either flag alone restores enough cycle-coherence to unblock
+// async work.
+//
+// Hypothesis under test: Crash Twinsanity main-menu ocean water requires
+// either INTERP_BRANCH or INTERP_LOAD enabled to render. With both native,
+// the water vanishes (Cortex floats in nothing). Theory: the EE↔VU1 hand-
+// shake that triggers ocean upload reads cpuRegs.cycle and decides "no work"
+// because RCYCLE-in-register hasn't been flushed.
+//
+// Add: 3 insns (Ldr nec / Add cycle = nec+RCYCLE / Str cycle) at every block
+// end. Roughly +1-2% block-end overhead. Toggle in CompileBlock-ish path.
+//#define EE_FORCE_CYCLE_FLUSH
+
+
 // Diagnostic: shadow-compare every native VU0 pair against a parallel
 // _vu0Exec interp run on a snapshot of VU0 state. Logs the first divergent
 // field per pair (jit value vs interp value + pc) to Console.Error. Fires

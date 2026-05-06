@@ -1393,6 +1393,14 @@ void emitEELinkableExit(u32 target_pc)
 	const u32 cycles = scaleblockcycles();
 	armAsm->Adds(RCYCLE, RCYCLE, cycles);
 
+#ifdef EE_FORCE_CYCLE_FLUSH
+	// Flush cpuRegs.cycle = nec + RCYCLE before the patched B. Async hardware
+	// (VU1/MTGS/GIF) reads cpuRegs.cycle through the handshake; without this,
+	// long direct-B chains can leave it stale across many blocks. See
+	// InterpFlags.h for the rationale.
+	armWritebackCycle();
+#endif
+
 	a64::Label event_path;
 	armAsm->B(&event_path, a64::pl);
 
@@ -1451,6 +1459,11 @@ static void iBranchTest(u32 newpc)
 		// branches that didn't split their exits, JR/JALR, syscalls)
 		// or suppressed it (WaitLoop's event-only exit).
 		armAsm->Adds(RCYCLE, RCYCLE, cycles);
+#ifdef EE_FORCE_CYCLE_FLUSH
+		// Flush cpuRegs.cycle to memory before dispatch — see comment in
+		// emitEELinkableExit and InterpFlags.h for the rationale.
+		armWritebackCycle();
+#endif
 		armEmitCondBranch(a64::mi, DispatcherReg); // N=1: still have budget
 		armEmitJmp(DispatcherEvent);               // fall through: event due
 	}

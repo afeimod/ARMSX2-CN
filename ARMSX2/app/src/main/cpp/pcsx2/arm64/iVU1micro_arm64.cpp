@@ -4642,8 +4642,30 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// branch just reached 0: set TPC = branchpc
 			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, branchpc_off));
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, tpc_off));
-			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1Call(reinterpret_cast<const void*>(vu1HandleDelayBranch));
+			// Inline of vu1HandleDelayBranch (4-line C body that doesn't read
+			// or write VU->cycle and doesn't touch VF/VI memory). Saves the
+			// BL+vfCacheFlushAndInvalidate+viCacheInvalidateAll cost — the
+			// cache tracker reset matters too: keeping the trackers live lets
+			// downstream emit reuse cached VF/VI values across the branch
+			// handoff. Hits whenever a delay-slot branch retires.
+			//
+			// C reference (iVU1micro_arm64.cpp:987):
+			//   if (VU->takedelaybranch) {
+			//       VU->branch          = 1;
+			//       VU->branchpc        = VU->delaybranchpc;
+			//       VU->takedelaybranch = false;
+			//   }
+			const int64_t takedelaybranch_off = (int64_t)offsetof(VURegs, takedelaybranch);
+			const int64_t delaybranchpc_off   = (int64_t)offsetof(VURegs, delaybranchpc);
+			Label hdb_skip;
+			armAsm->Ldrb(w4, MemOperand(VU1_BASE_REG, takedelaybranch_off));
+			armAsm->Cbz(w4, &hdb_skip);
+			armAsm->Mov(w4, 1);
+			armAsm->Str(w4, MemOperand(VU1_BASE_REG, branch_off));
+			armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, delaybranchpc_off));
+			armAsm->Str(w4, MemOperand(VU1_BASE_REG, branchpc_off));
+			armAsm->Strb(wzr, MemOperand(VU1_BASE_REG, takedelaybranch_off));
+			armAsm->Bind(&hdb_skip);
 			armAsm->Bind(&skip_branch);
 		}
 
