@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">ARMSX2</string>
-    <string name="app_name_tv">ARMSX2 for Android TV</string>
-    <string name="app_name_desktop">ARMSX2 for Desktop</string>
-    <string name="controller_mapping_button">Edit Controller Mapping</string>
-    <string name="controller_mapping_title">Controller Mapping</string>
+    <string name="app_name_tv">ARMSX2 Android TV-re</string>
+    <string name="app_name_desktop">ARMSX2 asztali gépre</string>
+    <string name="controller_mapping_button">Kontroller gombfunkció kiosztás szerkesztése</string>
+    <string name="controller_mapping_title">Kontroller gombfunkció kiosztás</string>
     <string name="controller_mapping_instruction">Select an action to rebind. When prompted, press the new controller button.</string>
     <string name="controller_mapping_rebind">Rebind</string>
     <string name="controller_mapping_clear">Clear</string>
