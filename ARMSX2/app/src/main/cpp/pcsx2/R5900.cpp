@@ -436,8 +436,24 @@ __fi void _cpuEventTest_Shared()
 	CpuVU1->ExecuteBlock();
 
 	// ---- Schedule Next Event Test --------------
-	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
-	const int nextIopEventDeta = ((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier);
+	// Hot path: PS2 mode has PSXCLK=36864000 fixed, so PS2CLK/PSXCLK is exactly
+	// 8 — encode as shift to skip the per-event u32→float conversion + float
+	// division + truncate. PS1 mode (PSXCLK=33868800, set via SBUS_F240 write
+	// in HwWrite.cpp) keeps the precise float path so the IOP↔EE ratio matches
+	// R3000AInterpreter.cpp's PS1 path (cnum=1280/cdenom=147). Mirrors the
+	// old armsx2 port's Android fast-path but gated on PSXCLK so PS1 stays
+	// correct. _cpuEventTest_Shared is 8–10% of CPU at BIOS idle.
+	const s32 iopDelta = static_cast<s32>(psxRegs.iopNextEventCycle - psxRegs.cycle);
+	s32 nextIopEventDeta;
+	if (PSXCLK == 36864000) [[likely]]
+	{
+		nextIopEventDeta = iopDelta << 3;
+	}
+	else
+	{
+		const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+		nextIopEventDeta = static_cast<s32>(iopDelta * mutiplier);
+	}
 	// 8 or more cycles behind and there's an event scheduled
 	if (EEsCycle >= nextIopEventDeta)
 	{
@@ -450,7 +466,7 @@ __fi void _cpuEventTest_Shared()
 	else
 	{
 		// Otherwise IOP is caught up/not doing anything so we can wait for the next event.
-		cpuSetNextEventDelta(((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier) - EEsCycle);
+		cpuSetNextEventDelta(nextIopEventDeta - EEsCycle);
 	}
 
 	// Apply vsync and other counter nextCycles

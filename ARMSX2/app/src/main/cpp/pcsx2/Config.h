@@ -984,10 +984,15 @@ struct Pcsx2Config
 		static constexpr s32 MAX_VOLUME = 200;
 #ifdef __ANDROID__
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
+		// SoundTouch TDStretch::calcCrossCorrAccumulate is the scalar fallback on
+		// arm64 (no NEON impl shipped) and burned 11% of total CPU at BIOS idle
+		// (bios-baseline.txt). Default mobile to Disabled so audio is a direct
+		// passthrough; users can flip back to TimeStretch in the overlay.
+		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::Disabled;
 #else
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Cubeb;
-#endif
 		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
+#endif
 
 		static std::optional<SPU2SyncMode> ParseSyncMode(const char* str);
 		static const char* GetSyncModeName(SPU2SyncMode backend);

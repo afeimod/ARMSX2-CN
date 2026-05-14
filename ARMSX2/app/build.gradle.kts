@@ -78,6 +78,11 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
+    buildFeatures {
+        // Generated BuildConfig.DEBUG used by Main.kt's debug-only auto-boot
+        // path. AGP 8 made this opt-in.
+        buildConfig = true
+    }
 }
 
 // Android Studio's "Build > Clean Project" runs the `clean` task, but AGP

@@ -175,8 +175,21 @@ __fi void PSX_INT( IopEventId n, s32 ecycle )
 	psxRegs.eCycle[n] = ecycle;
 
 	psxSetNextBranchDelta(ecycle);
-	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
-	const s32 iopDelta = (psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier;
+	// PS2 mode (PSXCLK=36864000) → ratio is exactly 8, shift instead of float
+	// div + cvt. PS1 mode (PSXCLK=33868800) keeps the precise path. See
+	// matching gate in R5900.cpp _cpuEventTest_Shared and the
+	// armsx2_ps1_mode_pacing_audit memo for PS1 mode pacing.
+	const s32 iopDeltaRaw = static_cast<s32>(psxRegs.iopNextEventCycle - psxRegs.cycle);
+	s32 iopDelta;
+	if (PSXCLK == 36864000) [[likely]]
+	{
+		iopDelta = iopDeltaRaw << 3;
+	}
+	else
+	{
+		const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+		iopDelta = static_cast<s32>(iopDeltaRaw * mutiplier);
+	}
 
 	if (psxRegs.iopCycleEE < iopDelta)
 	{

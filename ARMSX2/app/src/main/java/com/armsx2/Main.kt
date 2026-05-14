@@ -579,6 +579,12 @@ class Main: ComponentActivity() {
      *  per process. */
     private var emucoreInitDone = false
 
+    /** Latch for the debug-build auto-boot-to-BIOS path. Fires once per
+     *  process from kickoffEmucoreInit's tail so JIT tests finish first,
+     *  then runs startBios() with no game disc. Used for perfape baseline
+     *  captures without manually tapping the BIOS card. */
+    private var autoBootBiosFired = false
+
     /**
      * Run the heavy one-shot emucore init (asset copy + EmuFolders +
      * SDL/HID setup + EE/VIF JIT-test prelude). MUST be called only
@@ -636,6 +642,16 @@ class Main: ComponentActivity() {
             NativeApp.runEeJitTests()
             NativeApp.runEeSeqTests()
             NativeApp.runVifTests()
+
+            // Debug-build auto-boot to BIOS. Lets us drop straight into the
+            // BIOS shell on app launch for perfape baseline captures —
+            // skips tapping through GamesList. One-shot via latch so
+            // re-entering Setup and back doesn't relaunch.
+            if (BuildConfig.DEBUG && !autoBootBiosFired &&
+                eState.value == EmuState.STOPPED) {
+                autoBootBiosFired = true
+                startBios()
+            }
         }
     }
 
