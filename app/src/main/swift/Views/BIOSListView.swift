@@ -21,8 +21,12 @@ struct BIOSListView: View {
                             biosRow(bios)
                         }
                     }
+#if targetEnvironment(macCatalyst)
+                    .listStyle(.inset)
+#endif
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle("BIOS")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -103,6 +107,7 @@ struct BIOSListView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func loadBIOSes() {

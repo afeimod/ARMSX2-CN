@@ -46,6 +46,29 @@ struct MenuTabView: View {
     @State private var selectedTab = 0
 
     var body: some View {
+#if targetEnvironment(macCatalyst)
+        VStack(spacing: 0) {
+            CatalystMenuTabBar(selectedTab: $selectedTab)
+                .padding(.top, 8)
+                .padding(.bottom, 8)
+
+            Group {
+                switch selectedTab {
+                case 0:
+                    GameListView()
+                case 1:
+                    BIOSListView()
+                case 2:
+                    HelpView()
+                default:
+                    SettingsRootView()
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .tint(.blue)
+#else
         TabView(selection: $selectedTab) {
             GameListView()
                 .tabItem {
@@ -74,5 +97,51 @@ struct MenuTabView: View {
             .tag(3)
         }
         .tint(.blue)
+#endif
     }
 }
+
+#if targetEnvironment(macCatalyst)
+private struct CatalystMenuTabBar: View {
+    @Binding var selectedTab: Int
+
+    private let tabs = [
+        (0, "Games"),
+        (1, "BIOS"),
+        (2, "Help"),
+        (3, "Settings"),
+    ]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(tabs, id: \.0) { tab in
+                Button {
+                    selectedTab = tab.0
+                } label: {
+                    Text(tab.1)
+                        .font(.callout)
+                        .fontWeight(selectedTab == tab.0 ? .semibold : .regular)
+                        .foregroundStyle(.primary)
+                        .frame(minWidth: 82)
+                        .padding(.vertical, 6)
+                        .background {
+                            if selectedTab == tab.0 {
+                                Capsule()
+                                    .fill(Color.primary.opacity(0.12))
+                            }
+                        }
+                }
+                .buttonStyle(.plain)
+
+                if tab.0 != tabs.last?.0 {
+                    Divider()
+                        .frame(height: 20)
+                }
+            }
+        }
+        .padding(4)
+        .background(.regularMaterial, in: Capsule())
+        .shadow(color: .black.opacity(0.08), radius: 18, y: 8)
+    }
+}
+#endif

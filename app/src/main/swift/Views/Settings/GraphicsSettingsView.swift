@@ -11,13 +11,21 @@ struct GraphicsSettingsView: View {
             Section("Renderer") {
                 Picker("Renderer", selection: $settings.renderer) {
                     Text("Metal (Hardware)").tag(17)
+#if !targetEnvironment(macCatalyst)
                     Text("OpenGL ES (Experimental)").tag(12)
                     Text("Software").tag(13)
                     Text("Null (No Output)").tag(11)
+#endif
                 }
+#if targetEnvironment(macCatalyst)
+                Text("Metal is required for the Mac Catalyst build. Requires restart.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+#else
                 Text("Metal is recommended. OpenGL ES is experimental. Software is slow but accurate. Null disables rendering. Requires restart.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+#endif
             }
 
             Section("Upscaling") {

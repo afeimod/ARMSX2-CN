@@ -41,8 +41,12 @@ struct GameListView: View {
                             gameRow(game)
                         }
                     }
+#if targetEnvironment(macCatalyst)
+                    .listStyle(.inset)
+#endif
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle("Games")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -220,6 +224,7 @@ struct GameListView: View {
             .buttonStyle(.borderedProminent)
         }
         .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private func loadGames() {

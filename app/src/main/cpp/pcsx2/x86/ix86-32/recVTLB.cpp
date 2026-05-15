@@ -6,6 +6,7 @@
 #include "x86/iCore.h"
 #include "x86/iR5900.h"
 
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Perf.h"
 
 using namespace vtlb_private;
@@ -420,9 +421,16 @@ void vtlb_DynGenDispatchers()
     }
 
     Perf::any.Register(m_IndirectDispatchers, __pagesize, "TLB Dispatcher");
+#if ARMSX2_APPLE_MAC_RUNTIME
+	{
+		HostSys::AutoCodeWrite code_write(code_start, INDIRECT_DISPATCHERS_SIZE);
+		std::memcpy(code_start, m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
+	}
+#else
     //// copy code
     memcpy(code_start, m_IndirectDispatchers, INDIRECT_DISPATCHERS_SIZE);
     ////
+#endif
     armSetAsmPtr(code_start + INDIRECT_DISPATCHERS_SIZE, INDIRECT_DISPATCHERS_SIZE, nullptr);
     armStartBlock();
 }
@@ -1264,5 +1272,8 @@ void vtlb_DynBackpatchLoadStore(uptr code_address, u32 code_size, u32 guest_pc, 
 	// backpatch to a jump to the slowmem handler
 //	x86Ptr = (u8*)code_address;
 //	xJMP(thunk);
+#if ARMSX2_APPLE_MAC_RUNTIME
+	HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(code_address), sizeof(u32));
+#endif
     armEmitJmpPtr((void*)code_address, thunk, true);
 }

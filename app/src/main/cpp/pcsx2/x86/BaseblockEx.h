@@ -7,6 +7,10 @@
 #include <map>
 
 #include "common/Assertions.h"
+#include "common/Darwin/ApplePlatform.h"
+#if ARMSX2_APPLE_MAC_RUNTIME
+#include "common/HostSys.h"
+#endif
 #include "arm64/VixlHelpers.h"
 
 // Every potential jump point in the PS2's addressable memory has a BASEBLOCK
@@ -205,6 +209,9 @@ public:
 			//u32 startpc = blocks[idx].startpc;
 			auto range = links.equal_range(blocks[idx].startpc);
 			for (auto i = range.first; i != range.second; ++i) {
+#if ARMSX2_APPLE_MAC_RUNTIME
+				HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(i->second), sizeof(u32));
+#endif
 //                *(u32 *) i->second = recompiler - (i->second + 4);
                 armEmitJmpPtr((void*)i->second, (void*)recompiler, true);
             }
@@ -217,6 +224,9 @@ public:
 				// both of which expect to be able to return to the recompiled code.
 
 				BASEBLOCKEX effu(blocks[idx]);
+#if ARMSX2_APPLE_MAC_RUNTIME
+				HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(effu.fnptr), 1);
+#endif
 				memset((void*)effu.fnptr, 0xcc, 1);
 			}
 		} while (idx++ < last);

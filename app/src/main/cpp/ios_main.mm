@@ -61,6 +61,7 @@ struct rc_client_t;
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #include <mach-o/dyld.h>
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Darwin/DarwinMisc.h" // For ARMSX2_CRASH_DIAG
 
 static void ARMSX2UncaughtExceptionHandler(NSException *exception)
@@ -85,7 +86,11 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 static int g_iosRendererForView = static_cast<int>(GSRendererType::Metal);
 @implementation ARMSX2GameView
 + (Class)layerClass {
+#if ARMSX2_APPLE_MAC_RUNTIME
+    return [CAMetalLayer class];
+#else
     return (g_iosRendererForView == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
+#endif
 }
 - (void)layoutSubviews {
     [super layoutSubviews];
@@ -94,11 +99,14 @@ static int g_iosRendererForView = static_cast<int>(GSRendererType::Metal);
         CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
         mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
                                       self.bounds.size.height * scale);
-    } else if ([self.layer isKindOfClass:[CAEAGLLayer class]]) {
+    }
+#if !ARMSX2_APPLE_MAC_RUNTIME
+    else if ([self.layer isKindOfClass:[CAEAGLLayer class]]) {
         CAEAGLLayer *eagl = (CAEAGLLayer *)self.layer;
         eagl.contentsScale = scale;
         eagl.opaque = YES;
     }
+#endif
     int w = (int)(self.bounds.size.width * scale);
     int h = (int)(self.bounds.size.height * scale);
     float s = (float)scale;
@@ -187,6 +195,8 @@ extern "C" void LogUnified(const char* fmt, ...) {
 
 // -- Host Implementation Start --
 
+static UIWindow* g_hostWindow = nil;
+
 namespace Host
 {
     SDL_Window* g_sdl_window = nullptr;
@@ -230,19 +240,20 @@ namespace Host
     u32 GetDisplayRefreshRate() { return 60; }
     std::optional<WindowInfo> AcquireRenderWindow(bool recreate_window) {
         Console.WriteLn("Host::AcquireRenderWindow(recreate=%d) called.", recreate_window);
-        if (!g_sdl_window) {
-            Console.Error("Host::AcquireRenderWindow: g_sdl_window is NULL");
-            return std::nullopt;
-        }
 
         __block WindowInfo wi = {};
         wi.type = WindowInfo::Type::iOS;
 
         // SDL calls that interact with UIKit must run on the main thread
         dispatch_sync(dispatch_get_main_queue(), ^{
-            // SDL3 properties for UIKit
-            SDL_PropertiesID props = SDL_GetWindowProperties(g_sdl_window);
-            UIWindow* window = (__bridge UIWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+            UIWindow* window = g_hostWindow;
+            if (!window && g_sdl_window) {
+                SDL_PropertiesID props = SDL_GetWindowProperties(g_sdl_window);
+                window = (__bridge UIWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+            }
+            if (!window && g_gameRenderView.window) {
+                window = g_gameRenderView.window;
+            }
 
             if (window) {
 // Use dedicated game render view if available (sized for portrait)
@@ -261,17 +272,13 @@ namespace Host
 
 // Get render size from the actual render view
             UIView* renderView = (__bridge UIView*)wi.window_handle;
-            CGFloat scale = renderView.contentScaleFactor;
+            CGFloat scale = renderView.window.screen.scale ?: renderView.contentScaleFactor;
             wi.surface_width = static_cast<u32>(renderView.bounds.size.width * scale);
             wi.surface_height = static_cast<u32>(renderView.bounds.size.height * scale);
-            wi.surface_scale = SDL_GetWindowDisplayScale(g_sdl_window);
+            wi.surface_scale = scale;
 
-            SDL_DisplayID display = SDL_GetDisplayForWindow(g_sdl_window);
-            const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
-            if (mode)
-                wi.surface_refresh_rate = mode->refresh_rate;
-            else
-                wi.surface_refresh_rate = 60.0f;
+            UIScreen* screen = window ? window.windowScene.screen : renderView.window.screen;
+            wi.surface_refresh_rate = screen ? static_cast<float>(screen.maximumFramesPerSecond) : 60.0f;
         });
 
         Console.WriteLn("Host::AcquireRenderWindow: Returning WindowInfo (Type=%d, View=%p, Size=%ux%u, Scale=%.2f)",
@@ -285,6 +292,8 @@ namespace Host
     void OnVMResumed() {}
     void OnVMStarted() {}
     void OnVMStarting() {}
+    void SetDefaultUISettings(SettingsInterface&) {}
+    void RequestResizeHostDisplay(s32, s32) {}
     void EndTextInput() {}
     bool IsFullscreen() { return true; }
     void SetMouseMode(bool, bool) {}
@@ -555,7 +564,12 @@ namespace FileSystem {
 namespace CocoaTools {
     void InhibitAppNap(const std::string&) {}
     void UninhibitAppNap() {}
-    std::string GetBundlePath() { return [[NSBundle mainBundle].bundlePath UTF8String]; }
+    std::optional<std::string> GetBundlePath() { return std::string([[NSBundle mainBundle].bundlePath UTF8String]); }
+    std::optional<std::string> GetNonTranslocatedBundlePath() { return GetBundlePath(); }
+    std::optional<std::string> GetResourcePath() {
+        NSString* path = [[NSBundle mainBundle] resourcePath];
+        return path ? std::optional<std::string>(std::string([path UTF8String])) : std::nullopt;
+    }
 
     void* CreateMetalLayer(WindowInfo* wi) {
         if (!Host::g_sdl_window) return nullptr;
@@ -625,6 +639,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 static int ARMSX2GetConfiguredRendererForView()
 {
     const int fallback = static_cast<int>(GSRendererType::Metal);
+#if ARMSX2_APPLE_MAC_RUNTIME
+    return fallback;
+#endif
     const int renderer = s_settings_interface ?
         s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", fallback) :
         fallback;
@@ -643,9 +660,16 @@ static int ARMSX2GetConfiguredRendererForView()
 static void ARMSX2PrepareGameRenderViewForRendererOnMain(int renderer, const char* reason)
 {
     (void)reason;
+#if ARMSX2_APPLE_MAC_RUNTIME
+    renderer = static_cast<int>(GSRendererType::Metal);
+#endif
     g_iosRendererForView = renderer;
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+    Class expectedLayer = [CAMetalLayer class];
+#else
     Class expectedLayer = (renderer == static_cast<int>(GSRendererType::OGL)) ? [CAEAGLLayer class] : [CAMetalLayer class];
+#endif
     if (g_gameRenderView && [g_gameRenderView.layer isKindOfClass:expectedLayer]) {
         return;
     }
@@ -729,7 +753,12 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
     if (!si)
         return;
 
-    const bool interpreter_requested = si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || DarwinMisc::IsNoJitModeActive();
+    const bool interpreter_requested =
+#if ARMSX2_APPLE_MAC_RUNTIME
+        false;
+#else
+        si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || DarwinMisc::IsNoJitModeActive();
+#endif
     if (interpreter_requested) {
         DarwinMisc::ForceNoJitMode();
         si->SetIntValue("EmuCore/CPU", "CoreType", 1);
@@ -741,6 +770,15 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
         si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", false);
         si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEECache", false);
     } else {
+#if ARMSX2_APPLE_MAC_RUNTIME
+        si->SetIntValue("EmuCore/CPU", "CoreType", 2);
+        si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
+        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+        si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+#else
         if (!si->ContainsValue("EmuCore/CPU", "CoreType"))
             si->SetIntValue("EmuCore/CPU", "CoreType", 2);
         if (!si->ContainsValue("EmuCore/CPU", "UseArm64Dynarec"))
@@ -755,11 +793,15 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
             si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
         if (!si->ContainsValue("EmuCore/CPU/Recompiler", "EnableFastmem"))
             si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+#endif
     }
     si->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
     si->SetBoolValue("EmuCore/CPU", "ExtraMemory", false);
 
     si->SetStringValue("SPU2/Output", "Backend", "SDL");
+#if ARMSX2_APPLE_MAC_RUNTIME
+    si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+#else
     const int configured_renderer = si->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
     switch (static_cast<GSRendererType>(configured_renderer)) {
         case GSRendererType::Metal:
@@ -772,6 +814,7 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
             si->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
             break;
     }
+#endif
     si->SetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2");
     si->SetStringValue("EmuCore/GS", "FMVAspectRatioSwitch", "Off");
     ARMSX2ClampINIInt(si, "EmuCore/GS", "VsyncQueueSize", 2, 0, 8);
@@ -787,7 +830,11 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
 
 static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+    return false;
+#else
     return DarwinMisc::IsNoJitModeActive() || (si && si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1);
+#endif
 }
 
 //
@@ -880,6 +927,10 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     } else
 #endif
     {
+#if ARMSX2_APPLE_MAC_RUNTIME
+        EmuConfig.GS.Renderer = GSRendererType::Metal;
+        s_settings_interface->SetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
+#else
         const int renderer_value = s_settings_interface->GetIntValue("EmuCore/GS", "Renderer", static_cast<int>(GSRendererType::Metal));
         switch (static_cast<GSRendererType>(renderer_value)) {
             case GSRendererType::Metal:
@@ -892,6 +943,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 EmuConfig.GS.Renderer = GSRendererType::Metal;
                 break;
         }
+#endif
     }
     g_iosRendererForView = static_cast<int>(EmuConfig.GS.Renderer);
     s_settings_interface->Save();
@@ -915,6 +967,15 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
         @throw;
     }
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+    UIViewController* catalystRootVC = [[UIViewController alloc] init];
+    catalystRootVC.view.backgroundColor = [UIColor systemGroupedBackgroundColor];
+    UIWindow *uiWindow = [[UIWindow alloc] initWithWindowScene:windowScene];
+    uiWindow.rootViewController = catalystRootVC;
+    if (windowScene.sizeRestrictions) {
+        windowScene.sizeRestrictions.minimumSize = CGSizeMake(900.0, 600.0);
+    }
+#else
     // --- Create SDL Window ---
     SDL_WindowFlags window_flags = SDL_WINDOW_RESIZABLE;
     if (EmuConfig.GS.Renderer != GSRendererType::OGL)
@@ -927,10 +988,12 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 
     // --- Attach UIWindow ---
     UIWindow *uiWindow = (__bridge UIWindow*)SDL_GetPointerProperty(SDL_GetWindowProperties(Host::g_sdl_window), SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
+#endif
     if (uiWindow) {
         Console.WriteLn("Attaching UIWindow to Scene...");
         uiWindow.windowScene = windowScene;
         self.window = uiWindow;
+        g_hostWindow = uiWindow;
         self.window.backgroundColor = [UIColor systemGroupedBackgroundColor];
         [self.window makeKeyAndVisible];
 
@@ -997,11 +1060,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
         Console.WriteLn("[UI] VM boot requested from UI (rootVC=%p)", s_rootVC);
         ARMSX2PrepareGameRenderViewForCurrentRenderer("vm_boot_request");
         if (s_rootVC) s_rootVC.view.backgroundColor = [UIColor blackColor];
-#if TARGET_OS_SIMULATOR
-        [self startVMThread];
-#else
         [self checkJITAndStartVM];
-#endif
     }];
 
     [[NSNotificationCenter defaultCenter] addObserverForName:@"ARMSX2iOSRequestVMShutdown"
@@ -1056,11 +1115,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 #else
     // Fallback: no SwiftUI — auto-boot like before
     if (!EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
-#if TARGET_OS_SIMULATOR
-        [self startVMThread];
-#else
         [self checkJITAndStartVM];
-#endif
     } else {
         Console.Warning("No valid BIOS found. Showing selection UI.");
         if (self.startBiosButton) {
@@ -1268,12 +1323,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             self.startBiosButton.hidden = YES;
         });
 
-#if TARGET_OS_SIMULATOR
-        [self startVMThread];
-#else
         [self checkJITAndStartVM];
-#endif
-
     } else {
         Console.Error("Failed to import BIOS: %s", [[error localizedDescription] UTF8String]);
         Host::ReportErrorAsync("Import Failed", [[error localizedDescription] UTF8String]);
@@ -1283,7 +1333,7 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 // JIT availability check for real device — fallback to Interpreter if JIT unavailable
 // CS_DEBUGGED check only (DolphiniOS approach) — no blocking, runs on main thread
 - (void)checkJITAndStartVM {
-#if !TARGET_OS_SIMULATOR
+#if ARMSX2_APPLE_IOS_DEVICE
     if (ARMSX2IOSInterpreterRequested(s_settings_interface)) {
         DarwinMisc::ForceNoJitMode();
         if (s_settings_interface) {
@@ -1310,7 +1360,18 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     Console.WriteLn("@@JIT_GATE@@ ARMSX2 no-JIT mode forced");
     [self startVMThread];
 #else
-    [self startVMThread];
+    if (DarwinMisc::IsJITAvailable()) {
+        if (s_settings_interface) {
+            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
+            s_settings_interface->Save();
+        }
+        Console.WriteLn("@@JIT_GATE@@ MAP_JIT available — starting VM in JIT mode");
+        [self startVMThread];
+        return;
+    }
+
+    Console.Error("@@JIT_GATE@@ MAP_JIT unavailable — not starting VM");
+    Host::ReportErrorAsync("JIT Unavailable", "MAP_JIT failed. For Mac Catalyst, make sure the build is signed with the allow-jit entitlement.");
 #endif
 }
 

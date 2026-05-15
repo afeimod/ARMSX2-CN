@@ -5,6 +5,7 @@
 #include "common/BitUtils.h"
 #include "common/Console.h"
 #include "common/CrashHandler.h"
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Darwin/DarwinMisc.h"
 #include "common/Error.h"
 #include "common/Pcsx2Types.h"
@@ -42,16 +43,21 @@ extern "C" void pthread_jit_write_protect_np(int enabled);
 #include <mach/task.h>
 #include <mach/vm_map.h>
 #include <mutex>
-#include <TargetConditionals.h>
 
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_UIKIT
 #include <mach/mach_vm.h>
 #include <ApplicationServices/ApplicationServices.h>
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #endif
 
-#if TARGET_OS_IPHONE
+#if ARMSX2_APPLE_UIKIT
 extern "C" {
+    kern_return_t mach_vm_allocate(
+        vm_map_t target,
+        mach_vm_address_t *address,
+        mach_vm_size_t size,
+        int flags);
+
     kern_return_t mach_vm_map(
         vm_map_t target_task,
         mach_vm_address_t *address,
@@ -129,7 +135,7 @@ u64 GetPhysicalMemory()
 
 u64 GetAvailablePhysicalMemory()
 {
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_IOS_DEVICE
 	const mach_port_t host_port = mach_host_self();
 	vm_size_t page_size;
 
@@ -407,9 +413,7 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 	}
 #endif
 
-#include <TargetConditionals.h>
-
-#if TARGET_OS_SIMULATOR
+	#if ARMSX2_APPLE_IOS_SIMULATOR
 	Console.WriteLn("HostSys::Mmap (Simulator): Requesting size 0x%zx, base %p, prot %s%s%s",
 		size, base, mode.CanRead() ? "R" : "", mode.CanWrite() ? "W" : "", mode.CanExecute() ? "X" : "");
 
@@ -429,7 +433,7 @@ void* HostSys::Mmap(void* base, size_t size, const PageProtectionMode& mode)
 		return nullptr;
 	}
 	return base;
-#elif !TARGET_OS_IPHONE
+#elif !ARMSX2_APPLE_IOS_DEVICE
 	kern_return_t ret = mach_vm_allocate(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&base), size,
 		base ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE);
 	if (ret != KERN_SUCCESS)
@@ -464,7 +468,7 @@ void HostSys::Munmap(void* base, size_t size)
 {
 	if (!base)
 		return;
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_IOS_DEVICE
 	mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(base), size);
 #else
 	munmap(base, size);
@@ -516,7 +520,7 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
-#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
 	mach_vm_size_t vm_size = size;
 	mach_port_t port;
 	const kern_return_t res = mach_make_memory_entry_64(
@@ -535,14 +539,14 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_IOS_DEVICE
 	mach_port_deallocate(mach_task_self(), static_cast<mach_port_t>(reinterpret_cast<uintptr_t>(ptr)));
 #endif
 }
 
 void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size_t size, const PageProtectionMode& mode)
 {
-#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
 	int flags = baseaddr ? VM_FLAGS_FIXED : VM_FLAGS_ANYWHERE;
 	mach_vm_address_t ptr = reinterpret_cast<mach_vm_address_t>(baseaddr);
 
@@ -570,7 +574,7 @@ void* HostSys::MapSharedMemory(void* handle, size_t offset, void* baseaddr, size
 
 void HostSys::UnmapSharedMemory(void* baseaddr, size_t size)
 {
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_IOS_DEVICE
 	const kern_return_t res = mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(baseaddr), size);
 	if (res != KERN_SUCCESS)
 		pxFailRel("Failed to unmap shared memory");
@@ -598,7 +602,9 @@ void HostSys::FlushInstructionCache(void* address, u32 size)
 
 #endif
 
+#if ARMSX2_APPLE_IOS_DEVICE
 extern "C" int csops(pid_t pid, unsigned int ops, void* useraddr, size_t usersize);
+#endif
 
 static DarwinMisc::JitMode s_jit_mode = DarwinMisc::JitMode::Simulator;
 static bool s_jit_mode_detected = false;
@@ -611,7 +617,7 @@ static size_t s_legacy_code_size = 0;
 static bool s_legacy_is_writable = true;
 static bool s_legacy_code_dirty = false;
 
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+#if ARMSX2_APPLE_IOS_DEVICE
 static bool HasTXM()
 {
     glob_t g = {};
@@ -625,9 +631,9 @@ static bool HasTXM()
 
 DarwinMisc::JitMode DarwinMisc::DetectJitMode()
 {
-#if TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
     s_jit_mode = JitMode::Simulator;
-#elif TARGET_OS_IPHONE
+#else
     {
         char buf[64] = {};
         size_t len = sizeof(buf);
@@ -640,14 +646,14 @@ DarwinMisc::JitMode DarwinMisc::DetectJitMode()
             s_jit_mode = JitMode::Legacy;
         }
     }
-#else
-    s_jit_mode = JitMode::Simulator;
 #endif
 
+#if ARMSX2_APPLE_IOS_DEVICE
     if (const char* env = getenv("ARMSX2_FORCE_DUAL_MAP")) {
         if (atoi(env) == 1)
             s_jit_mode = JitMode::LuckNoTXM;
     }
+#endif
 
     s_jit_mode_detected = true;
 
@@ -679,11 +685,11 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
         void* res = mmap(nullptr, size, PROT_READ | PROT_WRITE | PROT_EXEC,
                          MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
         if (res == MAP_FAILED) {
-            fprintf(stderr, "@@JIT_ALLOC@@ Simulator MAP_JIT FAIL errno=%d\n", errno);
+            fprintf(stderr, "@@JIT_ALLOC@@ MAP_JIT FAIL errno=%d\n", errno);
             return nullptr;
         }
         g_code_rw_offset = 0;
-        fprintf(stderr, "@@JIT_ALLOC@@ Simulator MAP_JIT OK rx=%p size=0x%zx offset=0\n", res, size);
+        fprintf(stderr, "@@JIT_ALLOC@@ MAP_JIT OK rx=%p size=0x%zx offset=0\n", res, size);
         return res;
     }
 
@@ -817,10 +823,7 @@ void DarwinMisc::MunmapCodeDualMap(void* rx_ptr, size_t size)
 
 bool DarwinMisc::IsJITAvailable()
 {
-#if TARGET_OS_SIMULATOR
-    fprintf(stderr, "@@JIT_DETECT@@ simulator=1 result=AVAILABLE\n");
-    return true;
-#elif TARGET_OS_IPHONE
+#if ARMSX2_APPLE_IOS_DEVICE
     uint32_t cs_flags = 0;
     int rv = csops(getpid(), 0, &cs_flags, sizeof(cs_flags));
     bool cs_debugged = (rv == 0) && (cs_flags & 0x10000000u);
@@ -838,13 +841,24 @@ bool DarwinMisc::IsJITAvailable()
     fprintf(stderr, "@@JIT_DETECT@@ result=AVAILABLE (CS_DEBUGGED set)\n");
     return true;
 #else
+    const size_t probe_size = static_cast<size_t>(getpagesize());
+    void* probe = mmap(nullptr, probe_size, PROT_READ | PROT_WRITE | PROT_EXEC,
+        MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+    if (probe == MAP_FAILED)
+    {
+        fprintf(stderr, "@@JIT_DETECT@@ MAP_JIT probe failed errno=%d\n", errno);
+        return false;
+    }
+
+    munmap(probe, probe_size);
+    fprintf(stderr, "@@JIT_DETECT@@ MAP_JIT probe result=AVAILABLE\n");
     return true;
 #endif
 }
 
 bool DarwinMisc::IsNoJitModeActive()
 {
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+#if ARMSX2_APPLE_IOS_DEVICE
 	if (ARMSX2_FORCE_EE_INTERP != 0)
 		return true;
 	if (ARMSX2_FORCE_JIT != 0)
@@ -857,7 +871,7 @@ bool DarwinMisc::IsNoJitModeActive()
 
 void DarwinMisc::ForceNoJitMode()
 {
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+#if ARMSX2_APPLE_IOS_DEVICE
 	ARMSX2_FORCE_EE_INTERP = 1;
 	ARMSX2_FORCE_JIT = 0;
 	ARMSX2_IOP_CORE_TYPE = 1;
@@ -874,7 +888,7 @@ SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size
 SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
-#if !TARGET_OS_IPHONE
+#if !ARMSX2_APPLE_IOS_DEVICE
 	if (mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(m_base_ptr), m_size) != KERN_SUCCESS)
 		pxFailRel("Failed to release shared memory area");
 #else
@@ -887,7 +901,7 @@ std::unique_ptr<SharedMemoryMappingArea> SharedMemoryMappingArea::Create(size_t 
 {
 	pxAssertRel(Common::IsAlignedPow2(size, __pagesize), "Size is page aligned");
 
-#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
 	mach_vm_address_t alloc = 0;
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), &alloc, size, 0, VM_FLAGS_ANYWHERE,
@@ -912,7 +926,7 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
-#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0, VM_FLAGS_OVERWRITE,
 			static_cast<mach_port_t>(reinterpret_cast<uintptr_t>(file_handle)), file_offset, false,
@@ -962,7 +976,7 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
-#if !TARGET_OS_IPHONE || TARGET_OS_SIMULATOR
+#if !ARMSX2_APPLE_IOS_DEVICE
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0, VM_FLAGS_OVERWRITE,
 			MEMORY_OBJECT_NULL, 0, false, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);

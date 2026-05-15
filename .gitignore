@@ -11,6 +11,7 @@ bun.lockb
 package-lock.json
 build-ios-device/
 build-ios-sim/
+build-maccatalyst/
 
 # OS junk & editor/files
 .DS_Store

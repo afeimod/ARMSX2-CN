@@ -16,6 +16,20 @@ struct HelpItem: Identifiable {
     let answer: String
 }
 
+private enum HelpTopic: Hashable, Identifiable {
+    case item(section: Int, item: Int)
+    case about
+
+    var id: String {
+        switch self {
+        case .item(let section, let item):
+            return "\(section)-\(item)"
+        case .about:
+            return "about"
+        }
+    }
+}
+
 private let helpData: [HelpSection] = [
     HelpSection(title: "Settings Guide", icon: "gearshape", items: [
         HelpItem(
@@ -60,7 +74,42 @@ private let helpData: [HelpSection] = [
 ]
 
 struct HelpView: View {
+#if targetEnvironment(macCatalyst)
+    @State private var selectedTopic: HelpTopic? = .item(section: 0, item: 0)
+#endif
+
     var body: some View {
+#if targetEnvironment(macCatalyst)
+        NavigationSplitView {
+            List(selection: $selectedTopic) {
+                ForEach(helpData.indices, id: \.self) { sectionIndex in
+                    let section = helpData[sectionIndex]
+                    Section {
+                        ForEach(section.items.indices, id: \.self) { itemIndex in
+                            let item = section.items[itemIndex]
+                            Text(item.question)
+                                .tag(HelpTopic.item(section: sectionIndex, item: itemIndex))
+                        }
+                    } header: {
+                        Label(section.title, systemImage: section.icon)
+                    }
+                }
+
+                Section {
+                    Label("Version", systemImage: "info.circle")
+                        .tag(HelpTopic.about)
+                } header: {
+                    Text("About")
+                }
+            }
+            .navigationTitle("Help")
+            .listStyle(.sidebar)
+        } detail: {
+            helpDetail(for: selectedTopic)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .navigationSplitViewStyle(.balanced)
+#else
         NavigationStack {
             List {
                 ForEach(helpData) { section in
@@ -94,6 +143,60 @@ struct HelpView: View {
                 }
             }
             .navigationTitle("Help")
+        }
+#endif
+    }
+
+    @ViewBuilder
+    private func helpDetail(for topic: HelpTopic?) -> some View {
+        switch topic {
+        case .item(let sectionIndex, let itemIndex):
+            let section = helpData[sectionIndex]
+            let item = section.items[itemIndex]
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Label(section.title, systemImage: section.icon)
+                        .font(.headline)
+                        .foregroundStyle(.secondary)
+                    Text(item.question)
+                        .font(.largeTitle)
+                        .fontWeight(.bold)
+                    Text(item.answer)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(32)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
+            .navigationTitle(item.question)
+
+        case .about:
+            Form {
+                Section("App") {
+                    HStack {
+                        Text("Version")
+                        Spacer()
+                        Text(ARMSX2Bridge.buildVersion())
+                            .foregroundStyle(.secondary)
+                            .font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("About")
+
+        case .none:
+            VStack(spacing: 12) {
+                Image(systemName: "questionmark.circle")
+                    .font(.system(size: 42))
+                    .foregroundStyle(.secondary)
+                Text("Select a help topic")
+                    .font(.title2)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 }

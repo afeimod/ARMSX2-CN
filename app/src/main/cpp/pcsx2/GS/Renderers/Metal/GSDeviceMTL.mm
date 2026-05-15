@@ -773,7 +773,7 @@ bool GSDeviceMTL::HasSurface()  const { return static_cast<bool>(m_layer);}
 void GSDeviceMTL::AttachSurfaceOnMainThread()
 {
 	pxAssert([NSThread isMainThread]);
-	m_view = MRCRetain((__bridge NSView*)m_window_info.window_handle);
+	m_view = MRCRetain((__bridge GSMTLView*)m_window_info.window_handle);
 #if TARGET_OS_IPHONE
 	m_layer = MRCRetain((CAMetalLayer*)[m_view layer]);
 	[m_layer setDrawableSize:CGSizeMake(m_window_info.surface_width, m_window_info.surface_height)];

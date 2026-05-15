@@ -7,6 +7,9 @@ BASEBLOCKEX* BaseBlocks::New(u32 startpc, uptr fnptr)
 {
 	std::pair<linkiter_t, linkiter_t> range = links.equal_range(startpc);
 	for (auto i = range.first; i != range.second; ++i) {
+#if ARMSX2_APPLE_MAC_RUNTIME
+		HostSys::AutoCodeWrite code_write(reinterpret_cast<void*>(i->second), sizeof(u32));
+#endif
 //        *(u32 *) i->second = fnptr - (i->second + 4);
         armEmitJmpPtr((void*)(i->second), (void*)fnptr, true);
     }
@@ -61,6 +64,9 @@ BASEBLOCKEX* BaseBlocks::GetByX86(uptr ip)
 
 void BaseBlocks::Link(u32 pc, s32* jumpptr)
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	HostSys::AutoCodeWrite code_write(jumpptr, sizeof(*jumpptr));
+#endif
 	BASEBLOCKEX* targetblock = Get(pc);
 	if (targetblock && targetblock->startpc == pc) {
 //        *jumpptr = (s32) (targetblock->fnptr - (sptr) (jumpptr + 1));
