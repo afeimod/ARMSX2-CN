@@ -131,7 +131,11 @@ void VU_Thread::ExecuteRingBuffer()
 
 	for (;;)
 	{
-		semaEvent.WaitForWork();
+		// Adaptive spin-before-wait: perfape (Ape Escape 3) showed ~27% of
+		// MTVU thread time inside `syscall` for sem_wait → futex. Most EE→
+		// MTVU posts arrive within microseconds of MTVU draining its ring,
+		// so spinning briefly catches them without a futex roundtrip.
+		semaEvent.WaitForWorkWithSpin();
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
 

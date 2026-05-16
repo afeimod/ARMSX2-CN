@@ -8,6 +8,7 @@
 #include "CDVD.h"
 #include "IopHw.h"
 #include "IopDma.h"
+#include "PS1DrvTrace.h"
 
 #include "common/Threading.h"
 
@@ -130,6 +131,8 @@ static __fi int GetCDSpeed()
 
 static __fi void StartReading(u32 type)
 {
+	PS1DRV_LOG_CDROM("StartReading type=%u sect=%02x:%02x:%02x mode=0x%02x prev_reading=%d",
+		type, cdr.SetSector[0], cdr.SetSector[1], cdr.SetSector[2], cdr.Mode, cdr.Reading);
 	cdr.Reading = type;
 	// Read's retry. If there's a status error clear and try, try again
 	cdr.StatP &= ~STATUS_ERROR;
@@ -144,6 +147,8 @@ static __fi void StopReading()
 {
 	if (cdr.Reading)
 	{
+		PS1DRV_LOG_CDROM("StopReading was_reading=%u sect=%02x:%02x:%02x", cdr.Reading,
+			cdr.SetSector[0], cdr.SetSector[1], cdr.SetSector[2]);
 		cdr.Reading = 0;
 		psxRegs.interrupt &= ~(1 << IopEvt_CdromRead);
 	}
@@ -196,8 +201,13 @@ void cdrInterrupt()
 	int i;
 	u8 Irq = cdr.Irq;
 
+	PS1DRV_LOG_CDROM("cdrInterrupt enter irq=0x%02x stat=0x%02x mode=0x%02x reading=%d statP=0x%02x",
+		Irq, cdr.Stat, cdr.Mode, cdr.Reading, cdr.StatP);
+
 	if (cdr.Stat)
 	{
+		PS1DRV_RATE_CDROM("cdrInt-stalled", 0x10000,
+			"cdrInterrupt RESCHEDULE (cdr.Stat=0x%02x not yet ack'd by game)", cdr.Stat);
 		CDR_INT(0x800);
 		return;
 	}
@@ -544,6 +554,9 @@ void cdrInterrupt()
 	if (cdr.Stat != NoIntr && cdr.Reg2 != 0x18)
 		psxHu32(HW_ISTAT) |= 0x4;
 
+	PS1DRV_LOG_CDROM("cdrInterrupt exit irq=0x%02x -> stat=0x%02x reg2=0x%02x ISTAT_set=%d",
+		Irq, cdr.Stat, cdr.Reg2, (cdr.Stat != NoIntr && cdr.Reg2 != 0x18) ? 1 : 0);
+
 	CDVD_LOG("Cdr Interrupt %x\n", Irq);
 }
 
@@ -579,6 +592,8 @@ void cdrReadInterrupt()
 
 	if (cdr.RErr == -1)
 	{
+		PS1DRV_LOG_CDROM("cdrReadInterrupt CD ERROR sect=%02x:%02x:%02x mode=0x%02x — Stat=DiskError, NO ISTAT IRQ fired",
+			cdr.SetSector[0], cdr.SetSector[1], cdr.SetSector[2], cdr.Mode);
 		DevCon.Warning("CD err");
 		std::memset(cdr.Transfer, 0, sizeof(cdr.Transfer));
 		cdr.Stat = DiskError;
@@ -610,6 +625,8 @@ void cdrReadInterrupt()
 
 	if ((cdr.Transfer[4 + 2] & 0x80) && (cdr.Mode & 0x2))
 	{ // EOF
+		PS1DRV_LOG_CDROM("cdrReadInterrupt EOF detected sect=%02x:%02x:%02x submode=0x%02x mode=0x%02x — AutoPause queued",
+			cdr.SetSector[0], cdr.SetSector[1], cdr.SetSector[2], cdr.Transfer[4 + 2], cdr.Mode);
 		DevCon.Warning("CD AutoPausing Read");
 		AddIrqQueue(CdlPause, 0x800);
 	}

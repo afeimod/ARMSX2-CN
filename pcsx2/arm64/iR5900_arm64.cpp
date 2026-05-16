@@ -65,7 +65,7 @@ int g_branch;
 
 alignas(16) GPR_reg64 g_cpuConstRegs[32] = {};
 u32 g_cpuHasConstReg = 0, g_cpuFlushedConstReg = 0;
-bool g_cpuFlushedPC, g_cpuFlushedCode, g_recompilingDelaySlot, g_maySignalException;
+bool g_cpuFlushedPC, g_cpuFlushedCode, g_recompilingDelaySlot;
 
 eeProfiler EE::Profiler;
 
@@ -1393,6 +1393,14 @@ void emitEELinkableExit(u32 target_pc)
 	const u32 cycles = scaleblockcycles();
 	armAsm->Adds(RCYCLE, RCYCLE, cycles);
 
+#ifdef EE_FORCE_CYCLE_FLUSH
+	// Flush cpuRegs.cycle = nec + RCYCLE before the patched B. Async hardware
+	// (VU1/MTGS/GIF) reads cpuRegs.cycle through the handshake; without this,
+	// long direct-B chains can leave it stale across many blocks. See
+	// InterpFlags.h for the rationale.
+	armWritebackCycle();
+#endif
+
 	a64::Label event_path;
 	armAsm->B(&event_path, a64::pl);
 
@@ -1451,6 +1459,11 @@ static void iBranchTest(u32 newpc)
 		// branches that didn't split their exits, JR/JALR, syscalls)
 		// or suppressed it (WaitLoop's event-only exit).
 		armAsm->Adds(RCYCLE, RCYCLE, cycles);
+#ifdef EE_FORCE_CYCLE_FLUSH
+		// Flush cpuRegs.cycle to memory before dispatch — see comment in
+		// emitEELinkableExit and InterpFlags.h for the rationale.
+		armWritebackCycle();
+#endif
 		armEmitCondBranch(a64::mi, DispatcherReg); // N=1: still have budget
 		armEmitJmp(DispatcherEvent);               // fall through: event due
 	}
@@ -1491,20 +1504,16 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		// cpuException and produces the correct EPC / CAUSE.BD. Matches the
 		// interpreter's _doBranch_shared (Interpreter.cpp:230). Done for every
 		// DS op (native + ISTUB) since native LOAD/STORE can TLB-miss too.
+		//
+		// We deliberately do NOT speculatively set CAUSE.BD here. cpuException
+		// itself sets `cpuRegs.CP0.n.Cause |= 0x80000000` whenever its `bd`
+		// argument is nonzero, and every JIT exception path passes
+		// cpuRegs.branch as that argument (see R5900OpcodeImpl.cpp ovrfl
+		// helpers and cpuTlbMissR/W). The pre-set was redundant — matches
+		// x86, where FLUSH_CAUSE (iR5900.cpp:1236-1242) is `#if 0`'d for
+		// the same reason — and burned 6 insns per DS (3 set + 3 clear).
 		armAsm->Mov(RWSCRATCH, 1);
 		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
-
-		// Pre-set CAUSE.BD (CP0 reg 13, bit 31). x86's FLUSH_CAUSE writer
-		// (iR5900.cpp:1236-1242, currently `#if 0`'d) does this on demand;
-		// the arm64 port activates it unconditionally for every DS op since
-		// we have no FLUSH_CAUSE call path. Redundant with cpuException's
-		// own BD-set via cpuRegs.branch but converges on the same state.
-		// Cleared post-DS if no exception fired.
-		const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
-		armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-		armAsm->Orr(RWSCRATCH, RWSCRATCH, 0x80000000u);
-		armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-		g_maySignalException = true;
 	}
 
 	g_pCurInstInfo++;
@@ -1535,19 +1544,11 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 		if (check_branch_delay)
 		{
 			DevCon.Warning("Branch %x in delay slot!", cpuRegs.code);
-			if (g_maySignalException)
-			{
-				// Clear BD (Branch Delay) bit in Cause register (CP0 reg 13, bit 31).
-				const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
-				armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-				armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
-				armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-			}
 			// Undo the pre-DS cpuRegs.branch = 1 store: we're skipping the
 			// inner branch emission entirely, so leave branch=0 at block exit.
+			// CAUSE.BD is no longer speculatively set, so nothing to clear.
 			armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
 			g_recompilingDelaySlot = false;
-			g_maySignalException = false;
 			cpuRegs.code = old_code;
 			g_pCurInstInfo = old_inst_info;
 			return;
@@ -1674,22 +1675,11 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		// Clear cpuRegs.branch after the DS completes so subsequent ops in the
 		// block that raise exceptions are not misattributed to the BD path.
+		// CAUSE.BD is set by cpuException itself when bd != 0, so we don't
+		// need a paired BD-clear here.
 		armAsm->Str(a64::wzr, a64::MemOperand(RCPUSTATE, offsetof(cpuRegisters, branch)));
-		// Pair of the pre-DS CAUSE.BD set: clear BD if no exception fired.
-		// Mirrors x86 iR5900.cpp:1830-1831 (currently dead there because the
-		// writer is `#if 0`'d; activated here for correctness-by-redundancy).
-		if (g_maySignalException)
-		{
-			const s64 cause_off = offsetof(cpuRegisters, CP0) + 13 * sizeof(u32);
-			armAsm->Ldr(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-			armAsm->And(RWSCRATCH, RWSCRATCH, 0x7FFFFFFFu);
-			armAsm->Str(RWSCRATCH, a64::MemOperand(RCPUSTATE, cause_off));
-		}
 		g_recompilingDelaySlot = false;
 	}
-
-	// Reset per-op — matches x86 iR5900.cpp:1835.
-	g_maySignalException = false;
 
 	cpuRegs.code = old_code;
 	g_pCurInstInfo = old_inst_info;

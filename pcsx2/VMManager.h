@@ -155,6 +155,12 @@ namespace VMManager
 	/// Can be forced to load even when there is not an active virtual machine.
 	void ReloadInputBindings(bool force = false);
 
+	/// Sentinel slot value for the autosave-on-exit state. Routes
+	/// GetSaveStateFileName to a dedicated `.autosave.p2s` filename so the
+	/// "Save State And Exit" overlay action doesn't clobber numbered slot 0.
+	/// The load picker surfaces this slot only when the file exists.
+	static constexpr s32 SAVESTATE_SLOT_AUTOSAVE = -2;
+
 	/// Returns the save state filename for the given game serial/crc.
 	std::string GetSaveStateFileName(const char* game_serial, u32 game_crc, s32 slot, bool backup = false);
 
@@ -326,6 +332,15 @@ namespace VMManager
 
 		/// Returns a list of processors in the system, suitable for pinning for the software renderer.
 		const std::vector<u32>& GetSoftwareRendererProcessorList();
+
+		/// Returns the affinity mask covering the perf-cluster shared by EE/VU/GS
+		/// (the union of those threads' cluster masks built by SetEmuThreadAffinities).
+		/// Threads that want to share the perf cluster (e.g. Oboe audio callback)
+		/// can call sched_setaffinity with this mask. Returns 0 if thread pinning
+		/// is currently disabled, the cluster mask is unresolvable, or processor
+		/// list is empty — callers should treat 0 as "no pinning, leave thread on
+		/// whatever the kernel picks."
+		u64 GetPerformanceClusterAffinityMask();
 
 		const std::string& GetELFOverride();
 		bool IsExecutionInterrupted();

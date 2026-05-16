@@ -174,6 +174,14 @@ extern bool iopEventTestIsActive;
 // Branching status used when throwing exceptions.
 extern bool iopIsDelaySlot;
 
+// IOP_SHADOW_VERIFY hooks (defined in R3000AInterpreter.cpp). The flag is
+// non-static so iop_shadow_verify can suppress doBranch's iopEventTest call
+// during replay. Both symbols exist unconditionally so the JIT can emit BLs
+// to the helper without #ifdef gymnastics in this header.
+extern bool iopShadowSuppressEventTest;
+extern void psxInterpReplayBlock(u32 endpc, u32 maxInstructions);
+extern void psxInterpExecuteOne();
+
 // --------------------------------------------------------------------------------------
 //  R3000Acpu
 // --------------------------------------------------------------------------------------

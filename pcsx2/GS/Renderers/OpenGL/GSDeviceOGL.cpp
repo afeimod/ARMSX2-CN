@@ -822,7 +822,14 @@ bool GSDeviceOGL::CheckFeatures()
 	if (!m_is_gles) {
 		m_bugs.buggy_pbo = !GLAD_GL_VERSION_4_4 && !GLAD_GL_ARB_buffer_storage && !GLAD_GL_EXT_buffer_storage;
 	} else {
-		m_bugs.buggy_pbo = GLAD_GL_EXT_buffer_storage;
+		// Mirrors the desktop check: PBOs are useful only when EXT_buffer_storage
+		// (the GLES port of buffer_storage) is available so we can pin a
+		// persistent-mapped staging region. Without it the orphaning fallback
+		// is slower than letting the driver handle the upload directly. The
+		// previous form here had the test inverted (set buggy=TRUE when the
+		// extension WAS supported), disabling PBOs on every modern Adreno/Mali
+		// device. Aligning with the desktop branch's polarity.
+		m_bugs.buggy_pbo = !GLAD_GL_EXT_buffer_storage;
 	}
 
 	if (m_bugs.buggy_pbo)
@@ -1090,6 +1097,17 @@ GSDevice::PresentResult GSDeviceOGL::BeginPresent(bool frame_skip)
 	OMSetFBO(0);
 	OMSetColorMaskState();
 
+	// On TBDR, hint that the default framebuffer's prior content is throwaway
+	// before the tile is loaded for the present quad. The color attachment is
+	// fully overwritten by the clear+blit below, and depth/stencil are never
+	// used at all on the system framebuffer. Default-FBO uses GL_COLOR / DEPTH
+	// / STENCIL (not GL_*_ATTACHMENT). Same gate as CommitClear.
+	if (GLAD_GL_VERSION_4_3 || m_is_gles)
+	{
+		const GLenum attachments[] = {GL_COLOR, GL_DEPTH, GL_STENCIL};
+		glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, std::size(attachments), attachments);
+	}
+
 	glDisable(GL_SCISSOR_TEST);
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
@@ -1108,6 +1126,16 @@ void GSDeviceOGL::EndPresent()
 
 	if (m_gpu_timing_enabled)
 		PopTimestampQuery();
+
+	// Discard the default framebuffer's depth/stencil before the swap. We
+	// never wrote anything meaningful to them, so on TBDR drivers writing
+	// the tile back to system memory at SwapBuffers is wasted bandwidth.
+	// Color is preserved (it's what gets presented).
+	if (GLAD_GL_VERSION_4_3 || m_is_gles)
+	{
+		const GLenum attachments[] = {GL_DEPTH, GL_STENCIL};
+		glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, std::size(attachments), attachments);
+	}
 
 	m_gl_context->SwapBuffers();
 
@@ -1302,7 +1330,11 @@ void GSDeviceOGL::CommitClear(GSTexture* t, bool use_write_fbo)
 
 	if (T->GetState() == GSTexture::State::Invalidated)
 	{
-		if (GLAD_GL_VERSION_4_3)
+		// glInvalidateFramebuffer is core in GL 4.3 and GLES 3.0. The original
+		// gate skipped GLES, so on Adreno/Mali every "this content is dead"
+		// hint from the texture cache fell through to a no-op — the tile got
+		// written back to system memory anyway. On TBDR that's pure waste.
+		if (GLAD_GL_VERSION_4_3 || m_is_gles)
 		{
 			if (T->GetType() == GSTexture::Type::DepthStencil)
 			{
@@ -2519,8 +2551,18 @@ void GSDeviceOGL::RenderBlankFrame()
 {
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 	glDisable(GL_SCISSOR_TEST);
+	if (GLAD_GL_VERSION_4_3 || m_is_gles)
+	{
+		const GLenum pre[] = {GL_COLOR, GL_DEPTH, GL_STENCIL};
+		glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, std::size(pre), pre);
+	}
 	glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
 	glClear(GL_COLOR_BUFFER_BIT);
+	if (GLAD_GL_VERSION_4_3 || m_is_gles)
+	{
+		const GLenum post[] = {GL_DEPTH, GL_STENCIL};
+		glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, std::size(post), post);
+	}
 	m_gl_context->SwapBuffers();
 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, GLState::fbo);
 	glEnable(GL_SCISSOR_TEST);

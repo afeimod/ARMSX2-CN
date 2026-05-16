@@ -16,6 +16,7 @@
 #include "CDVD/CDVD.h"
 
 #include <math.h>
+#include <algorithm>
 
 /* Config.PsxType == 1: PAL:
 	 VBlank interlaced		50.00 Hz
@@ -55,6 +56,43 @@ bool vBlanking = false;
 // These counters will be counted by the hblank gates coming from the EE,
 // which ensures they stay 100% in sync with the EE's hblank counters.
 #define PSXHBLANK 0x2001
+
+// =====================  IOP COUNTER RATE TUNING KNOBS  =====================
+// Scale factor (in 1/256ths) applied to each IOP timer T0-T7 when its rate
+// is set. 256 = 1.0x (upstream behavior).
+//
+// Counter rate determines how many IOP cycles per counter increment. Larger
+// rate = SLOWER counter = game perceives MORE time per tick (so reading the
+// counter, the game thinks more time passed → game advances FASTER).
+//
+// Counter 6 = SPU2 sample sync (rate=768, ticks at 44100Hz wall-clock in PS1
+// mode). Counter 7 = RTC (rate=PSXCLK/1000, ticks at 1ms wall-clock).
+//
+// To find which counter the game uses for sub-frame timing: bump one knob
+// to 4× (= 1024) or 16× (= 4096) and watch the game speed change.
+//
+// Note: PSXHBLANK and PSXPIXEL are sentinel values, not real rates — the
+// scaling helper leaves those alone.
+static u32 PSX_RCNT_SCALE_256[8] = {
+	256, // T0 — pixel/dotclock-source available
+	256, // T1 — HBLANK-source available
+	256, // T2 — system clock /1 or /8
+	256, // T3 — HBLANK-source available
+	256, // T4 — system clock /1, /8, /16, /256
+	256, // T5 — system clock /1, /8, /16, /256
+	256, // T6 — SPU2 sample sync (rate=768, ticks at 44100Hz wall-clock)
+	256, // T7 — RTC (rate=PSXCLK/1000, ticks at 1ms wall-clock)
+};
+
+static u32 psxRcntApplyRateScale(int idx, u32 base_rate)
+{
+	if (idx < 0 || idx >= 8) return base_rate;
+	if (base_rate == PSXHBLANK) return base_rate;
+	const u64 scaled = (static_cast<u64>(base_rate) * static_cast<u64>(PSX_RCNT_SCALE_256[idx])) >> 8;
+	if (scaled < 1) return 1;
+	if (scaled > 0xFFFFFFFFULL) return 0xFFFFFFFFu;
+	return static_cast<u32>(scaled);
+}
 
 static bool psxRcntCanCount(int cntidx)
 {
@@ -187,11 +225,11 @@ void psxRcntInit()
 	psxCounters[4].interrupt = 0x08000;
 	psxCounters[5].interrupt = 0x10000;
 
-	psxCounters[6].rate = 768;
+	psxCounters[6].rate = psxRcntApplyRateScale(6, 768);
 	psxCounters[6].deltaCycles = psxCounters[6].rate;
 	psxCounters[6].mode.modeval = 0x8;
 
-	psxCounters[7].rate = PSXCLK / 1000;
+	psxCounters[7].rate = psxRcntApplyRateScale(7, PSXCLK / 1000);
 	psxCounters[7].deltaCycles = psxCounters[7].rate;
 	psxCounters[7].mode.modeval = 0x8;
 
@@ -427,31 +465,111 @@ void psxHBlankEnd()
 	_rcntSet(0);
 }
 
+// =====================  IOP VSYNC IRQ DELIVERY KNOB  =====================
+// Number of EE-driven vblanks per IOP-visible vsync IRQ.
+//
+// MANUAL knob (PSX_VSYNC_IRQ_EVERY_N): unconditional divider applied first.
+// 1 = upstream (every emulator-vblank = 60Hz wall-clock NTSC).
+// 2 = halve (= 30Hz). 4 = quarter.
+//
+// AUTO multiplier (PSX_VSYNC_IRQ_AUTO_FROM_GP1): when 1, doubles the divider
+// whenever PS1 game has set GP1(08) interlace bit. The reasoning: PS1 GPU
+// fires vsync at FIELD rate (60Hz NTSC) regardless of mode, but interlaced
+// games typically want 30fps logic — they advance state every 2 fields. By
+// auto-halving the IOP-visible vsync rate when the game requests interlaced,
+// the game's per-vsync logic step lands on a real-time 30Hz cadence.
+//
+// Effective N = PSX_VSYNC_IRQ_EVERY_N * (GP1.interlace ? 2 : 1)
+//
+// NOTE: this also gates psxCheckStartGate / _rcntSet for counters 1 and 3
+// (HBLANK gate counters) — those expect a vblank to "open" their gates.
+// For diagnostic purposes that's fine; for production we'd split.
+static u32 PSX_VSYNC_IRQ_EVERY_N = 2;
+static u32 PSX_VSYNC_IRQ_AUTO_FROM_GP1 = 1;
+
+#include "ps2/pgif.h"
+
 void psxVBlankStart()
 {
 	cdvdVsync();
-	iopIntcIrq(0);
-	
-	_psxCheckStartGate(1);
-	_psxCheckStartGate(3);
+
+	// Apply the vsync divider ONLY when actually in PS1 mode (HW_ICFG bit
+	// 3 set). Before the PS1 handoff and during PS2 mode generally, behave
+	// exactly like upstream — otherwise the PS2 BIOS / PS1DRV setup path
+	// corrupts state and crashes the EE (vtlb assert at unmapped
+	// 0x1CB40400 during the SBUS_F240 handoff).
+	const bool ps1_mode = (psxHu32(HW_ICFG) & 0x8) != 0;
+	u32 effective_n = 1;
+	if (ps1_mode)
+	{
+		effective_n = PSX_VSYNC_IRQ_EVERY_N;
+		if (PSX_VSYNC_IRQ_AUTO_FROM_GP1 && pgpu.stat.bits.VILAC)
+			effective_n *= 2;
+		if (effective_n < 1) effective_n = 1;
+	}
+
+	// Periodic 1-Hz log so we can see the auto-detected mode while tuning.
+	{
+		static u32 s_logCnt = 0;
+		if ((++s_logCnt % 60) == 1)
+			Console.WriteLn(Color_StrongCyan,
+				"[PSX-VSYNC] ps1=%d N=%u (manual=%u, auto=%u, GP1.VILAC=%u, GP1.VRES=%u)",
+				ps1_mode ? 1 : 0, effective_n, PSX_VSYNC_IRQ_EVERY_N,
+				PSX_VSYNC_IRQ_AUTO_FROM_GP1,
+				(unsigned)pgpu.stat.bits.VILAC, (unsigned)pgpu.stat.bits.VRES);
+	}
+
+	// Deliver vsync IRQ + gate transitions to IOP only every Nth call.
+	static u32 s_vbCount = 0;
+	const bool deliver = ((++s_vbCount % effective_n) == 0);
+
+	if (deliver)
+	{
+		iopIntcIrq(0);
+
+		_psxCheckStartGate(1);
+		_psxCheckStartGate(3);
+	}
 
 	vBlanking = true;
 
-	_rcntSet(1);
-	_rcntSet(3);
+	if (deliver)
+	{
+		_rcntSet(1);
+		_rcntSet(3);
+	}
 }
+
+// Knob: throttle the vblank-END IRQ (IRQ 11) the same way as vblank-START.
+// PS1 BIOS may chain a handler on the vblank-end vector for state-machine
+// dispatch; if that's the speedup source, increasing this drags the BIOS.
+static u32 PSX_VSYNC_END_IRQ_EVERY_N = 1;
 
 void psxVBlankEnd()
 {
-	iopIntcIrq(11);
-	
-	_psxCheckEndGate(1);
-	_psxCheckEndGate(3);
+	// Same PS1-mode gate as psxVBlankStart: don't throttle in PS2 mode or
+	// during the PS1 handoff window before HW_ICFG bit 3 is set.
+	const bool ps1_mode = (psxHu32(HW_ICFG) & 0x8) != 0;
+	const u32 effective_n = ps1_mode ? std::max<u32>(1, PSX_VSYNC_END_IRQ_EVERY_N) : 1;
+
+	static u32 s_veCount = 0;
+	const bool deliver = ((++s_veCount % effective_n) == 0);
+
+	if (deliver)
+	{
+		iopIntcIrq(11);
+
+		_psxCheckEndGate(1);
+		_psxCheckEndGate(3);
+	}
 
 	vBlanking = false;
 
-	_rcntSet(1);
-	_rcntSet(3);
+	if (deliver)
+	{
+		_rcntSet(1);
+		_rcntSet(3);
+	}
 }
 
 void psxRcntUpdate()
@@ -597,14 +715,14 @@ __fi void psxRcntWmode16(int index, u32 value)
 	if (index == 2)
 	{
 		if (counter.mode.t2Prescale)
-			psxCounters[2].rate = 8;
+			psxCounters[2].rate = psxRcntApplyRateScale(2, 8);
 		else
-			psxCounters[2].rate = 1;
+			psxCounters[2].rate = psxRcntApplyRateScale(2, 1);
 	}
 	else
 	{
 		// Counters 0 and 1 can select PIXEL or HSYNC as an alternate source:
-		counter.rate = 1;
+		counter.rate = psxRcntApplyRateScale(index, 1);
 
 		if (counter.mode.extSignal)
 			counter.rate = (index == 0) ? PSXPIXEL : PSXHBLANK;
@@ -675,7 +793,7 @@ __fi void psxRcntWmode32(int index, u32 value)
 	if (index == 3)
 	{
 		// Counter 3 has the HBlank as an alternate source.
-		counter.rate = 1;
+		counter.rate = psxRcntApplyRateScale(3, 1);
 
 		if (counter.mode.extSignal)
 			counter.rate = PSXHBLANK;
@@ -693,16 +811,16 @@ __fi void psxRcntWmode32(int index, u32 value)
 		switch (counter.mode.t4_5Prescale)
 		{
 			case 0x1:
-				counter.rate = 8;
+				counter.rate = psxRcntApplyRateScale(index, 8);
 				break;
 			case 0x2:
-				counter.rate = 16;
+				counter.rate = psxRcntApplyRateScale(index, 16);
 				break;
 			case 0x3:
-				counter.rate = 256;
+				counter.rate = psxRcntApplyRateScale(index, 256);
 				break;
 			default:
-				counter.rate = 1;
+				counter.rate = psxRcntApplyRateScale(index, 1);
 				break;
 		}
 	}

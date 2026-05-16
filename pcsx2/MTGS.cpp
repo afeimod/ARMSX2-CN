@@ -77,7 +77,12 @@ namespace MTGS
 	static std::atomic<bool> s_SignalRingEnable;
 	static std::atomic<int> s_SignalRingPosition;
 
-	static std::atomic<int> s_QueuedFrameCount;
+	// s_QueuedFrameCount is read by the EE thread every frame for VSync pacing
+	// and written by the MTGS thread on every frame completion. Isolate it from
+	// the signal-ring atomics above so EE polls don't ping-pong with MTGS path3
+	// signal-ring updates. s_VsyncSignalListener rides on the same cache line —
+	// it's a near-twin of s_QueuedFrameCount in access pattern.
+	alignas(__cachelinesize) static std::atomic<int> s_QueuedFrameCount;
 	static std::atomic<bool> s_VsyncSignalListener;
 
 	static std::mutex s_mtx_RingBufferBusy2; // Gets released on semaXGkick waiting...
@@ -463,8 +468,12 @@ void MTGS::MainLoop()
 					if (!vu1Thread.semaXGkick.TryWait())
 					{
 						mtvu_lock.unlock();
-						// Wait for MTVU to complete vu1 program
-						vu1Thread.semaXGkick.Wait();
+						// Wait for MTVU to complete vu1 program. Adaptive
+						// spin-before-block: under heavy MTVU traffic, MTVU
+						// usually finishes within microseconds — skip the
+						// futex syscall when possible (perfape data showed
+						// ~27% MTVU thread time was in sem_wait→futex).
+						vu1Thread.semaXGkick.WaitWithSpin();
 						mtvu_lock.lock();
 					}
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
@@ -545,7 +554,11 @@ void MTGS::MainLoop()
 							GSgifTransfer((u8*)&path.buffer[gsPack.offset], gsPack.size / 16);
 						}
 					}
-					path.readAmount.fetch_sub(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
+					// Release-only: prior consume (GSgifTransfer / pop) must be ordered before
+					// observers see the decreased count. SPSC queue push/pop already supplies
+					// acquire-side sync, so the acquire half of acq_rel was redundant — saves
+					// one `dmb ish` per MTVU GIF packet on ARM64.
+					path.readAmount.fetch_sub(gsPack.size + gsPack.readAmount, std::memory_order_release);
 					path.PopGSPacketMTVU(); // Should be done last, for proper Gif_MTGS_Wait()
 					break;
 				}
@@ -1141,7 +1154,7 @@ void Gif_AddCompletedGSPacket(GS_Packet& gsPack, GIF_PATH path)
 	else
 	{
 		pxAssertMsg(!gsPack.readAmount, "Gif Unit - gsPack.readAmount only valid for MTVU path 1!");
-		gifUnit.gifPath[path].readAmount.fetch_add(gsPack.size);
+		gifUnit.gifPath[path].readAmount.fetch_add(gsPack.size, std::memory_order_release);
 		MTGS::SendSimpleGSPacket(MTGS::Command::GSPacket, gsPack.offset, gsPack.size, path);
 	}
 }
@@ -1149,7 +1162,7 @@ void Gif_AddCompletedGSPacket(GS_Packet& gsPack, GIF_PATH path)
 void Gif_AddBlankGSPacket(u32 size, GIF_PATH path)
 {
 	//DevCon.WriteLn("Adding Blank Gif Packet [size=%x]", size);
-	gifUnit.gifPath[path].readAmount.fetch_add(size);
+	gifUnit.gifPath[path].readAmount.fetch_add(size, std::memory_order_release);
 	MTGS::SendSimpleGSPacket(MTGS::Command::GSPacket, ~0u, size, path);
 }
 

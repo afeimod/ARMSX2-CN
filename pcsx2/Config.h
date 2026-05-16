@@ -987,6 +987,14 @@ struct Pcsx2Config
 #else
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Cubeb;
 #endif
+		// Default SyncMode = TimeStretch on all platforms. An earlier Android
+		// override defaulted this to Disabled to skip the SoundTouch scalar
+		// path (`calcCrossCorrAccumulate` was 11% of CPU at BIOS idle), but
+		// that made audio sound bad under load — without time-stretching,
+		// frame-time variation produces audible pitch/clock drift. Reverted
+		// to upstream TimeStretch; the SoundTouch cost is the price of
+		// stable-pitch audio. NEON-porting the inner correlation loop is
+		// the right next play if the cost shows up in profiles again.
 		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 
 		static std::optional<SPU2SyncMode> ParseSyncMode(const char* str);

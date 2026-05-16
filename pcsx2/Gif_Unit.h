@@ -499,9 +499,11 @@ struct Gif_Path
 	// MTVU: Gets called after VU1 execution on MTVU thread
 	void FinishGSPacketMTVU()
 	{
-		// Performance note: fetch_add atomic operation might create some stall for atomic
-		// operation in gsPack.push
-		readAmount.fetch_add(gsPack.size + gsPack.readAmount, std::memory_order_acq_rel);
+		// Release-only: prior writes (gif buffer / gsPack fields) publish to MTGS
+		// when the increased readAmount is observed. The acquire half of acq_rel
+		// served no producer-side purpose and emitted a redundant `dmb ish` per
+		// packet on ARM64.
+		readAmount.fetch_add(gsPack.size + gsPack.readAmount, std::memory_order_release);
 		while (!mtvu.gsPackQueue.push(gsPack))
 			;
 

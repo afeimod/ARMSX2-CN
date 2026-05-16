@@ -6894,16 +6894,7 @@ bool GSState::GSTransferBuffer::Update(int tw, int th, int bpp, int& len)
 	const int remaining = total - end;
 
 	if (len > remaining)
-	{
-		if (len > packet_size)
-		{
-#if defined(_DEBUG)
-			Console.Warning("GS transfer buffer overflow len %d remaining %d, tex_size %d tw %d th %d bpp %d", len, remaining, tex_size, tw, th, bpp);
-#endif
-		}
-
 		len = remaining;
-	}
 
 	return len > 0;
 }

@@ -6,7 +6,6 @@
 #include "PrecompiledHeader.h"
 
 #include "Input/InputManager.h"
-#include "common/HTTPDownloader.h"
 #include "CDVD/CDVDdiscReader.h"
 
 // g_host_hotkeys - normally defined in pcsx2-qt
@@ -18,11 +17,11 @@ void Host::SetMouseLock(bool state)
 {
 }
 
-// HTTPDownloader::Create - curl excluded on Android
-std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)
-{
-	return nullptr;
-}
+// HTTPDownloader::Create is now provided by common/HTTPDownloaderAndroid.cpp,
+// which bridges to java.net.HttpURLConnection via JNI. The stub that
+// returned null lived here previously — RA login + cover downloads
+// silently failed and the cleanup path crashed when the unique_ptr was
+// dereferenced. See HTTPDownloaderAndroid.{h,cpp}.
 
 // Optical drive / disc reader stubs - no physical disc on Android
 std::vector<std::string> GetOpticalDriveList()

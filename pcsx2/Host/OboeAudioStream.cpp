@@ -2,12 +2,20 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Host/AudioStream.h"
+#include "VMManager.h"
 
 #include "common/Assertions.h"
 #include "common/Console.h"
 #include "common/Error.h"
 
 #include "oboe/Oboe.h"
+
+#include <atomic>
+#if defined(__ANDROID__)
+#include <sched.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 namespace {
 	class OboeAudioStream final : public AudioStream,
@@ -35,12 +43,62 @@ namespace {
 		bool m_stop_requested = false;
 
 		std::shared_ptr<oboe::AudioStream> m_stream;
+
+		// Affinity pin latch. Oboe spawns its own audio data thread; we don't
+		// see its TID until the callback fires the first time. After the
+		// first callback we apply the perf-cluster affinity once. Audio
+		// callbacks compete with EE for cache lines + share the same big
+		// cluster — without pinning, the audio thread can land on a little
+		// core (jitter) or migrate onto EE's core (L2 pollution).
+		std::atomic<bool> m_audio_thread_pinned{false};
 	};
 } // namespace
 
 oboe::DataCallbackResult OboeAudioStream::onAudioReady(oboe::AudioStream* p_audioStream,
 	void* p_audioData, int32_t p_numFrames)
 {
+#if defined(__ANDROID__)
+	// Affinity pin. Oboe owns the audio data thread; we only see its TID
+	// inside this callback. Pin onto the same perf-cluster as EE/VU/GS so
+	// the audio thread doesn't (a) get scheduled to a little core and
+	// inject jitter into the callback's deadline, or (b) land on EE's
+	// core and pollute L2.
+	//
+	// VMManager's SetEmuThreadAffinities runs when the VM transitions to
+	// Running, which is typically AFTER Oboe has opened its stream and
+	// fired the first callback. So the first few callbacks see
+	// perf_mask=0 (pinning not yet active) and skip. Latch only after a
+	// SUCCESSFUL pin so we keep polling cheaply (one atomic-acquire +
+	// `s_thread_affinities_set` bool check inside
+	// GetPerformanceClusterAffinityMask) until pinning actually turns on.
+	if (!m_audio_thread_pinned.load(std::memory_order_acquire))
+	{
+		const u64 perf_mask = VMManager::Internal::GetPerformanceClusterAffinityMask();
+		if (perf_mask != 0)
+		{
+			const pid_t tid = static_cast<pid_t>(syscall(SYS_gettid));
+			cpu_set_t set;
+			CPU_ZERO(&set);
+			for (u32 i = 0; i < 64; i++)
+			{
+				if (perf_mask & (static_cast<u64>(1) << i))
+					CPU_SET(i, &set);
+			}
+			if (sched_setaffinity(tid, sizeof(set), &set) == 0)
+			{
+				INFO_LOG("(Oboe) audio thread tid={} pinned to perf-cluster mask 0x{:x}", tid, perf_mask);
+				m_audio_thread_pinned.store(true, std::memory_order_release);
+			}
+			else
+			{
+				WARNING_LOG("(Oboe) sched_setaffinity tid={} failed (errno {}) — will retry next callback", tid, errno);
+			}
+		}
+		// else: pinning not active yet (VM hasn't reached Running). Skip
+		// the syscall + don't latch — next callback retries.
+	}
+#endif
+
 	if (p_audioData != nullptr)
 		ReadFrames(reinterpret_cast<SampleType*>(p_audioData), p_numFrames);
 	return oboe::DataCallbackResult::Continue;
@@ -92,6 +150,12 @@ bool OboeAudioStream::Initialize(bool stretch_enabled)
 
 bool OboeAudioStream::Open()
 {
+	// Each Open() spawns a fresh Oboe audio thread with a new TID, so the
+	// per-stream pin latch needs to clear here. Without this, an error-
+	// recovery re-Open() (onError → Stop/Close/Open) keeps the latch set
+	// from the previous instance and the new audio thread runs un-pinned.
+	m_audio_thread_pinned.store(false, std::memory_order_release);
+
 	oboe::AudioStreamBuilder builder;
 	builder.setDirection(oboe::Direction::Output);
 	builder.setPerformanceMode(oboe::PerformanceMode::LowLatency);

@@ -1407,7 +1407,12 @@ REC_FUNC(LB)
 #else
 static void rpsxLB()
 {
-	if (!_psxRt_) return;
+	// NOTE: do NOT early-return on Rt == 0. The interp psxLB always calls
+	// iopMemRead8 (with the result discarded if Rt is r0) because HW
+	// register reads have side effects — auto-clearing INT status,
+	// popping FIFOs, etc. PS1 BIOS uses `LB r0, X(rs)` to consume HW
+	// state; skipping the read here causes native-only hangs that don't
+	// repro in pure-interp mode.
 	// Load Rs BEFORE deleting Rt's const, in case Rs == Rt with a dirty const.
 	iopArmLoadGPR(RWARG1, _psxRs_);
 	if (_psxImm_ != 0)
@@ -1425,11 +1430,15 @@ static void rpsxLB()
 			armAsm->Add(RWARG1, RWARG1, RWPSXSCRATCH);
 		}
 	}
-	PSX_DEL_CONST(_psxRt_);
+	if (_psxRt_)
+		PSX_DEL_CONST(_psxRt_);
 	iopArmFlushConstRegs();
 	armEmitCall((const void*)iopMemRead8);
-	armAsm->Sxtb(RWRET, RWRET);
-	iopArmStoreGPR(RWRET, _psxRt_);
+	if (_psxRt_)
+	{
+		armAsm->Sxtb(RWRET, RWRET);
+		iopArmStoreGPR(RWRET, _psxRt_);
+	}
 }
 #endif
 
@@ -1438,7 +1447,11 @@ REC_FUNC(LBU)
 #else
 static void rpsxLBU()
 {
-	if (!_psxRt_) return;
+	// NOTE: do NOT early-return on Rt == 0. The interp psxLBU always calls
+	// iopMemRead8 (discarding the result if Rt is r0) because HW reads have
+	// side effects (HW_ICTRL auto-clear, FIFO pop, etc.). PS1 BIOS uses
+	// `LBU r0, X(rs)` to consume HW state; the previous early-return here
+	// caused native-only hangs that didn't repro in pure-interp mode.
 	// Load Rs BEFORE deleting Rt's const, in case Rs == Rt with a dirty const.
 	iopArmLoadGPR(RWARG1, _psxRs_);
 	if (_psxImm_ != 0)
@@ -1456,11 +1469,17 @@ static void rpsxLBU()
 			armAsm->Add(RWARG1, RWARG1, RWPSXSCRATCH);
 		}
 	}
-	PSX_DEL_CONST(_psxRt_);
+	if (_psxRt_)
+		PSX_DEL_CONST(_psxRt_);
 	iopArmFlushConstRegs();
 	armEmitCall((const void*)iopMemRead8);
-	// w0 is already zero-extended
-	iopArmStoreGPR(RWRET, _psxRt_);
+	if (_psxRt_)
+	{
+		// Explicit Uxtb because AAPCS64's "producer zero-extends u8" isn't
+		// reliably emitted by Clang at iopMemRead8's return path.
+		armAsm->Uxtb(RWRET, RWRET);
+		iopArmStoreGPR(RWRET, _psxRt_);
+	}
 }
 #endif
 
@@ -1469,8 +1488,7 @@ REC_FUNC(LH)
 #else
 static void rpsxLH()
 {
-	if (!_psxRt_) return;
-	// Load Rs BEFORE deleting Rt's const, in case Rs == Rt with a dirty const.
+	// Always emit the read for HW side effects — see rpsxLB note.
 	iopArmLoadGPR(RWARG1, _psxRs_);
 	if (_psxImm_ != 0)
 	{
@@ -1487,11 +1505,15 @@ static void rpsxLH()
 			armAsm->Add(RWARG1, RWARG1, RWPSXSCRATCH);
 		}
 	}
-	PSX_DEL_CONST(_psxRt_);
+	if (_psxRt_)
+		PSX_DEL_CONST(_psxRt_);
 	iopArmFlushConstRegs();
 	armEmitCall((const void*)iopMemRead16);
-	armAsm->Sxth(RWRET, RWRET);
-	iopArmStoreGPR(RWRET, _psxRt_);
+	if (_psxRt_)
+	{
+		armAsm->Sxth(RWRET, RWRET);
+		iopArmStoreGPR(RWRET, _psxRt_);
+	}
 }
 #endif
 
@@ -1500,8 +1522,7 @@ REC_FUNC(LHU)
 #else
 static void rpsxLHU()
 {
-	if (!_psxRt_) return;
-	// Load Rs BEFORE deleting Rt's const, in case Rs == Rt with a dirty const.
+	// Always emit the read for HW side effects — see rpsxLB note.
 	iopArmLoadGPR(RWARG1, _psxRs_);
 	if (_psxImm_ != 0)
 	{
@@ -1518,10 +1539,16 @@ static void rpsxLHU()
 			armAsm->Add(RWARG1, RWARG1, RWPSXSCRATCH);
 		}
 	}
-	PSX_DEL_CONST(_psxRt_);
+	if (_psxRt_)
+		PSX_DEL_CONST(_psxRt_);
 	iopArmFlushConstRegs();
 	armEmitCall((const void*)iopMemRead16);
-	iopArmStoreGPR(RWRET, _psxRt_);
+	if (_psxRt_)
+	{
+		// Explicit Uxth — same AAPCS64 caveat as LBU.
+		armAsm->Uxth(RWRET, RWRET);
+		iopArmStoreGPR(RWRET, _psxRt_);
+	}
 }
 #endif
 
@@ -1530,8 +1557,7 @@ REC_FUNC(LW)
 #else
 static void rpsxLW()
 {
-	if (!_psxRt_) return;
-	// Load Rs BEFORE deleting Rt's const, in case Rs == Rt with a dirty const.
+	// Always emit the read for HW side effects — see rpsxLB note.
 	iopArmLoadGPR(RWARG1, _psxRs_);
 	if (_psxImm_ != 0)
 	{
@@ -1548,10 +1574,12 @@ static void rpsxLW()
 			armAsm->Add(RWARG1, RWARG1, RWPSXSCRATCH);
 		}
 	}
-	PSX_DEL_CONST(_psxRt_);
+	if (_psxRt_)
+		PSX_DEL_CONST(_psxRt_);
 	iopArmFlushConstRegs();
 	armEmitCall((const void*)iopMemRead32);
-	iopArmStoreGPR(RWRET, _psxRt_);
+	if (_psxRt_)
+		iopArmStoreGPR(RWRET, _psxRt_);
 }
 #endif
 

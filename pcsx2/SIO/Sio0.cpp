@@ -11,6 +11,7 @@
 #include "SIO/Sio.h"
 #include "SIO/Sio0.h"
 #include "StateWrapper.h"
+#include "PS1DrvTrace.h"
 
 #define SIO0LOG_ENABLE 0
 #define Sio0Log if (SIO0LOG_ENABLE) DevCon
@@ -144,6 +145,8 @@ u16 Sio0::GetBaud()
 void Sio0::SetTxData(u8 cmd)
 {
 	Sio0Log.WriteLn("%s()\tSIO0 TX_DATA Write\t(%02X)", __FUNCTION__, cmd);
+	PS1DRV_LOG_SIO("SetTxData cmd=0x%02x sioMode=0x%02x sioCmd=0x%02x port=%u slot=%u ctrl=0x%04x stat=0x%08x",
+		cmd, (u32)sioMode, (u32)sioCommand, (u32)port, (u32)slot, (u32)ctrl, (u32)stat);
 
 	stat |= SIO0_STAT::TX_READY | SIO0_STAT::TX_EMPTY;
 	stat |= (SIO0_STAT::RX_FIFO_NOT_EMPTY);
@@ -179,11 +182,32 @@ void Sio0::SetTxData(u8 cmd)
 		case SioMode::MEMCARD:
 			if (this->sioCommand == MemcardCommand::NOT_SET)
 			{
-				if (IsMemcardCommand(cmd) && mcd->IsPresent() && mcd->IsPSX())
+				const bool present = mcd->IsPresent();
+				const bool ispsx = mcd->IsPSX();
+				const bool ismc = IsMemcardCommand(cmd);
+				PS1DRV_LOG_SIO("MEMCARD select cmd=0x%02x port=%u slot=%u IsMemcardCommand=%d IsPresent=%d IsPSX=%d mcdFLAG=0x%02x",
+					cmd, (u32)port, (u32)slot, ismc, present, ispsx, (u32)mcd->FLAG);
+				if (ismc && present && ispsx)
 				{
-					this->sioCommand = cmd;	
+					this->sioCommand = cmd;
+					// Each fresh memcard transaction restarts the PS1Read/
+					// PS1Write state machine from byte 2. The previous code
+					// only reset on `ctrl == 0`, but PS1 games typically
+					// hold ctrl=0x1003/0x1013 across the entire session and
+					// never write 0 — so currentByte would stay wherever
+					// the previous transaction left it (e.g. 11 after a
+					// short Read), and the next transaction's byte-2 reply
+					// returned `buf[1]` instead of `0x5A`. Game sees garbage
+					// → "no memcard."
+					g_MemoryCardProtocol.ResetPS1State();
 					SetAcknowledge(true);
-					SetRxData(this->flag);
+					// Reply with the per-mcd FLAG byte. PS1Write clears bit
+					// 3 of FLAG on a successful write; that cleared state
+					// must persist across subsequent reads so the game's
+					// write-then-read-back verification loop terminates.
+					// Initial 0x08 is established at memcard open time
+					// (FileMcd_EmuOpen → InitPS1MemcardFlags).
+					SetRxData(mcd->FLAG);
 				}
 				else
 				{

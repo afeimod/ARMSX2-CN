@@ -30,6 +30,11 @@ public:
 	void Execute(u32 cycles) override;
 	void Clear(u32 addr, u32 size) override;
 	void ResumeXGkick() override {}
+
+	// VU1_PROFILE_BLOCKS — dump top-N hottest blocks. No-op when the macro
+	// is undefined. Called from VMManager::Shutdown so per-game exits via
+	// the overlay's Stop button surface the profile, not just full app exit.
+	void DumpProfile();
 };
 
 extern recArmVU1 CpuArmVU1;

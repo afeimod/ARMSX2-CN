@@ -18,6 +18,7 @@
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
 #endif
+#include <errno.h>
 #include <spawn.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
@@ -401,5 +402,9 @@ void Threading::SleepUntil(u64 ticks)
 	struct timespec ts;
 	ts.tv_sec = static_cast<time_t>(ticks / 1000000000ULL);
 	ts.tv_nsec = static_cast<long>(ticks % 1000000000ULL);
-	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+	// Loop on EINTR so a stray signal (debugger attach, SIGPROF from samplers)
+	// can't return us early before the deadline. With TIMER_ABSTIME the abstime
+	// argument is unchanged across retries, so re-passing &ts is correct.
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR)
+		;
 }

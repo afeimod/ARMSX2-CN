@@ -1051,6 +1051,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		const u32 old_crc = s_disc_crc;
 		bool serial_is_valid = false;
 		std::string title;
+		CDVDDiscType disc_type = CDVDDiscType::Other;
 
 		if (GSDumpReplayer::IsReplayingDump())
 		{
@@ -1062,7 +1063,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		}
 		else if (CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc)
 		{
-			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, nullptr);
+			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, &disc_type);
 			serial_is_valid = !s_disc_serial.empty();
 		}
 		else if (!s_elf_override.empty())
@@ -1078,6 +1079,12 @@ void VMManager::UpdateDiscDetails(bool booting)
 			s_disc_crc = 0;
 			title = fmt::format(TRANSLATE_FS("VMManager", "PS2 BIOS ({})"), BiosZone);
 		}
+
+		// Swap memcard set based on disc type. PS1 disc → .mcr (128KB)
+		// sidecar files; everything else → standard .ps2 (8MB) cards. The
+		// FileMcd_Reopen call below picks up the new flag on its
+		// internal close+open cycle.
+		FileMcd_SetPS1Mode(disc_type == CDVDDiscType::PS1Disc);
 
 		// If we're booting an ELF, use its CRC, not the disc (if any).
 		if (!s_elf_override.empty())
@@ -1672,6 +1679,16 @@ void VMManager::Shutdown(bool save_resume_state)
 		vu1Thread.WaitVU();
 	MTGS::WaitGS();
 
+	// VU1_PROFILE_BLOCKS: per-game shutdown is the right surface for the
+	// hot-block dump — overlay Exit lands here, full app exit picks it up
+	// later via ShutdownCPUProviders. No-op when the macro is undefined.
+	// VU1 is drained above, so s_variants is stable.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_VU1
+	CpuArmVU1.DumpProfile();
+#endif
+#endif
+
 	if (!GSDumpReplayer::IsReplayingDump() && save_resume_state)
 	{
 		std::string resume_file_name(GetCurrentSaveStateFileName(-1));
@@ -1866,7 +1883,9 @@ std::string VMManager::GetSaveStateFileName(const char* game_serial, u32 game_cr
 	std::string filename;
 	if (std::strlen(game_serial) > 0)
 	{
-		if (slot < 0)
+		if (slot == SAVESTATE_SLOT_AUTOSAVE)
+			filename = fmt::format("{} ({:08X}).autosave.p2s", game_serial, game_crc);
+		else if (slot < 0)
 			filename = fmt::format("{} ({:08X}).resume.p2s", game_serial, game_crc);
 		else if (backup)
 			filename = fmt::format("{} ({:08X}).{:02d}.p2s.backup", game_serial, game_crc, slot);
@@ -2298,22 +2317,12 @@ void VMManager::Internal::Throttle()
 		return;
 	}
 
-	// Conversion of delta from CPU ticks (microseconds) to milliseconds
-	const s32 msec = static_cast<s32>((sDeltaTime * -1000) / static_cast<s64>(GetTickFrequency()));
-
-	// If any integer value of milliseconds exists, sleep it off.
-	// Prior comments suggested that 1-2 ms sleeps were inaccurate on some OSes;
-	// further testing suggests instead that this was utter bullshit.
-	if (msec > 1)
-	{
-		Threading::Sleep(msec - 1);
-	}
-
-	// Conversion to milliseconds loses some precision; after sleeping off whole milliseconds,
-	// spin the thread without sleeping until we finally reach our expected end time.
-	while (GetCPUTicks() < uExpectedEnd)
-	{
-	}
+	// Sleep until the expected frame end. On Android/Linux this is clock_nanosleep
+	// with TIMER_ABSTIME against CLOCK_MONOTONIC; HRTIMER wakeup is within ~50-200us
+	// of the deadline, vs the prior msec-sleep + GetCPUTicks busy-spin which burned
+	// ~10% of EE thread CPU calling clock_gettime in a tight loop while waiting out
+	// the sub-millisecond tail.
+	Threading::SleepUntil(uExpectedEnd);
 
 	// Finally, set our next frame start to when this one ends
 	s_limiter_frame_start = uExpectedEnd;
@@ -3965,6 +3974,32 @@ const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
 {
 	EnsureCPUInfoInitialized();
 	return s_software_renderer_processor_list;
+}
+
+u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
+{
+	// Mirror the perf_mask computation inside SetEmuThreadAffinities so callers
+	// (Oboe audio data callback) can pin onto the same cluster as EE/VU/GS.
+	// Returns 0 when pinning is currently off or cluster info isn't resolvable —
+	// caller leaves the thread on the kernel's default affinity in that case.
+	if (!s_thread_affinities_set)
+		return 0;
+	EnsureCPUInfoInitialized();
+	if (s_processor_list.empty())
+		return 0;
+
+	const bool mtvu = EmuConfig.Speedhacks.vuThread;
+	if (s_processor_list.size() < (mtvu ? 3u : 2u))
+		return 0;
+
+	const u32 ee_index = s_processor_list[0];
+	const u32 vu_index = s_processor_list[1];
+	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
+	const u64 perf_mask =
+		ClusterAffinityMaskForOSId(ee_index) |
+		ClusterAffinityMaskForOSId(vu_index) |
+		ClusterAffinityMaskForOSId(gs_index);
+	return perf_mask;
 }
 
 void VMManager::ReloadPINE()

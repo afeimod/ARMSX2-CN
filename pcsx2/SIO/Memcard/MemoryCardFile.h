@@ -43,6 +43,11 @@ void FileMcd_EmuClose();
 void FileMcd_CancelEject();
 void FileMcd_Reopen(std::string new_serial);
 void FileMcd_Swap();
+// Switch the file-backed memcards between PS2-mode (8MB .ps2) and PS1-mode
+// (128KB .mcr). Called from HwWrite.cpp at SBUS_F240-bit-19 (PS1 mode entry)
+// to remap each slot to a PS1-format file alongside the PS2 file. Resetting
+// to PS2 mode happens automatically on VM restart (FileMcd_EmuOpen).
+void FileMcd_SetPS1Mode(bool ps1_mode);
 s32 FileMcd_IsPresent(uint port, uint slot);
 void FileMcd_GetSizeInfo(uint port, uint slot, McdSizeInfo* outways);
 bool FileMcd_IsPSX(uint port, uint slot);

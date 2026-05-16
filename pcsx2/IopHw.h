@@ -311,6 +311,8 @@ enum IopEventId
 	IopEvt_CdvdSectorReady,
 	IopEvt_DEV9,
 	IopEvt_USB,
+	IopEvt_DmaMDECin,	// PS1 MDEC IN  DMA channel 0 deferred completion
+	IopEvt_DmaMDECout,	// PS1 MDEC OUT DMA channel 1 deferred completion
 };
 
 extern void PSX_INT( IopEventId n, s32 ecycle);

@@ -132,7 +132,7 @@ extern u32 s_nBlockCycles;
 extern bool s_nBlockInterlocked;
 extern u32 pc;
 extern int g_branch;
-extern bool g_cpuFlushedPC, g_cpuFlushedCode, g_recompilingDelaySlot, g_maySignalException;
+extern bool g_cpuFlushedPC, g_cpuFlushedCode, g_recompilingDelaySlot;
 
 // Set by SetBranchImm (in iR5900Branch_arm64.cpp) whenever the branch
 // emitter writes a compile-time-constant successor PC to cpuRegs.pc.

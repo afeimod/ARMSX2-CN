@@ -20,6 +20,34 @@ using namespace R3000A;
 // Used to flag delay slot instructions when throwig exceptions.
 bool iopIsDelaySlot = false;
 
+// During iop_shadow_verify's interp replay, suppress doBranch's iopEventTest
+// call. The JIT block exit emits iPsxBranchTest which has already handled
+// any pending event; replaying iopEventTest from inside the interp run would
+// mutate cpuRegs / iopHw / counter scheduling a second time and corrupt the
+// post-block state we're trying to compare against. Single-thread (IOP runs
+// on EE thread).
+bool iopShadowSuppressEventTest = false;
+
+// =====================  IOP PER-INSTRUCTION CYCLE MULTIPLIER  =====================
+// Real R3000A executes at ~0.5-0.7 effective IPC due to memory stalls /
+// cache misses; PCSX2 advances psxRegs.cycle by exactly 1 per instruction
+// (= 1.0 IPC), so per real-second PCSX2 runs 1.4-2x more game code than
+// real PS1 — game logic outpaces audio (which is keyed correctly to
+// psxRegs.cycle). This knob inflates the per-instruction cycle cost so
+// the IOP runs proportionally fewer instructions per emulator-frame.
+//
+// SPU2, RTC, T0-T5 counters, and vsync ALL pace by psxRegs.cycle's
+// wall-clock advance, which is set by the EE-side budget (unchanged) —
+// they stay at correct wall-clock rate. Only game CODE slows.
+//
+//   1 = upstream behavior (1.0 IPC, ~1.4x speedup vs real PS1)
+//   2 = 0.5 IPC — game runs ~half speed of upstream  (test/prove path)
+//   3 = ~0.33 IPC — should slow game even more
+//
+// Find the value that brings game speed to match real PS1, then we'll
+// tune more carefully (per-op cycle costs for loads/stores etc).
+u32 g_iopCycleMultiplier = 1;
+
 static bool branch2 = 0;
 static u32 branchPC;
 
@@ -232,7 +260,7 @@ static __fi void execI()
 		PSXCPU_LOG("%s", disR3000AF(psxRegs.code, psxRegs.pc));
 
 	psxRegs.pc+= 4;
-	psxRegs.cycle++;
+	psxRegs.cycle += g_iopCycleMultiplier;
 
 	psxBSC[psxRegs.code >> 26]();
 }
@@ -262,7 +290,65 @@ static void doBranch(s32 tar) {
 	iopIsDelaySlot = false;
 	psxRegs.pc = branchPC;
 
-	iopEventTest();
+	if (!iopShadowSuppressEventTest)
+		iopEventTest();
+}
+
+// Per-instruction interp step used by the per-instruction IOP shadow
+// harness. Runs exactly one `execI()` from current state. iopEventTest
+// is suppressed inside doBranch — for branch instructions, doBranch
+// also calls execI for the delay slot internally, but the per-instruction
+// shadow doesn't fire on branch ops (their JIT codegen exits to dispatcher
+// before reaching the post-emit BL), so this only ever runs straight-line
+// non-branch ops in practice.
+void psxInterpExecuteOne()
+{
+	iopShadowSuppressEventTest = true;
+	branch2 = 0;
+	execI();
+	iopShadowSuppressEventTest = false;
+}
+
+// Block-level interp replay used by the IOP shadow-verify harness. Runs
+// `execI()` until either the inner branch path fires (branch2 == true), pc
+// reaches `endpc` (fall-through block boundary), or the instruction count
+// safety cap is hit. Mirrors `intExecuteBlock`'s inner loop without the
+// outer cycle-accounting / event-handling shell. iopEventTest is suppressed
+// inside doBranch (see iopShadowSuppressEventTest) so the replay's only
+// effect is psxRegs / iopMem / iopHw mutation from the block's actual ops.
+//
+// Caller (iop_shadow_verify) is responsible for snapshot/restore around
+// this; here we just do the work.
+void psxInterpReplayBlock(u32 endpc, u32 maxInstructions)
+{
+	branch2 = 0;
+	iopShadowSuppressEventTest = true;
+	u32 i = 0;
+	// do-while so we always execute at least one instruction. If we
+	// checked `pc != endpc` at loop entry, self-loop blocks (where the
+	// branch target equals startpc, e.g. wait loops detected by nBlockFF)
+	// would bail out immediately without running anything — entry pc
+	// already equals endpc on those.
+	//
+	// Mask kseg0/kseg1 mirror bits when comparing pc vs endpc — the JIT
+	// can emit a Str pc with kseg0 bit set (psxpc inherits it from a
+	// kseg0 startpc) while the interp's per-instruction pc advance keeps
+	// the block-entry mirror form. Both refer to the same physical
+	// instruction; mask to compare logically.
+	const u32 endpc_masked = endpc & 0x1FFFFFFFu;
+	do
+	{
+		execI();
+		i++;
+	} while (!branch2 &&
+	         (psxRegs.pc & 0x1FFFFFFFu) != endpc_masked &&
+	         i < maxInstructions);
+	if (branch2)
+	{
+		psxRegs.pc = branchPC;
+		iopIsDelaySlot = false;
+	}
+	iopShadowSuppressEventTest = false;
 }
 
 static void intReserve() {

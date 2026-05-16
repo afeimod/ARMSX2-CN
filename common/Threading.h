@@ -153,14 +153,19 @@ namespace Threading
 	/// Usage:
 	/// - Processing thread loops on `WaitForWork()` followed by processing all work in the queue
 	/// - Threads adding work first add their work to the queue, then call `NotifyOfWork()`
-	class WorkSema
+	class alignas(__cachelinesize) WorkSema
 	{
 		/// Semaphore for sleeping the worker thread
 		KernelSemaphore m_sema;
 		/// Semaphore for sleeping thread waiting on worker queue empty
 		KernelSemaphore m_empty_sema;
 		/// Current state (see enum below)
-		std::atomic<s32> m_state{0};
+		///
+		/// Isolated to its own cache line: m_state is hammered on every
+		/// NotifyOfWork/WaitForWork. Sharing a line with m_sema/m_empty_sema
+		/// caused cross-core invalidations on the rare wake path. On ARM64
+		/// big.LITTLE this false-sharing was visible in EE/MTVU traffic.
+		alignas(__cachelinesize) std::atomic<s32> m_state{0};
 
 		// Expected call frequency is NotifyOfWork > WaitForWork > WaitForEmpty
 		// So optimize states for fast NotifyOfWork
@@ -227,10 +232,14 @@ namespace Threading
 	};
 
 	/// A semaphore that definitely has a fast userspace path
-	class UserspaceSemaphore
+	class alignas(__cachelinesize) UserspaceSemaphore
 	{
 		KernelSemaphore m_sema;
-		std::atomic<int32_t> m_counter{0};
+		/// Isolated to its own cache line: m_counter is hot (Post/Wait fast path,
+		/// WaitWithSpin spins on .load()) while m_sema is touched only on the
+		/// slow blocking fallback. Sharing a line caused cross-core invalidation
+		/// of m_sema state on every counter tick.
+		alignas(__cachelinesize) std::atomic<int32_t> m_counter{0};
 
 	public:
 		UserspaceSemaphore() = default;
@@ -269,6 +278,21 @@ namespace Threading
 			if (m_counter.fetch_sub(1, std::memory_order_acquire) <= 0)
 				m_sema.Wait();
 		}
+
+		/// Adaptive spin-before-block. Same semantics as Wait(), but spends up
+		/// to SPIN_TIME_NS in a userspace busy-wait checking the counter
+		/// before falling back to the kernel sema. Designed for high-frequency
+		/// producer-consumer pairs where the producer typically posts within
+		/// microseconds of the consumer's wait — avoids the futex syscall on
+		/// the common case (perf data showed ~27% of MTVU thread time was
+		/// inside `syscall` for sem_wait → futex).
+		///
+		/// Implementation note: peek-and-CAS BEFORE the fetch_sub, so a
+		/// successful spin acquisition doesn't race with concurrent Posts the
+		/// way a fetch_sub-then-rollback would. If the spin window expires
+		/// without seeing a positive counter, fall through to the same code
+		/// path as Wait() (fetch_sub + m_sema.Wait()).
+		void WaitWithSpin();
 
 		bool TryWait()
 		{

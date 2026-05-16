@@ -108,10 +108,21 @@ static u32 GetSpinTime()
 	{
 		return 1000 * atoi(req);
 	}
-	else
-	{
-		return 50 * 1000; // 50µs
-	}
+#if defined(__ANDROID__)
+	// Mobile: shorter spin window. Producer scheduling latency on Android
+	// is bimodal — either sub-µs (fast cache hit, same cluster) or many ms
+	// (big.LITTLE migration, foreground UI preemption, thermal throttle).
+	// Spinning 50µs covers neither well: the fast case finishes in <1µs so
+	// 49µs are wasted, and the slow case spends 50µs spinning and STILL
+	// falls through to futex anyway. simpleperf on S26 Ultra showed the
+	// MTGS thread burning 25% of total CPU in ShortSpin() with the desktop
+	// 50µs default — a quarter of the SoC doing nothing. A 5µs window
+	// captures the fast case and bails to futex (~2µs syscall) far earlier
+	// on long waits, freeing CPU for the threads that actually have work.
+	return 5 * 1000; // 5µs
+#else
+	return 50 * 1000; // 50µs
+#endif
 }
 
 const u32 SPIN_TIME_NS = GetSpinTime();
