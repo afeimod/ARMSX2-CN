@@ -4979,6 +4979,8 @@ void FullscreenUI::DrawAdvancedSettingsPage()
 		MenuHeading(FSUI_CSTR("Graphics"));
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BUG, "Use Debug Device"), FSUI_CSTR("Enables API-level validation of graphics commands."), "EmuCore/GS",
 			"UseDebugDevice", false);
+
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BUG, "Use Debug Blend"), FSUI_CSTR("Forces SW blending and disables several optimizations."), "EmuCore/GS", "UseDebugBlend", false);
 	}
 
 	EndMenuButtons();
@@ -5486,6 +5488,7 @@ TRANSLATE_NOOP("FullscreenUI", "Sets the compression algorithm for savestate.");
 TRANSLATE_NOOP("FullscreenUI", "Sets the compression level for savestate.");
 TRANSLATE_NOOP("FullscreenUI", "Graphics");
 TRANSLATE_NOOP("FullscreenUI", "Enables API-level validation of graphics commands.");
+TRANSLATE_NOOP("FullscreenUI", "Forces SW blending and disables several optimizations.");
 TRANSLATE_NOOP("FullscreenUI", "Settings");
 TRANSLATE_NOOP("FullscreenUI", "Enable Cheats");
 TRANSLATE_NOOP("FullscreenUI", "No cheats are available for this game.");
@@ -6010,6 +6013,25 @@ TRANSLATE_NOOP("FullscreenUI", "Enable IOP Recompiler");
 TRANSLATE_NOOP("FullscreenUI", "Compression Method");
 TRANSLATE_NOOP("FullscreenUI", "Compression Level");
 TRANSLATE_NOOP("FullscreenUI", "Use Debug Device");
+TRANSLATE_NOOP("FullscreenUI", "Use Debug Blend");
+TRANSLATE_NOOP("FullscreenUI", "FPU Multiply Hack");
+TRANSLATE_NOOP("FullscreenUI", "Use Software Renderer For FMVs");
+TRANSLATE_NOOP("FullscreenUI", "Skip MPEG Hack");
+TRANSLATE_NOOP("FullscreenUI", "Preload TLB Hack");
+TRANSLATE_NOOP("FullscreenUI", "EE Timing Hack");
+TRANSLATE_NOOP("FullscreenUI", "Instant DMA Hack");
+TRANSLATE_NOOP("FullscreenUI", "OPH Flag Hack");
+TRANSLATE_NOOP("FullscreenUI", "Emulate GIF FIFO");
+TRANSLATE_NOOP("FullscreenUI", "DMA Busy Hack");
+TRANSLATE_NOOP("FullscreenUI", "Delay VIF1 Stalls");
+TRANSLATE_NOOP("FullscreenUI", "Emulate VIF FIFO");
+TRANSLATE_NOOP("FullscreenUI", "Full VU0 Synchronization");
+TRANSLATE_NOOP("FullscreenUI", "VU I Bit Hack");
+TRANSLATE_NOOP("FullscreenUI", "VU Add Hack");
+TRANSLATE_NOOP("FullscreenUI", "VU Overflow Hack");
+TRANSLATE_NOOP("FullscreenUI", "VU Sync");
+TRANSLATE_NOOP("FullscreenUI", "VU XGKick Sync");
+TRANSLATE_NOOP("FullscreenUI", "Force Blit Internal FPS Detection");
 TRANSLATE_NOOP("FullscreenUI", "Memory Card Enabled");
 TRANSLATE_NOOP("FullscreenUI", "Card Name");
 TRANSLATE_NOOP("FullscreenUI", "Eject Card");

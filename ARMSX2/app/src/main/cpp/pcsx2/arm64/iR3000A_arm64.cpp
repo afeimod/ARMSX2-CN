@@ -1324,6 +1324,18 @@ static void iopRecRecompile(const u32 startpc)
 	if (startpc == 0xbfc4a000)
 		psxRegs.GPR.n.a0 = Ps2MemSize::ExposedIopRam >> 20;
 
+	// PS1 mode can drive the IOP into garbage code paths (e.g. JR into a
+	// register that ended up holding 0). Real hardware raises an Address
+	// Error on instruction fetch at PC=0; mirror that here instead of
+	// asserting, so the BIOS exception handler at 0x80000080 can take over.
+	// Upstream relies on pxAssert being compiled out in release; our Android
+	// debug builds keep it live, which turned this into a SIGABRT.
+	if (startpc == 0)
+	{
+		Console.Warning("[IOP rec] startpc == 0, raising AdEL exception");
+		psxException(0x10 /* AdEL: address error, instruction fetch */, 0);
+		return;
+	}
 	pxAssert(startpc);
 
 	// Check code buffer space
