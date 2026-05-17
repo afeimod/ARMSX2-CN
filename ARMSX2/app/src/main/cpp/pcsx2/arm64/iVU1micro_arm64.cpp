@@ -3408,6 +3408,272 @@ void emitVU1InterpBL(const void* interp_fn)
 //  the BL may have mutated cycle, reload afterwards (emitReloadCycleReg).
 // ============================================================================
 
+// Inline emit of vu1_TestFMACStallReg / vu1_TestFMACStallReg2's body. The
+// C helper was 4.26% + 2.50% of total CPU on GoW2 in-game (simpleperf
+// 2026-05-16); even with the NEON-free BL wrapper, every call pays the BL
+// roundtrip + helper prologue/epilogue. Body is a tiny FMAC-ring scan with
+// no nested calls and no memory writes — fits in ~20 ARM64 insns inline.
+//
+// Reg/xyzw are compile-time constants (regs.VFread0 / regs.VFr0xyzw); emit
+// them as immediates. VU1_CYCLE_REG (x21) is updated in-place when a stall
+// is detected — matches the C helper's return-cycle-via-x0 semantics, but
+// avoids the Mov x0/Mov VU1_CYCLE_REG round-trip.
+//
+// Scratch registers used: w4..w9. w9 overlaps the VI cache GPR pool, so the
+// caller must have already dropped the VI tracker (matches what
+// emitVu1CallNeonFree did via viCacheInvalidateAll). Callee-saved regs
+// (x21/x22/x23/x24/x25/x26/x28/x19/x20) are untouched.
+static void emitInlineFMACStallReg(u32 reg_imm, u32 xyzw_imm)
+{
+	const int64_t fmacreadpos_off    = (int64_t)offsetof(VURegs, fmacreadpos);
+	const int64_t fmac_off           = (int64_t)offsetof(VURegs, fmac);
+	const int64_t fmac_sCycle_off    = (int64_t)offsetof(fmacPipe, sCycle);
+	const int64_t fmac_Cycle_off     = (int64_t)offsetof(fmacPipe, Cycle);
+	const int64_t fmac_regupper_off  = (int64_t)offsetof(fmacPipe, regupper);
+	const int64_t fmac_reglower_off  = (int64_t)offsetof(fmacPipe, reglower);
+	const int64_t fmac_xyzwupper_off = (int64_t)offsetof(fmacPipe, xyzwupper);
+	const int64_t fmac_xyzwlower_off = (int64_t)offsetof(fmacPipe, xyzwlower);
+
+	using a64::w4; using a64::w5; using a64::w6; using a64::w8; using a64::w9;
+	using a64::x6; using a64::x7; using a64::x9;
+
+	a64::Label loop_top, check_lower, hit, loop_continue, loop_end;
+
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmacreadpos_off));      // pos
+	armAsm->Mov(w5, VU1_FMACCOUNT_REG);                              // i
+
+	armAsm->Bind(&loop_top);
+	// addr = base + pos * 48 (matches the (pos*3)<<4 trick from the
+	// existing TestPipes maturity gate above).
+	armAsm->Add(x6, a64::x4, Operand(a64::x4, LSL, 1));              // pos * 3
+	armAsm->Add(x6, VU1_BASE_REG, Operand(x6, LSL, 4));              // base + pos*48
+
+	armAsm->Ldr(x7, MemOperand(x6, fmac_off + fmac_sCycle_off));     // sCycle
+	armAsm->Ldr(w8, MemOperand(x6, fmac_off + fmac_Cycle_off));      // Cycle
+	armAsm->Sub(x9, VU1_CYCLE_REG, x7);                              // diff = cycle - sCycle
+	armAsm->Cmp(x9, a64::x8);                                        // vs Cycle (zero-ext w8)
+	armAsm->B(hs, &loop_continue);                                   // matured → skip
+
+	// (slot.regupper == reg && (slot.xyzwupper & xyzw))
+	armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_regupper_off));
+	armAsm->Cmp(w9, reg_imm);
+	armAsm->B(ne, &check_lower);
+	armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_xyzwupper_off));
+	armAsm->Tst(w9, xyzw_imm);
+	armAsm->B(ne, &hit);
+
+	// || (slot.reglower == reg && (slot.xyzwlower & xyzw))
+	armAsm->Bind(&check_lower);
+	armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_reglower_off));
+	armAsm->Cmp(w9, reg_imm);
+	armAsm->B(ne, &loop_continue);
+	armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_xyzwlower_off));
+	armAsm->Tst(w9, xyzw_imm);
+	armAsm->B(eq, &loop_continue);
+
+	armAsm->Bind(&hit);
+	// newCycle = sCycle + Cycle; cycle = max(cycle, newCycle).
+	armAsm->Add(x7, x7, a64::x8);
+	armAsm->Cmp(x7, VU1_CYCLE_REG);
+	armAsm->Csel(VU1_CYCLE_REG, x7, VU1_CYCLE_REG, hi);
+
+	armAsm->Bind(&loop_continue);
+	armAsm->Add(w4, w4, 1);
+	armAsm->And(w4, w4, 3);
+	armAsm->Subs(w5, w5, 1);
+	armAsm->B(ne, &loop_top);
+	armAsm->Bind(&loop_end);
+}
+
+// Two-register variant of the above. Args: reg0/xyzw0 (read0) and reg1/xyzw1
+// (read1). Both checked against the same slot per iteration — matches
+// vu1_TestFMACStallReg2 exactly.
+static void emitInlineFMACStallReg2(u32 reg0_imm, u32 xyzw0_imm, u32 reg1_imm, u32 xyzw1_imm)
+{
+	const int64_t fmacreadpos_off    = (int64_t)offsetof(VURegs, fmacreadpos);
+	const int64_t fmac_off           = (int64_t)offsetof(VURegs, fmac);
+	const int64_t fmac_sCycle_off    = (int64_t)offsetof(fmacPipe, sCycle);
+	const int64_t fmac_Cycle_off     = (int64_t)offsetof(fmacPipe, Cycle);
+	const int64_t fmac_regupper_off  = (int64_t)offsetof(fmacPipe, regupper);
+	const int64_t fmac_reglower_off  = (int64_t)offsetof(fmacPipe, reglower);
+	const int64_t fmac_xyzwupper_off = (int64_t)offsetof(fmacPipe, xyzwupper);
+	const int64_t fmac_xyzwlower_off = (int64_t)offsetof(fmacPipe, xyzwlower);
+
+	using a64::w4; using a64::w5; using a64::w6; using a64::w8; using a64::w9; using a64::w10;
+	using a64::x6; using a64::x7; using a64::x9;
+
+	auto checkOnePair = [&](u32 reg_imm, u32 xyzw_imm, a64::Label* hit_label,
+	                        a64::Label* next_check) {
+		// (regupper == reg && xyzwupper & xyzw) || (reglower == reg && xyzwlower & xyzw)
+		armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_regupper_off));
+		armAsm->Cmp(w9, reg_imm);
+		a64::Label try_lower;
+		armAsm->B(ne, &try_lower);
+		armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_xyzwupper_off));
+		armAsm->Tst(w9, xyzw_imm);
+		armAsm->B(ne, hit_label);
+
+		armAsm->Bind(&try_lower);
+		armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_reglower_off));
+		armAsm->Cmp(w9, reg_imm);
+		armAsm->B(ne, next_check);
+		armAsm->Ldr(w9, MemOperand(x6, fmac_off + fmac_xyzwlower_off));
+		armAsm->Tst(w9, xyzw_imm);
+		armAsm->B(eq, next_check);
+		armAsm->B(hit_label);
+	};
+
+	a64::Label loop_top, hit, loop_continue, loop_end;
+
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmacreadpos_off));
+	armAsm->Mov(w5, VU1_FMACCOUNT_REG);
+
+	armAsm->Bind(&loop_top);
+	armAsm->Add(x6, a64::x4, Operand(a64::x4, LSL, 1));
+	armAsm->Add(x6, VU1_BASE_REG, Operand(x6, LSL, 4));
+
+	armAsm->Ldr(x7, MemOperand(x6, fmac_off + fmac_sCycle_off));
+	armAsm->Ldr(w8, MemOperand(x6, fmac_off + fmac_Cycle_off));
+	armAsm->Sub(x9, VU1_CYCLE_REG, x7);
+	armAsm->Cmp(x9, a64::x8);
+	armAsm->B(hs, &loop_continue);
+
+	// Check pair 0; on hit branch to common hit; on miss try pair 1; on pair 1
+	// miss fall through to loop_continue.
+	a64::Label try_pair1;
+	checkOnePair(reg0_imm, xyzw0_imm, &hit, &try_pair1);
+	armAsm->Bind(&try_pair1);
+	checkOnePair(reg1_imm, xyzw1_imm, &hit, &loop_continue);
+
+	armAsm->Bind(&hit);
+	armAsm->Add(x7, x7, a64::x8);
+	armAsm->Cmp(x7, VU1_CYCLE_REG);
+	armAsm->Csel(VU1_CYCLE_REG, x7, VU1_CYCLE_REG, hi);
+
+	armAsm->Bind(&loop_continue);
+	armAsm->Add(w4, w4, 1);
+	armAsm->And(w4, w4, 3);
+	armAsm->Subs(w5, w5, 1);
+	armAsm->B(ne, &loop_top);
+	armAsm->Bind(&loop_end);
+}
+
+// Inline emit of vu1_TestPipes_VU1's FMAC drain portion. Used when Pass 1
+// proves the non-FMAC pipes (FDIV/EFU/IALU) are empty + carry-safe at this
+// pair (skip_info[i].fmacOnlyTestPipes), so the runtime helper would only
+// walk the FMAC ring — we can skip the BL entirely.
+//
+// The drain mirrors the helper at iVU1micro_arm64.cpp:1890-1914:
+//   while fmaccount > 0 && (cycle - slot.sCycle) >= slot.Cycle:
+//     if slot.flagreg & (1 << REG_CLIP_FLAG): VI[CLIP] = slot.clipflag
+//     status update (conditional on REG_STATUS_FLAG bit)
+//     VI[MAC] = slot.macflag
+//     pos = (pos + 1) & 3; fmaccount--
+//   if pos changed: VU->fmacreadpos = pos
+//
+// VI writes are emitted unconditionally (without cross-block analysis we
+// can't prove a successor doesn't read them; skipping risks stale VI state
+// surviving across blocks). Caller invalidates the VI cache tracker
+// (matches the BL path via emitVu1CallNeonFree).
+//
+// Scratch: w4..w15 freely (caller invalidated VI cache).
+//   w4  = fmacreadpos / pos
+//   w5  = pos_original (for the "store only if changed" tail check)
+//   x6  = slot addr (recomputed per iter)
+//   x7  = sCycle (u64), reused later for status accumulator
+//   w8  = Cycle (32-bit, x8 zero-extended for cmp)
+//   x9  = diff scratch / flag scratch
+//   w10 = slot.flagreg
+//   w11..w13 = status/macflag scratch
+static void emitInlineFmacDrainTestPipes()
+{
+	const int64_t fmacreadpos_off    = (int64_t)offsetof(VURegs, fmacreadpos);
+	const int64_t fmac_off           = (int64_t)offsetof(VURegs, fmac);
+	const int64_t fmac_sCycle_off    = (int64_t)offsetof(fmacPipe, sCycle);
+	const int64_t fmac_Cycle_off     = (int64_t)offsetof(fmacPipe, Cycle);
+	const int64_t fmac_flagreg_off   = (int64_t)offsetof(fmacPipe, flagreg);
+	const int64_t fmac_macflag_off   = (int64_t)offsetof(fmacPipe, macflag);
+	const int64_t fmac_statusflag_off= (int64_t)offsetof(fmacPipe, statusflag);
+	const int64_t fmac_clipflag_off  = (int64_t)offsetof(fmacPipe, clipflag);
+	const int64_t vi_mac_off    = (int64_t)offsetof(VURegs, VI)
+	                            + REG_MAC_FLAG * (int64_t)sizeof(REG_VI);
+	const int64_t vi_status_off = (int64_t)offsetof(VURegs, VI)
+	                            + REG_STATUS_FLAG * (int64_t)sizeof(REG_VI);
+	const int64_t vi_clip_off   = (int64_t)offsetof(VURegs, VI)
+	                            + REG_CLIP_FLAG * (int64_t)sizeof(REG_VI);
+
+	using a64::w4; using a64::w5; using a64::w8; using a64::w10;
+	using a64::w11; using a64::w12; using a64::w13;
+	using a64::x6; using a64::x7; using a64::x9;
+
+	a64::Label loop_top, status_else, status_done, skip_clip, no_pos_store, exit_loop;
+
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, fmacreadpos_off));   // pos
+	armAsm->Mov(w5, w4);                                          // pos_orig
+
+	armAsm->Bind(&loop_top);
+	armAsm->Cbz(VU1_FMACCOUNT_REG, &exit_loop);
+
+	// addr = base + pos*48
+	armAsm->Add(x6, a64::x4, Operand(a64::x4, LSL, 1));           // pos*3
+	armAsm->Add(x6, VU1_BASE_REG, Operand(x6, LSL, 4));           // base + pos*48
+
+	armAsm->Ldr(x7, MemOperand(x6, fmac_off + fmac_sCycle_off));  // sCycle
+	armAsm->Ldr(w8, MemOperand(x6, fmac_off + fmac_Cycle_off));   // Cycle
+	armAsm->Sub(x9, VU1_CYCLE_REG, x7);                           // diff
+	armAsm->Cmp(x9, a64::x8);
+	armAsm->B(lo, &exit_loop);                                    // !matured → done
+
+	// slot.flagreg → w10. CLIP/STATUS bit tests on this.
+	armAsm->Ldr(w10, MemOperand(x6, fmac_off + fmac_flagreg_off));
+
+	// if (flagreg & (1 << REG_CLIP_FLAG)) VI[CLIP] = slot.clipflag
+	armAsm->Tbz(w10, REG_CLIP_FLAG, &skip_clip);
+	armAsm->Ldr(w11, MemOperand(x6, fmac_off + fmac_clipflag_off));
+	armAsm->Str(w11, MemOperand(VU1_BASE_REG, vi_clip_off));
+	armAsm->Bind(&skip_clip);
+
+	// Status update — two branches based on flagreg & REG_STATUS_FLAG bit.
+	// if-branch:  new = (vi & 0x30) | (slot & 0xFC0) | (slot & 0xF)
+	// else-branch: new = (vi & 0xFF0) | (slot & 0xF) | ((slot & 0xF) << 6)
+	armAsm->Ldr(w11, MemOperand(x6, fmac_off + fmac_statusflag_off));  // slot.statusflag
+	armAsm->Ldr(w12, MemOperand(VU1_BASE_REG, vi_status_off));         // vi_status
+	armAsm->Tbz(w10, REG_STATUS_FLAG, &status_else);
+	// IF: w13 = (vi & 0x30) | (slot & 0xFC0) | (slot & 0xF)
+	armAsm->And(w13, w12, 0x30);
+	armAsm->And(a64::w8,  w11, 0xFC0);                            // reuse w8 as scratch
+	armAsm->Orr(w13, w13, a64::w8);
+	armAsm->And(a64::w8,  w11, 0xF);
+	armAsm->Orr(w13, w13, a64::w8);
+	armAsm->B(&status_done);
+	armAsm->Bind(&status_else);
+	// ELSE: w13 = (vi & 0xFF0) | (slot & 0xF) | ((slot & 0xF) << 6)
+	armAsm->And(w13, w12, 0xFF0);
+	armAsm->And(a64::w8,  w11, 0xF);
+	armAsm->Orr(w13, w13, a64::w8);
+	armAsm->Orr(w13, w13, Operand(a64::w8, LSL, 6));
+	armAsm->Bind(&status_done);
+	armAsm->Str(w13, MemOperand(VU1_BASE_REG, vi_status_off));
+
+	// VI[MAC] = slot.macflag (unconditional)
+	armAsm->Ldr(w11, MemOperand(x6, fmac_off + fmac_macflag_off));
+	armAsm->Str(w11, MemOperand(VU1_BASE_REG, vi_mac_off));
+
+	// Advance pos + decrement fmaccount.
+	armAsm->Add(w4, w4, 1);
+	armAsm->And(w4, w4, 3);
+	armAsm->Sub(VU1_FMACCOUNT_REG, VU1_FMACCOUNT_REG, 1);
+	armAsm->B(&loop_top);
+
+	armAsm->Bind(&exit_loop);
+	// Only Str fmacreadpos if it changed (matches the helper's tail check
+	// — avoids a dead write when zero slots drained).
+	armAsm->Cmp(w4, w5);
+	armAsm->B(eq, &no_pos_store);
+	armAsm->Str(w4, MemOperand(VU1_BASE_REG, fmacreadpos_off));
+	armAsm->Bind(&no_pos_store);
+}
+
 // Emit BL vu1_TestFMACStallReg(VU, reg, xyzw) only when reg != 0 AND the
 // compile-time pipeline tracker has not already proven no FMAC slot aliases
 // (skip0/skip1 flags come from Stage A of the mVUregs port — see the
@@ -3448,10 +3714,14 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 	Label fmac_stall_skip;
 	armAsm->Cbz(VU1_FMACCOUNT_REG, &fmac_stall_skip);
 
+	// 2026-05-17 REVERTED: inline emit + emitVu1CallNeonFree variants were
+	// breaking Futurama main menu. The NEON-clobber assumption (VF cache
+	// slot regs v17..v24 + broadcast v1 survive the BL because the helper
+	// is scalar-only per objdump) holds in Debug builds but breaks in
+	// Futurama. Back to the safe BL path via emitVu1Call which does the
+	// full vfCacheFlushAndInvalidate + viCacheInvalidateAll.
 	if (active0 && active1)
 	{
-		// Combined: one BL handles both reads. Args: VU=x0, fmaccount=w1,
-		// cycle=x2, reg0=w3, xyzw0=w4, reg1=w5, xyzw1=w6. Returns new cycle.
 		armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 		armAsm->Mov(x2, VU1_CYCLE_REG);
 		armAsm->Mov(w3, regs.VFread0);
@@ -3459,8 +3729,7 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 		armAsm->Mov(w5, regs.VFread1);
 		armAsm->Mov(w6, regs.VFr1xyzw);
 		armAsm->Mov(x0, VU1_BASE_REG);
-		// vu1_TestFMACStallReg2 is NEON-free + writes no memory we cache.
-		emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
+		emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg2));
 		armAsm->Mov(VU1_CYCLE_REG, x0);
 	}
 	else
@@ -3472,19 +3741,18 @@ static void emitFMACStallChecks(const _VURegsNum& regs, bool skip0, bool skip1)
 			armAsm->Mov(w3, regs.VFread0);
 			armAsm->Mov(w4, regs.VFr0xyzw);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			// vu1_TestFMACStallReg is NEON-free + read-only.
-			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 			armAsm->Mov(VU1_CYCLE_REG, x0);
 		}
 		if (active1)
 		{
-			emitDrainFmaccountReg(); // active0 path may have deferred again — defensive
+			emitDrainFmaccountReg(); // defensive — see prior comment
 			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 			armAsm->Mov(x2, VU1_CYCLE_REG);
 			armAsm->Mov(w3, regs.VFread1);
 			armAsm->Mov(w4, regs.VFr1xyzw);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestFMACStallReg));
 			armAsm->Mov(VU1_CYCLE_REG, x0);
 		}
 	}
@@ -4106,13 +4374,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	// FCxxx ops read CLIP, never MAC/STATUS, so they don't pull U/O.
 	bool block_reads_uo = false;
 	{
-		constexpr u32 FLAG_READ_MASK = (1u << REG_MAC_FLAG)
-		                              | (1u << REG_STATUS_FLAG)
-		                              | (1u << REG_CLIP_FLAG);
-		constexpr u32 UO_READ_MASK = (1u << REG_MAC_FLAG)
-		                            | (1u << REG_STATUS_FLAG);
-		bool sawFlagReader = false; // any pair > current reads flags
-		int  fmacFromEnd   = 0;     // count of FMAC pairs at indices > current
+		// MAC/STATUS readers only. CLIP_FLAG is owned by VCLIP, not regular
+		// FMAC writeback — including it here would force every FMAC pair in
+		// a block with an FCAND/FCEQ/FCOR/FCGET reader to emit mac/status
+		// flag-bit computation that nothing actually consumes. Splitting
+		// the mask matches the actual writeback split: FMAC → mac/status,
+		// VCLIP → clip.
+		constexpr u32 MAC_STATUS_READ_MASK = (1u << REG_MAC_FLAG)
+		                                    | (1u << REG_STATUS_FLAG);
+		constexpr u32 UO_READ_MASK = MAC_STATUS_READ_MASK;
+		bool sawMacStatusReader = false;  // any pair > current reads MAC/STATUS
+		int  fmacFromEnd        = 0;       // count of FMAC pairs at indices > current
 		for (int i = static_cast<int>(numPairs) - 1; i >= 0; i--)
 		{
 			const _VURegsNum& uregs = uregs_data[i];
@@ -4122,19 +4394,19 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			bool needsFlags = false;
 			if (isFmacPair)
 			{
-				if (!flagHackOn || fmacFromEnd < 4 || sawFlagReader)
+				if (!flagHackOn || fmacFromEnd < 4 || sawMacStatusReader)
 					needsFlags = true;
 				fmacFromEnd++;
 			}
 			pair_needs_flags[i] = needsFlags;
 
 			const u32 readsCombined = (uregs.VIread | lregs.VIread);
-			// Update sawFlagReader for the NEXT (earlier) iteration. The
-			// current pair's own flag read does not pull its own flag write
-			// — pipe latency means a same-pair FMxxx reads VI[FLAG] from
-			// 4+ cycles ago, not the upper FMAC's just-now-written value.
-			if (readsCombined & FLAG_READ_MASK)
-				sawFlagReader = true;
+			// Update sawMacStatusReader for the NEXT (earlier) iteration. The
+			// current pair's own flag read does not pull its own flag write —
+			// pipe latency means a same-pair FMxxx reads VI[FLAG] from 4+
+			// cycles ago, not the upper FMAC's just-now-written value.
+			if (readsCombined & MAC_STATUS_READ_MASK)
+				sawMacStatusReader = true;
 			if (readsCombined & UO_READ_MASK)
 				block_reads_uo = true;
 		}
@@ -4231,6 +4503,12 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		bool skipLowerEFUWait;
 		bool skipLowerALUStall;
 		bool skipTestPipes;
+		// True when Pass 1 proves FDIV/EFU/IALU are all empty + carry-safe
+		// at this pair, but ct_fmac_count > 0 (or carry-unsafe) so the
+		// TestPipes BL would still fire. In that case the BL would do
+		// only FMAC drain — we can inline that work and skip the BL.
+		// Skipped when skipTestPipes is already true (nothing to do).
+		bool fmacOnlyTestPipes;
 		// Phase 1 (microVU static-stall port) — compute-only fields filled
 		// in by the per-pair static-stall block after skipTestPipes is set.
 		//
@@ -4453,6 +4731,18 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// VI-visible writes (flag/Q/P) that need _vuTestPipes to commit.
 			skip_info[i].skipTestPipes =
 				ct_fmac_count == 0   && fmac_carry_safe
+				&& !ct_fdiv_pending  && fdiv_carry_safe
+				&& !ct_efu_pending   && efu_carry_safe
+				&& ct_ialu_count == 0 && ialu_carry_safe;
+
+			// Inline-FMAC-drain eligibility: FDIV/EFU/IALU provably empty +
+			// carry-safe means the runtime helper would only walk the FMAC
+			// ring. We can inline that loop and skip the BL entirely.
+			// Skipped when skipTestPipes already elides the whole site, or
+			// when ct_fmac_count == 0 (the 2-tier inline gate already skips
+			// the helper at runtime, so inlining a no-op buys nothing).
+			skip_info[i].fmacOnlyTestPipes =
+				!skip_info[i].skipTestPipes
 				&& !ct_fdiv_pending  && fdiv_carry_safe
 				&& !ct_efu_pending   && efu_carry_safe
 				&& ct_ialu_count == 0 && ialu_carry_safe;
@@ -5257,17 +5547,20 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// Guard kept as a static const so the divert can be toggled in one
 		// place if a regression turns up.
 		//
-		// 2026-04-25: was reverted to false after GoW2 menu showed FMAC
-		// pipeline divergence with naive upper-then-lower (lower read
-		// upper's just-written vfX). Re-enabled with the deferred-
-		// writeback path below: upper's FMAC computes v5 + updates pinned
-		// flag regs but SPILLS v5 to g_vu1DeferredVfStash instead of
-		// committing to VF[X]; lower then emits and reads original VF[X]
-		// from memory/broadcast-cache; after lower we reload from stash
-		// and call vfCacheStore — matches interp's save/restore semantics.
-		// Eliminates the BL-into-vu1Exec roundtrip for transform-heavy
-		// pairs (MUL/MADD upper writes vfX, SQ/MTIR/MR32 lower reads vfX).
-		static constexpr bool kAllowReadAfterWriteNative = true;
+		// 2026-04-25: reverted to false (GoW2 menu transform divergence).
+		// 2026-05-16: re-enabled with deferred-writeback path → +50% GoW2
+		//             in-game (worked correctly for GoW2 scene).
+		// 2026-05-17: REVERTED AGAIN — Futurama main menu broke after the
+		//             defer change. GoW2 happens to be tolerant; Futurama
+		//             tripped on something not yet isolated. Defer
+		//             machinery (g_vu1DeferVfWriteback / stash / spill in
+		//             the 5 writeback sites) stays in place but is
+		//             constant-false dead code with this toggle off, so
+		//             flipping back to true after a fix is a one-line
+		//             change. Hazard pairs go back to the BL-into-vu1Exec
+		//             fallback path until the Futurama divergence is root-
+		//             caused.
+		static constexpr bool kAllowReadAfterWriteNative = false;
 		const bool vf_hazard = ir_op.vf_write_collision ||
 			(!kAllowReadAfterWriteNative && ir_op.vf_read_after_write);
 		const bool vi_hazard = ir_op.clip_write_collision || ir_op.clip_read_after_write;
@@ -5591,14 +5884,19 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// fall through to call_helper
 
 			armAsm->Bind(&call_helper);
+			// 2026-05-17 REVERTED: emitVu1CallNeonFree + inline FMAC drain
+			// were breaking Futurama main menu. The NEON-clobber assumption
+			// (helper is scalar-only per objdump → VF cache slots survive
+			// the BL) held in our Debug build but tripped Futurama
+			// somewhere — possibly a Release-build vectorization, a
+			// libc-pulled NEON helper for u64 math, or a cache-state
+			// interaction not yet pinned down. Back to safe emitVu1Call
+			// (full vfCacheFlushAndInvalidate + viCacheInvalidateAll)
+			// until the assumption is verified the right way.
 			armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 			armAsm->Mov(x2, VU1_CYCLE_REG);
 			armAsm->Mov(x0, VU1_BASE_REG);
-			// vu1_TestPipes_VU1 is NEON-free (see emitVu1CallNeonFree
-			// doc). Skipping vfCacheFlushAndInvalidate alone saves 3-6
-			// Strs per call — and this BL fires every pair on transform-
-			// heavy blocks. Was 19.49% of total CPU on GoW2 in-game.
-			emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+			emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 			armAsm->Mov(VU1_FMACCOUNT_REG, w0);
 
 			armAsm->Bind(&skip_helper);
