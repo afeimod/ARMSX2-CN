@@ -92,11 +92,11 @@
     </string-array>
     <string-array name="auto_flush_hw">
         <item>Nonaktif</item>
-        <item>Hanya Sprite</item>
+        <item>Hanya untuk Sprite ini</item>
         <item>Aktifkan</item>
     </string-array>
     <string-array name="cpu_cores_basic">
-        <item>Translator (Bawaan)</item>
+        <item>Terjemahan (Bawaan)</item>
         <item>Interpreter</item>
     </string-array>
     <string-array name="network_ethapi">
