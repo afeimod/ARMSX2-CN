@@ -126,11 +126,11 @@ Buka nanti dari Pengaturan → Buka direktori ARMSX2.</string>
     <string name="drawer_resolution_scale">Tingkat Resolusi</string>
     <string name="drawer_patches">Tambalan</string>
     <string name="drawer_no_interlacing">No Interlacing</string>
-    <string name="drawer_textures">Texstur</string>
+    <string name="drawer_textures">Tekstur</string>
     <string name="drawer_developer">Pengembang</string>
     <string name="drawer_dev_hud_overlay">Dev: HUD overlay</string>
     <string name="drawer_controller_mode">Mode Kontroller</string>
-    <string name="drawer_test_controller_input">Tes Kontroller Input</string>
+    <string name="drawer_test_controller_input">Tes Kontroller Masukan</string>
     <string name="drawer_about">Tentang</string>
     <string name="drawer_settings">Pengaturan</string>
     <string name="drawer_about_armsx2">Tentang ARMSX2</string>
@@ -189,7 +189,7 @@ Buka nanti dari Pengaturan → Buka direktori ARMSX2.</string>
     <string name="settings_cas_mode">CAS Mode</string>
     <string name="settings_cas_sharpness_default">CAS Sharpness: 50%</string>
     <string name="settings_cas_sharpness_value">CAS Sharpness: %1$d%%</string>
-    <string name="settings_hardware_mipmapping">Hardware Mipmapping</string>
+    <string name="settings_hardware_mipmapping">Mipmapping Perangkat keras</string>
     <string name="settings_vsync">VSync</string>
     <string name="settings_auto_flush_software">Auto Flush (Software)</string>
     <string name="settings_auto_flush_hardware">Auto Flush (Hardware)</string>
