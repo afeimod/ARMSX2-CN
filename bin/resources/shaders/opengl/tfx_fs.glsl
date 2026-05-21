@@ -506,7 +506,7 @@ vec4 sample_depth(vec2 st)
 
 
 #elif PS_DEPTH_FMT == 1
-	// Based on ps_convert_float32_rgba8 of convert
+	// Based on ps_convert_depth32_rgba8 of convert
 	// Convert a GL_FLOAT32 depth texture into a RGBA color texture
 #if HAS_CLIP_CONTROL
 	uint d = uint(fetch_c(uv).r * exp2(32.0f));
@@ -516,7 +516,7 @@ vec4 sample_depth(vec2 st)
 	t = vec4(uvec4((d & 0xFFu), ((d >> 8) & 0xFFu), ((d >> 16) & 0xFFu), (d >> 24)));
 
 #elif PS_DEPTH_FMT == 2
-	// Based on ps_convert_float16_rgb5a1 of convert
+	// Based on ps_convert_depth16_rgb5a1 of convert
 	// Convert a GL_FLOAT32 (only 16 lsb) depth into a RGB5A1 color texture
 #if HAS_CLIP_CONTROL
 	uint d = uint(fetch_c(uv).r * exp2(32.0f));
