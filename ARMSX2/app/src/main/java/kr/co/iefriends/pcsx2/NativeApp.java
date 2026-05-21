@@ -97,6 +97,11 @@ public class NativeApp {
 	 *  (active=false, items=[]) when no game is loaded or not logged in. */
 	public static native String getAchievementsJSON();
 
+	/** Live RetroAchievements rich-presence string. Recomputed every
+	 *  second on the native side from the game's RAM. Empty when no game,
+	 *  no client, or RP not supported by the loaded set. */
+	public static native String getRichPresence();
+
 	/** RetroAchievements password login. Returns null on success or a
 	 *  human-readable error string. Synchronous — runs the HTTP login
 	 *  request to completion, may take a few seconds. Callers MUST

@@ -325,6 +325,20 @@ Java_kr_co_iefriends_pcsx2_NativeApp_getAchievementsJSON(JNIEnv *env, jclass cla
     return env->NewStringUTF(json.c_str());
 }
 
+// Live RetroAchievements rich-presence string — the rcheevos client
+// recomputes this each second from the game's RAM (see Achievements.cpp
+// UpdateRichPresence). On Android the AchievementsPanel polls this
+// alongside the achievements JSON; rcheevos also auto-pings the RA
+// server with the same string so the user's RA profile shows it. Returns
+// empty string when no client / no game / RP not yet computed.
+extern "C"
+JNIEXPORT jstring JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_getRichPresence(JNIEnv *env, jclass clazz) {
+    if (!Achievements::HasRichPresence())
+        return env->NewStringUTF("");
+    return env->NewStringUTF(Achievements::GetRichPresenceString().c_str());
+}
+
 // RetroAchievements password login. Synchronous — Achievements::Login waits
 // for the HTTP request internally. Returns null on success, otherwise a
 // human-readable error string (rcheevos message or "Failed to create

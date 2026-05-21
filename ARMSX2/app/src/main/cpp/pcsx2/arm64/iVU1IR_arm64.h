@@ -134,6 +134,30 @@ struct alignas(16) microOp
 	// proven non-negative by the per-block forward sign tracker. The
 	// emitter swaps Fabs for a direct load-into-v5, saving 1 Fabs insn.
 	bool abs_src_known_non_neg;
+
+	// FMAC opt #19: matrix-vector MAC cluster fusion (MULAx → MADDAy →
+	// MADDAz → MADDw). The four-pair pattern computes M×v where M is a
+	// column-major 4×4 (cols VF[fs0..fs3]) and v is VF[ft]. Each pair
+	// currently emits ~5 NEON insns (Mov-from-ACC, Fmul lane, Fadd,
+	// Mov-to-ACC, writeback); fusing eliminates the per-pair ACC scratch
+	// dance and keeps the running accumulator in v5 across all 4 pairs.
+	//
+	// mac_cluster_lead    — set on the MULAx that starts a confirmed chain.
+	//                       Per-pair emit on this pair emits the WHOLE
+	//                       4-pair NEON sequence + writes ACC + writes VFd.
+	// mac_cluster_member  — set on the MADDAy/MADDAz/MADDw that follow.
+	//                       Per-pair emit no-ops (chain leader already
+	//                       computed the result). cycle++/fmaccount still
+	//                       increment normally since each VU pair still
+	//                       consumes one cycle.
+	//
+	// Confirmation gates (all required, conservative): 4 consecutive
+	// pairs MULAx/MADDAy/MADDAz/MADDw; shared VF[ft]; xyzw=0xF on all
+	// four (full-vector ops); no flag dependence between cluster pairs;
+	// no VF/CLIP hazard with the lower; first three write ACC, fourth
+	// writes VFd. Anything else falls back to per-pair codegen.
+	bool mac_cluster_lead;
+	bool mac_cluster_member;
 };
 
 // Block-level IR. Lives alongside the existing skip_info[] / pair_needs_flags[]

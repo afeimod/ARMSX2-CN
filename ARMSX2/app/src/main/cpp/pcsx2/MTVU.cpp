@@ -5,6 +5,7 @@
 #include "Gif_Unit.h"
 #include "MTVU.h"
 #include "VMManager.h"
+#include "VU1Fingerprint.h"
 #include "Vif_Dynarec.h"
 
 #include <thread>
@@ -190,6 +191,10 @@ void VU_Thread::ExecuteRingBuffer()
 					u32 size = Read();
 					CpuVU1->Clear(vu_micro_addr, size);
 					Read(&VU1.Micro[vu_micro_addr], size);
+					// Fingerprint observation runs on the VU thread (this
+					// thread) so the per-PC lookup cache invalidation lands
+					// in the same thread as the dispatcher that reads it.
+					VU1Fingerprint::OnUpload(1, vu_micro_addr, &VU1.Micro[vu_micro_addr], size);
 					break;
 				}
 				case MTVU_VU_WRITE_DATA:

@@ -16,6 +16,7 @@
 #include "Gif_Unit.h"
 #include "Memory.h"
 #include "MTVU.h"
+#include "VU1Fingerprint.h"
 #include "VUmicro.h"
 #include "VUops.h"
 #include "arm64/arm64Emitter.h"
@@ -1260,6 +1261,131 @@ void mvu1AnalyzeBlock(
 		ir.info[i + 1].batch_from_prev = true;
 	}
 
+	// FMAC opt #19: matrix-vector MAC cluster fusion. Detect the canonical
+	// 4-pair pattern MULAx → MADDAy → MADDAz → MADDw with shared VF[ft]
+	// (the broadcast vector) and 4 distinct VF[fs] (the 4 matrix columns).
+	// Mark the lead pair (MULAx) so its emit produces the whole NEON
+	// sequence in one go; mark the 3 followers as members so their per-pair
+	// emit no-ops (chain head already computed everything).
+	//
+	// Conservative gates (any failure → no fusion, fall through to per-pair):
+	//   - 4 consecutive pairs
+	//   - Upper opcodes match MULAx/MADDAy/MADDAz/MADDw exactly
+	//   - Same VF[ft] across all 4 pairs (single broadcast vector)
+	//   - xyzw mask = 0xF on every pair (full-vector op; partial masks
+	//     would need lane-merging logic we don't have)
+	//   - I-bit not set on any cluster pair (no immediate float dance)
+	//   - No VF read-after-write or CLIP hazard on any cluster pair
+	//   - No flag-reader op on any cluster pair (members can't be observed
+	//     mid-cluster, so no FCAND/FMAND between MULAx and MADDw)
+	//   - First three uppers write to ACC (toACC=1 in encoding), fourth
+	//     writes to VF[fd] with fd != 0
+	//   - VFd of the MADDw is not VF[0] (interp no-ops fd==0 case)
+	for (u32 i = 0; i < numPairs; i++)
+	{
+		ir.info[i].mac_cluster_lead   = false;
+		ir.info[i].mac_cluster_member = false;
+	}
+
+	auto isClusterUpper = [](u32 upper, u32 expected_op6_low5, bool to_acc) -> bool {
+		const u32 op6 = upper & 0x3Fu;
+		// MULAx/MADDAy/MADDAz are encoded in the FD_xx subtables:
+		//   MULAx  : op6 = 0x3C (FD_00), _Fd_ field = 0x06 (= MULAx slot)
+		//   MADDAy : op6 = 0x3D (FD_01), _Fd_ field = 0x02 (= MADDAy)
+		//   MADDAz : op6 = 0x3E (FD_10), _Fd_ field = 0x02 (= MADDAz)
+		// MADDw is in the top-level UPPER table at op6 = 0x0B.
+		// Caller passes the *expected* op6 and the expected sub-encoding
+		// via expected_op6_low5 (a u5 packed: bit0..4 = lookup pattern):
+		//   - 0b00000 → top-level MADDw: op6 = 0x0B
+		//   - 0b00001 → FD_00 MULAx:     op6 = 0x3C, fd = 0x06
+		//   - 0b00010 → FD_01 MADDAy:    op6 = 0x3D, fd = 0x02
+		//   - 0b00011 → FD_10 MADDAz:    op6 = 0x3E, fd = 0x02
+		(void)to_acc;
+		const u32 fd = (upper >> 6) & 0x1Fu;
+		switch (expected_op6_low5)
+		{
+			case 0: return op6 == 0x0Bu;                          // MADDw
+			case 1: return op6 == 0x3Cu && fd == 0x06u;           // MULAx
+			case 2: return op6 == 0x3Du && fd == 0x02u;           // MADDAy
+			case 3: return op6 == 0x3Eu && fd == 0x02u;           // MADDAz
+		}
+		return false;
+	};
+
+	auto isFullMask = [](const _VURegsNum& uregs) -> bool {
+		return uregs.VFwxyzw == 0xFu;
+	};
+
+	for (u32 i = 0; i + 3 < numPairs; i++)
+	{
+		const u32 u0 = ir.info[i + 0].upper;
+		const u32 u1 = ir.info[i + 1].upper;
+		const u32 u2 = ir.info[i + 2].upper;
+		const u32 u3 = ir.info[i + 3].upper;
+
+		// Opcode pattern check.
+		if (!isClusterUpper(u0, 1, true))  continue; // MULAx → ACC
+		if (!isClusterUpper(u1, 2, true))  continue; // MADDAy → ACC
+		if (!isClusterUpper(u2, 3, true))  continue; // MADDAz → ACC
+		if (!isClusterUpper(u3, 0, false)) continue; // MADDw → VF[fd]
+
+		// Shared broadcast vector (VF[ft]).
+		const u32 ft0 = (u0 >> 16) & 0x1Fu;
+		const u32 ft1 = (u1 >> 16) & 0x1Fu;
+		const u32 ft2 = (u2 >> 16) & 0x1Fu;
+		const u32 ft3 = (u3 >> 16) & 0x1Fu;
+		if (ft0 != ft1 || ft1 != ft2 || ft2 != ft3) continue;
+
+		// Full xyzw mask on each pair (lane-merge isn't implemented).
+		if (!isFullMask(uregs_data[i + 0])) continue;
+		if (!isFullMask(uregs_data[i + 1])) continue;
+		if (!isFullMask(uregs_data[i + 2])) continue;
+		if (!isFullMask(uregs_data[i + 3])) continue;
+
+		// I-bit on any cluster pair would mean lower is immediate, not
+		// an opcode — disrupts our "the lower runs normally per pair"
+		// invariant (which keeps integer/load-store interleaving safe).
+		if (ir.info[i + 0].iBit) continue;
+		if (ir.info[i + 1].iBit) continue;
+		if (ir.info[i + 2].iBit) continue;
+		if (ir.info[i + 3].iBit) continue;
+
+		// No VF/CLIP hazards between upper and lower in any cluster pair.
+		// Hazard pairs run through vu1Exec interp fallback — fusing them
+		// would skip semantics the interp would have applied.
+		bool hazard = false;
+		for (u32 k = 0; k < 4 && !hazard; k++)
+		{
+			const microOp& mo = ir.info[i + k];
+			if (mo.vf_read_after_write || mo.vf_write_collision)   hazard = true;
+			if (mo.clip_read_after_write || mo.clip_write_collision) hazard = true;
+		}
+		if (hazard) continue;
+
+		// No flag-reader lower on any cluster pair — FCAND/FMAND etc.
+		// between MULAx and MADDw would observe the partial accumulator.
+		// (In practice these never appear inside a transform cluster, but
+		// be safe.)
+		if (ir.info[i + 0].isFlagRead) continue;
+		if (ir.info[i + 1].isFlagRead) continue;
+		if (ir.info[i + 2].isFlagRead) continue;
+		if (ir.info[i + 3].isFlagRead) continue;
+
+		// MADDw destination must not be VF[0].
+		const u32 fd3 = (u3 >> 6) & 0x1Fu;
+		if (fd3 == 0) continue;
+
+		// All gates passed — mark the cluster.
+		ir.info[i + 0].mac_cluster_lead   = true;
+		ir.info[i + 1].mac_cluster_member = true;
+		ir.info[i + 2].mac_cluster_member = true;
+		ir.info[i + 3].mac_cluster_member = true;
+
+		// Advance past the cluster so we don't overlap (e.g., the MADDw
+		// can't be the lead of a new cluster — it's a follower).
+		i += 3;
+	}
+
 	// ABS-of-known-positive elimination (FMAC opt #4). Forward-walk the
 	// block tracking per-VF per-lane "known non-negative" sign state. The
 	// canonical pattern is `MAX vfD, vfA, vf0` — vf0's bit pattern is
@@ -1362,6 +1488,14 @@ void emitVU1Lower(u32 lower);
 // dispatching the upper emitter — when false, FMAC arithmetic emitters
 // skip the BL vu1_fmac_writeback and inline a NEON clamp + store instead.
 extern bool g_vu1NeedsFlags;
+extern bool g_vu1MacClusterLead;
+extern bool g_vu1MacClusterMember;
+extern u32  g_vu1MacClusterFt;
+extern u32  g_vu1MacClusterFs0;
+extern u32  g_vu1MacClusterFs1;
+extern u32  g_vu1MacClusterFs2;
+extern u32  g_vu1MacClusterFs3;
+extern u32  g_vu1MacClusterFd;
 extern u32 g_vu1CurrentPC;
 // analyzeBranchVI gate (audit item #12) — set per-pair from
 // ir.info[i].needs_vi_backup before the lower emit. When false, the
@@ -5979,6 +6113,69 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// FMAC opt #4: ABS-of-known-positive gate.
 		g_vu1AbsSrcKnownNonNeg = ir_op.abs_src_known_non_neg;
 
+		// FMAC opt #19: matrix-vector MAC cluster fusion gates.
+#ifdef VU1_SHADOW_VERIFY
+		// MAC fusion changes intermediate ACC visibility between cluster
+		// pairs — under per-pair shadow scope the verifier sees pair K's
+		// ACC before pair K+1 ran, but fusion writes the final ACC only
+		// after K+3. Force-disable under shadow so per-pair commits stay
+		// in sync with interp.
+		g_vu1MacClusterLead   = false;
+		g_vu1MacClusterMember = false;
+		g_vu1MacClusterFt     = 0;
+		g_vu1MacClusterFs0    = 0;
+		g_vu1MacClusterFs1    = 0;
+		g_vu1MacClusterFs2    = 0;
+		g_vu1MacClusterFs3    = 0;
+		g_vu1MacClusterFd     = 0;
+#else
+		// Downgrade gate: the fused emit path doesn't compute per-pair MAC
+		// flags. If any pair in the cluster needs flags (Pass 1's
+		// pair_needs_flags), force the whole cluster back to per-pair emit.
+		// Clear flags on ALL 4 IR entries so subsequent iterations see
+		// the downgrade.
+		if (ir_op.mac_cluster_lead && i + 3 < numPairs)
+		{
+			bool any_needs_flags = false;
+			for (u32 k = 0; k < 4 && !any_needs_flags; k++)
+				if (pair_needs_flags[i + k]) any_needs_flags = true;
+			if (any_needs_flags)
+			{
+				ir.info[i + 0].mac_cluster_lead   = false;
+				ir.info[i + 1].mac_cluster_member = false;
+				ir.info[i + 2].mac_cluster_member = false;
+				ir.info[i + 3].mac_cluster_member = false;
+			}
+		}
+
+		g_vu1MacClusterLead   = ir.info[i].mac_cluster_lead;   // re-read (may have just been downgraded)
+		g_vu1MacClusterMember = ir.info[i].mac_cluster_member; // (downgraded by an earlier iteration's lead check)
+		g_vu1MacClusterFt     = (ir_op.upper >> 16) & 0x1Fu;
+		if (g_vu1MacClusterLead && i + 3 < numPairs)
+		{
+			// Read the follower pairs' upper words from the IR so the
+			// MULAx emit can issue the full chain in one shot. The IR
+			// snapshot (ir.info[k].upper) is identical to VU1.Micro at
+			// compile time — both come from the same source bytes.
+			const u32 u1 = ir.info[i + 1].upper;
+			const u32 u2 = ir.info[i + 2].upper;
+			const u32 u3 = ir.info[i + 3].upper;
+			g_vu1MacClusterFs0 = (ir_op.upper >> 11) & 0x1Fu; // MULAx fs
+			g_vu1MacClusterFs1 = (u1          >> 11) & 0x1Fu; // MADDAy fs
+			g_vu1MacClusterFs2 = (u2          >> 11) & 0x1Fu; // MADDAz fs
+			g_vu1MacClusterFs3 = (u3          >> 11) & 0x1Fu; // MADDw  fs
+			g_vu1MacClusterFd  = (u3          >>  6) & 0x1Fu; // MADDw  fd
+		}
+		else
+		{
+			g_vu1MacClusterFs0 = 0;
+			g_vu1MacClusterFs1 = 0;
+			g_vu1MacClusterFs2 = 0;
+			g_vu1MacClusterFs3 = 0;
+			g_vu1MacClusterFd  = 0;
+		}
+#endif
+
 		// vf_read_after_write deferred writeback gate. When set, the FMAC
 		// writeback emit spills v5 to g_vu1DeferredVfStash instead of
 		// committing to VF[X] — keeps lower's read of VF[X] pointed at the
@@ -6897,6 +7094,13 @@ void recArmVU1::Execute(u32 cycles)
 	{
 		const u32 pc   = VU1.VI[REG_TPC].UL & (VU1_PROGSIZE - 1);
 		const u32 slot = pc / 8;
+
+		// VU1 fingerprint telemetry hook. g_kernels is empty (kernel
+		// substitution is parked — JIT-level NEON peephole is the active
+		// optimization path), so OnDispatch always returns nullptr after
+		// bumping the per-slot dispatch counter + periodic top-N log.
+		// Steady-state cost on cache hit: ~6 instructions.
+		(void)VU1Fingerprint::OnDispatch(pc);
 
 		// Content-keyed lookup: scan the slot's deque for a variant whose
 		// snapshot matches live VU1.Micro at `pc`. A hit bubbles the variant

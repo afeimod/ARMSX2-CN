@@ -266,6 +266,15 @@ fun AchievementsPanel(
                         else InGameOverlay.RendererMode.Software
                 }
             }
+            // Rich-presence read — written into the shared overlay state so
+            // GameInfoHeader (the disc-ID / star-rating row) can surface it
+            // as a one-line subtitle. Skip the JNI marshal when the client
+            // isn't active (no game / not logged in).
+            InGameOverlay.richPresence.value = if (s.active) {
+                runCatching {
+                    withContext(Dispatchers.IO) { NativeApp.getRichPresence() }
+                }.getOrNull() ?: ""
+            } else ""
             delay(4000)
         }
     }

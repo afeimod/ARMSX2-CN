@@ -131,6 +131,7 @@ set(pcsx2Sources
 	VUmicro.cpp
 	VU0micro.cpp
 	VU0microInterp.cpp
+	VU1Fingerprint.cpp
 	VU1micro.cpp
 	VU1microInterp.cpp
 	VUflags.cpp
@@ -200,6 +201,7 @@ set(pcsx2Headers
 	VMManager.h
 	vtlb.h
 	VUflags.h
+	VU1Fingerprint.h
 	VUmicro.h
 	VUops.h)
 

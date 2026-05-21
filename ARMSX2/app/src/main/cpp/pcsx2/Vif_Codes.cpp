@@ -5,6 +5,7 @@
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
+#include "VU1Fingerprint.h"
 #include "VUmicro.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
@@ -331,6 +332,9 @@ static __fi void _vifCode_MPG(int idx, u32 addr, const u32* data, int size)
 			vu1Thread.WriteMicroMem(addr, (u8*)data, size * 4);
 			vifX.tag.addr += size * 4;
 		}
+		// MTVU path: fingerprint observation happens on the VU thread side
+		// in MTVU.cpp::MTVU_VU_WRITE_MICRO so the cache invalidation lands
+		// in the same thread that runs the dispatcher.
 		return;
 	}
 
@@ -348,6 +352,12 @@ static __fi void _vifCode_MPG(int idx, u32 addr, const u32* data, int size)
 		data += (vuMemSize - addr) / 4;
 		memcpy(VUx.Micro, data, size * 4);
 
+		if (idx)
+		{
+			VU1Fingerprint::OnUpload(1, addr, VUx.Micro + addr, vuMemSize - addr);
+			VU1Fingerprint::OnUpload(1, 0, VUx.Micro, size * 4);
+		}
+
 		vifX.tag.addr = size * 4;
 	}
 	else
@@ -361,6 +371,9 @@ static __fi void _vifCode_MPG(int idx, u32 addr, const u32* data, int size)
 		else
 			CpuVU1->Clear(addr, size * 4);
 		memcpy(VUx.Micro + addr, data, size * 4); //from tests, memcpy is 1fps faster on Grandia 3 than memcpy
+
+		if (idx)
+			VU1Fingerprint::OnUpload(1, addr, VUx.Micro + addr, size * 4);
 
 		vifX.tag.addr += size * 4;
 	}

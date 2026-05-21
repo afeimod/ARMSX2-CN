@@ -102,6 +102,29 @@ bool g_vu1BatchFromPrev = false;
 // swap Fabs for a direct slot→v5 load (saves 1 Fabs insn).
 bool g_vu1AbsSrcKnownNonNeg = false;
 
+// FMAC opt #19: matrix-vector MAC cluster fusion. Set per-emit by
+// CompileBlock from microIR Pass 1 detection.
+//
+//   g_vu1MacClusterLead   — this pair is the MULAx that leads a confirmed
+//                           4-pair MULAx+MADDAy+MADDAz+MADDw chain. The
+//                           MULAx recVU1 emitter handles the WHOLE chain
+//                           and stashes the matrix cols + writes back ACC
+//                           + writes VFd of the trailing MADDw.
+//   g_vu1MacClusterMember — this pair is one of the three MADD followers.
+//                           recVU1 emitter no-ops the math (lead already
+//                           did it); the existing per-pair cycle/fmaccount
+//                           accounting in CompileBlock still increments.
+//   g_vu1MacClusterFt     — VF[ft] = the shared broadcast vector for the
+//                           chain. Lead emit uses this; followers ignore.
+bool g_vu1MacClusterLead   = false;
+bool g_vu1MacClusterMember = false;
+u32  g_vu1MacClusterFt     = 0; // shared broadcast vector
+u32  g_vu1MacClusterFs0    = 0; // MULAx fs  = matrix col 0
+u32  g_vu1MacClusterFs1    = 0; // MADDAy fs = matrix col 1
+u32  g_vu1MacClusterFs2    = 0; // MADDAz fs = matrix col 2
+u32  g_vu1MacClusterFs3    = 0; // MADDw fs  = matrix col 3
+u32  g_vu1MacClusterFd     = 0; // MADDw fd  = result destination (non-zero, gated by Pass 1)
+
 // ============================================================================
 //  Deferred VF writeback for vf_read_after_write hazard pairs.
 //
@@ -2241,7 +2264,81 @@ FMAC_BINARY_FULL(MUL, 2, false)
 #if ISTUB_VU_MULAx
 REC_VU1_UPPER_INTERP(MULAx)
 #else
-FMAC_BINARY_BC(MULAx, 2, 0, true)
+// Hand-written instead of FMAC_BINARY_BC(MULAx, 2, 0, true) so we can
+// intercept the MAC-cluster-fusion fast path. Baseline (non-cluster)
+// codegen is byte-identical to what the macro would have produced.
+void recVU1_MULAx() {
+	if (g_vu1MacClusterLead) {
+		// FMAC opt #19: full 4-pair MULAx→MADDAy→MADDAz→MADDw chain in
+		// one NEON sequence. Reads pre-validated cluster fields set by
+		// CompileBlock from the microIR.
+		//
+		// Layout (NEON regs):
+		//   v0..v3 = matrix cols VF[fs0..fs3]
+		//   v4     = broadcast vector VF[ft]
+		//   v5     = scratch (intermediate per-pair product)
+		//   v16    = pinned VU1_ACC_REG (final ACC after MADDAz)
+		//
+		// Semantics preserved (vs per-pair):
+		//   * Two-rounded math: each step uses separate Fmul + Fadd
+		//     (NOT FMA) to match PS2's FMUL+FADD two-rounding behavior
+		//     that the codebase explicitly preserves (see line 1242
+		//     comment + memory armsx2-vu-interp-fp-contract).
+		//   * Pinned ACC: VU1_ACC_REG carries the accumulator across
+		//     pairs; per-pair Mov-from/to-ACC dance is collapsed.
+		//   * MADDw semantics: VF[fd] = ACC + col3*vec.w; ACC keeps
+		//     the value from MADDAz (NOT updated by MADDw).
+		const u32 fs0 = g_vu1MacClusterFs0;
+		const u32 fs1 = g_vu1MacClusterFs1;
+		const u32 fs2 = g_vu1MacClusterFs2;
+		const u32 fs3 = g_vu1MacClusterFs3;
+		const u32 ft  = g_vu1MacClusterFt;
+		const u32 fd  = g_vu1MacClusterFd;
+
+		// Step 1: load the four matrix columns and the broadcast vector
+		// from the VF cache. vfCacheLoadInto hits the slot directly if
+		// resident; otherwise emits one Ldr.
+		vfCacheLoadInto(static_cast<int>(fs0), v0);
+		vfCacheLoadInto(static_cast<int>(fs1), v1);
+		vfCacheLoadInto(static_cast<int>(fs2), v2);
+		vfCacheLoadInto(static_cast<int>(fs3), v3);
+		vfCacheLoadInto(static_cast<int>(ft),  v4);
+
+		// Step 2: MULAx → ACC = col0 * vec.x  (writes pinned VU1_ACC_REG).
+		armAsm->Fmul(VU1_ACC_REG.V4S(), v0.V4S(), v4.S(), 0);
+
+		// Step 3: MADDAy → ACC += col1 * vec.y  (separate FMUL+FADD).
+		armAsm->Fmul(v5.V4S(), v1.V4S(), v4.S(), 1);
+		armAsm->Fadd(VU1_ACC_REG.V4S(), VU1_ACC_REG.V4S(), v5.V4S());
+
+		// Step 4: MADDAz → ACC += col2 * vec.z.
+		armAsm->Fmul(v5.V4S(), v2.V4S(), v4.S(), 2);
+		armAsm->Fadd(VU1_ACC_REG.V4S(), VU1_ACC_REG.V4S(), v5.V4S());
+
+		// Step 5: MADDw → VFd = ACC + col3 * vec.w. ACC unchanged.
+		armAsm->Fmul(v5.V4S(), v3.V4S(), v4.S(), 3);
+		armAsm->Fadd(v5.V4S(), VU1_ACC_REG.V4S(), v5.V4S());
+
+		// Step 6: writeback VFd via the cache (deferred Str fires at
+		// block end / hazard boundary / BL via vfCacheFlushAndInvalidate).
+		// fd != 0 is gated by Pass 1.
+		vfCacheStore(static_cast<int>(fd), v5, 0xF);
+
+		// Invalidate broadcast plan — we just bypassed the planning machinery.
+		vu1BroadcastCacheReset();
+		return;
+	}
+
+	// Baseline (mirrors FMAC_BINARY_BC(MULAx, 2, 0, true) expansion).
+	const u32 fd = (VU1.code >> 6) & 0x1F;
+	(void)fd;
+	const u32 fs = (VU1.code >> 11) & 0x1F;
+	const u32 ft = (VU1.code >> 16) & 0x1F;
+	const u32 xyzw = (VU1.code >> 21) & 0xF;
+	emitLoadBroadcast(ft, 0);
+	int64_t dst = accOff();
+	emitBinaryFmac(2, fs, dst, xyzw);
+}
 #endif
 
 #if ISTUB_VU_MULAy
@@ -2305,7 +2402,17 @@ FMAC_TERNARY_BC(MADDz, false, 2, false)
 #if ISTUB_VU_MADDw
 REC_VU1_UPPER_INTERP(MADDw)
 #else
-FMAC_TERNARY_BC(MADDw, false, 3, false)
+// Hand-written for MAC cluster member check (FMAC opt #19).
+void recVU1_MADDw() {
+	if (g_vu1MacClusterMember) return; // chain head already emitted everything
+	const u32 fd = (VU1.code >> 6) & 0x1F;
+	const u32 fs = (VU1.code >> 11) & 0x1F;
+	const u32 ft = (VU1.code >> 16) & 0x1F;
+	const u32 xyzw = (VU1.code >> 21) & 0xF;
+	emitLoadBroadcast(ft, 3);
+	int64_t dst = vfOff(fd);
+	emitTernaryFmac(false, fs, dst, xyzw);
+}
 #endif
 
 #if ISTUB_VU_MADDq
@@ -2339,13 +2446,35 @@ FMAC_TERNARY_BC(MADDAx, false, 0, true)
 #if ISTUB_VU_MADDAy
 REC_VU1_UPPER_INTERP(MADDAy)
 #else
-FMAC_TERNARY_BC(MADDAy, false, 1, true)
+// Hand-written for MAC cluster member check (FMAC opt #19).
+void recVU1_MADDAy() {
+	if (g_vu1MacClusterMember) return; // chain head already emitted everything
+	const u32 fd = (VU1.code >> 6) & 0x1F;
+	(void)fd;
+	const u32 fs = (VU1.code >> 11) & 0x1F;
+	const u32 ft = (VU1.code >> 16) & 0x1F;
+	const u32 xyzw = (VU1.code >> 21) & 0xF;
+	emitLoadBroadcast(ft, 1);
+	int64_t dst = accOff();
+	emitTernaryFmac(false, fs, dst, xyzw);
+}
 #endif
 
 #if ISTUB_VU_MADDAz
 REC_VU1_UPPER_INTERP(MADDAz)
 #else
-FMAC_TERNARY_BC(MADDAz, false, 2, true)
+// Hand-written for MAC cluster member check (FMAC opt #19).
+void recVU1_MADDAz() {
+	if (g_vu1MacClusterMember) return; // chain head already emitted everything
+	const u32 fd = (VU1.code >> 6) & 0x1F;
+	(void)fd;
+	const u32 fs = (VU1.code >> 11) & 0x1F;
+	const u32 ft = (VU1.code >> 16) & 0x1F;
+	const u32 xyzw = (VU1.code >> 21) & 0xF;
+	emitLoadBroadcast(ft, 2);
+	int64_t dst = accOff();
+	emitTernaryFmac(false, fs, dst, xyzw);
+}
 #endif
 
 #if ISTUB_VU_MADDAw

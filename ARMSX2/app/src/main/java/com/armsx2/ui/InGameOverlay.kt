@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -37,9 +38,21 @@ import compose.icons.lineawesomeicons.RedoAltSolid
 import compose.icons.lineawesomeicons.SaveSolid
 import compose.icons.lineawesomeicons.TachometerAltSolid
 import compose.icons.lineawesomeicons.ThLargeSolid
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -49,7 +62,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -170,6 +185,13 @@ object InGameOverlay {
     // Singleton state means the in-session preference persists across game
     // launches, matching the frame-limit pill pattern.
     private val osdShown = mutableStateOf(true)
+
+    // Live RetroAchievements rich-presence string. Written by
+    // AchievementsPanel's 4s poll (it already polls the achievements JSON
+    // on the same cadence; one more JNI call is free). Read by
+    // GameInfoHeader so the in-game pause panel reflects the current RP
+    // line right under the game serial / star rating row.
+    val richPresence = mutableStateOf("")
 
     // Tracks whether THIS overlay is the one that paused the VM. If the
     // user already had the VM paused (e.g. via toolbar) before opening
@@ -467,7 +489,87 @@ object InGameOverlay {
                         HardcoreBadge()
                     }
                 }
+                // Live RetroAchievements rich-presence subtitle. Mirrors
+                // what RA's website shows under your active game; we surface
+                // it locally so the user can see what the server is being
+                // told. AchievementsPanel's 4s poll owns the writes.
+                val rp = richPresence.value
+                if (rp.isNotEmpty()) {
+                    Spacer(Modifier.height(3.dp))
+                    MarqueeRichPresence(rp)
+                }
             }
+        }
+    }
+
+    /** One-line rich-presence subtitle. Renders directly when the string
+     *  fits within the available width; runs a back-and-forth ping-pong
+     *  marquee when it overflows. Holds 1s at each end so the user has
+     *  time to read both the start and the tail before the slide flips
+     *  direction. Linear scroll between holds so the motion reads as a
+     *  deliberate reveal rather than easing. */
+    @Composable
+    private fun MarqueeRichPresence(text: String) {
+        // Measure the text's INTRINSIC width via TextMeasurer. onSizeChanged
+        // on the rendered Text reports the constrained width (== container)
+        // when the parent caps it, which makes overflow detection a no-op
+        // and the marquee never starts. TextMeasurer gives us the actual
+        // size the text wants to be, regardless of layout pressure.
+        val style = remember {
+            TextStyle(color = Color(0xFFBBBBBB), fontSize = 11.sp)
+        }
+        val measurer = rememberTextMeasurer()
+        val intrinsicTextWidth = remember(text, style) {
+            measurer.measure(text = text, style = style, softWrap = false, maxLines = 1).size.width
+        }
+        var containerWidth by remember(text) { mutableIntStateOf(0) }
+        val overflowPx = (intrinsicTextWidth - containerWidth).coerceAtLeast(0)
+        val needsMarquee = overflowPx > 0 && containerWidth > 0
+
+        // Ping-pong timing: 1s hold → scroll → 1s hold → scroll back.
+        // Scroll speed pinned at ~60 px/sec so a long string takes a
+        // perceptible amount of time without dragging.
+        val holdMs = 1000
+        val scrollMs = if (needsMarquee) (overflowPx * 1000 / 60).coerceAtLeast(800) else 0
+        val totalMs = (holdMs * 2 + scrollMs * 2).coerceAtLeast(1)
+        val maxOffset = overflowPx.toFloat()
+
+        val transition = rememberInfiniteTransition(label = "rp-marquee")
+        val offsetPx by transition.animateFloat(
+            initialValue = 0f,
+            targetValue = 0f,
+            animationSpec = infiniteRepeatable(
+                animation = keyframes {
+                    durationMillis = totalMs
+                    0f at 0
+                    0f at holdMs                                using LinearEasing
+                    -maxOffset at holdMs + scrollMs              using LinearEasing
+                    -maxOffset at holdMs + scrollMs + holdMs    using LinearEasing
+                    0f at totalMs                                using LinearEasing
+                },
+                repeatMode = RepeatMode.Restart,
+            ),
+            label = "rp-offset",
+        )
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { containerWidth = it.width },
+        ) {
+            Text(
+                text = text,
+                color = Color(0xFFBBBBBB),
+                fontSize = 11.sp,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Visible,
+                modifier = Modifier
+                    .offset {
+                        IntOffset(if (needsMarquee) offsetPx.toInt() else 0, 0)
+                    },
+            )
         }
     }
 
