@@ -887,7 +887,13 @@ SharedMemoryMappingArea::SharedMemoryMappingArea(u8* base_ptr, size_t size, size
 
 SharedMemoryMappingArea::~SharedMemoryMappingArea()
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	if (m_num_mappings != 0)
+		fprintf(stderr, "@@MAC_FASTMEM_AREA_DESTROY@@ outstanding_mappings=%zu base=%p size=0x%zx\n",
+			m_num_mappings, m_base_ptr, m_size);
+#else
 	pxAssertRel(m_num_mappings == 0, "No mappings left");
+#endif
 #if !ARMSX2_APPLE_IOS_DEVICE
 	if (mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(m_base_ptr), m_size) != KERN_SUCCESS)
 		pxFailRel("Failed to release shared memory area");
@@ -976,7 +982,30 @@ bool SharedMemoryMappingArea::Unmap(void* map_base, size_t map_size)
 {
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
-#if !ARMSX2_APPLE_IOS_DEVICE
+#if ARMSX2_APPLE_MAC_RUNTIME
+	const kern_return_t dealloc_res =
+		mach_vm_deallocate(mach_task_self(), reinterpret_cast<mach_vm_address_t>(map_base), map_size);
+	if (dealloc_res != KERN_SUCCESS) [[unlikely]]
+	{
+		fprintf(stderr, "@@MAC_FASTMEM_UNMAP_FAIL@@ stage=deallocate res=%d base=%p size=0x%zx mappings=%zu\n",
+			dealloc_res, map_base, map_size, m_num_mappings);
+		return false;
+	}
+
+	const kern_return_t reserve_res =
+		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0,
+			VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, MEMORY_OBJECT_NULL, 0, false,
+			VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);
+	if (reserve_res != KERN_SUCCESS) [[unlikely]]
+	{
+		fprintf(stderr, "@@MAC_FASTMEM_UNMAP_FAIL@@ stage=reserve res=%d base=%p size=0x%zx mappings=%zu\n",
+			reserve_res, map_base, map_size, m_num_mappings);
+		return false;
+	}
+
+	m_num_mappings--;
+	return true;
+#elif !ARMSX2_APPLE_IOS_DEVICE
 	const kern_return_t res =
 		mach_vm_map(mach_task_self(), reinterpret_cast<mach_vm_address_t*>(&map_base), map_size, 0, VM_FLAGS_OVERWRITE,
 			MEMORY_OBJECT_NULL, 0, false, VM_PROT_NONE, VM_PROT_NONE, VM_INHERIT_NONE);

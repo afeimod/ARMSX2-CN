@@ -19,6 +19,8 @@
 #include <unistd.h>
 #include <cstdlib>
 #include <cstdarg>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <iostream>
 #include <algorithm>
@@ -182,10 +184,50 @@ void LogToScreen(const char* str) {
 }
 
 extern "C" void LogUnified(const char* fmt, ...) {
+    char stack_buffer[4096];
     va_list args;
     va_start(args, fmt);
-    vprintf(fmt, args);
+    va_list args_copy;
+    va_copy(args_copy, args);
+    const int length = vsnprintf(stack_buffer, sizeof(stack_buffer), fmt, args);
     va_end(args);
+
+    if (length < 0) {
+        va_end(args_copy);
+        return;
+    }
+
+    const char* text = stack_buffer;
+    std::string heap_buffer;
+    if (static_cast<size_t>(length) >= sizeof(stack_buffer)) {
+        heap_buffer.resize(static_cast<size_t>(length) + 1);
+        vsnprintf(&heap_buffer[0], heap_buffer.size(), fmt, args_copy);
+        text = heap_buffer.c_str();
+    }
+    va_end(args_copy);
+
+    fputs(text, stderr);
+    fflush(stderr);
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+    static FILE* s_catalyst_trace_file = nullptr;
+    static bool s_catalyst_trace_file_opened = false;
+    if (!s_catalyst_trace_file_opened) {
+        s_catalyst_trace_file = fopen("/tmp/armsx2_maccatalyst_trace.log", "a");
+        s_catalyst_trace_file_opened = true;
+    }
+    if (s_catalyst_trace_file) {
+        fputs(text, s_catalyst_trace_file);
+        fflush(s_catalyst_trace_file);
+    }
+
+    if (std::strstr(text, "@@MAC_") || std::strstr(text, "@@MTL_") ||
+        std::strstr(text, "@@PHASE@@") || std::strstr(text, "@@LOG_")) {
+        NSString* message = [NSString stringWithUTF8String:text];
+        if (message)
+            NSLog(@"%@", message);
+    }
+#endif
 }
 
 // ... Host Stubs (Keep existing ones) ...
@@ -242,7 +284,11 @@ namespace Host
         Console.WriteLn("Host::AcquireRenderWindow(recreate=%d) called.", recreate_window);
 
         __block WindowInfo wi = {};
+#if ARMSX2_APPLE_MAC_CATALYST
+        wi.type = WindowInfo::Type::MacCatalyst;
+#else
         wi.type = WindowInfo::Type::iOS;
+#endif
 
         // SDL calls that interact with UIKit must run on the main thread
         dispatch_sync(dispatch_get_main_queue(), ^{
@@ -1360,16 +1406,25 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     Console.WriteLn("@@JIT_GATE@@ ARMSX2 no-JIT mode forced");
     [self startVMThread];
 #else
+#if ARMSX2_APPLE_MAC_RUNTIME
+    LogUnified("@@MAC_VM_JIT_GATE@@ enter settings=%p\n", s_settings_interface);
+#endif
     if (DarwinMisc::IsJITAvailable()) {
         if (s_settings_interface) {
             ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
             s_settings_interface->Save();
         }
+#if ARMSX2_APPLE_MAC_RUNTIME
+        LogUnified("@@MAC_VM_JIT_GATE@@ map_jit_available starting\n");
+#endif
         Console.WriteLn("@@JIT_GATE@@ MAP_JIT available — starting VM in JIT mode");
         [self startVMThread];
         return;
     }
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+    LogUnified("@@MAC_VM_JIT_GATE@@ map_jit_unavailable\n");
+#endif
     Console.Error("@@JIT_GATE@@ MAP_JIT unavailable — not starting VM");
     Host::ReportErrorAsync("JIT Unavailable", "MAP_JIT failed. For Mac Catalyst, make sure the build is signed with the allow-jit entitlement.");
 #endif
@@ -1378,8 +1433,16 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 - (void)startVMThread {
     {
         std::lock_guard<std::mutex> lk(s_vmMutex);
+#if ARMSX2_APPLE_MAC_RUNTIME
+        LogUnified("@@MAC_VM_START_REQUEST@@ active=%d created=%d request_boot=%d request_stop=%d\n",
+            s_vmThreadActive.load() ? 1 : 0, s_vmThreadCreated ? 1 : 0,
+            s_requestVMBoot.load() ? 1 : 0, s_requestVMStop.load() ? 1 : 0);
+#endif
         if (s_vmThreadActive.load()) {
             Console.WriteLn("[VM] startVMThread: VM already active, ignoring");
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_START_REQUEST@@ ignored_already_active\n");
+#endif
             return;
         }
 
@@ -1388,6 +1451,9 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 
         if (s_vmThreadCreated) {
             Console.WriteLn("[VM] startVMThread: signaling existing VM thread");
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_START_REQUEST@@ signal_existing_thread\n");
+#endif
             s_vmCV.notify_one();
             return;
         }
@@ -1396,15 +1462,27 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
     }
 
     Console.WriteLn("[VM] Creating persistent VM thread...");
+#if ARMSX2_APPLE_MAC_RUNTIME
+    LogUnified("@@MAC_VM_THREAD_CREATE@@ new_thread=1\n");
+#endif
 
     std::thread vmThread([]() {
+#if ARMSX2_APPLE_MAC_RUNTIME
+        LogUnified("@@MAC_VM_THREAD_ENTER@@\n");
+#endif
         Console.WriteLn("[VM] VM Thread: CPUThreadInitialize (once)...");
         if (!VMManager::Internal::CPUThreadInitialize()) {
             Console.Error("VM Thread: CPUThreadInitialize failed.");
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_CPU_THREAD_INIT@@ ok=0\n");
+#endif
             std::lock_guard<std::mutex> lk(s_vmMutex);
             s_vmThreadCreated = false;
             return;
         }
+#if ARMSX2_APPLE_MAC_RUNTIME
+        LogUnified("@@MAC_VM_CPU_THREAD_INIT@@ ok=1\n");
+#endif
 
         std::string fontPath = Path::Combine(EmuFolders::Resources, "fonts/Roboto-Regular.ttf");
         ImGuiManager::SetFontPathAndRange(std::move(fontPath), {});
@@ -1417,20 +1495,36 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 if (auto_boot_first) {
                     Console.WriteLn("[AutoBoot] @@AUTO_BOOT@@ skipping UI wait, auto-boot enabled");
                     auto_boot_first = false;
+#if ARMSX2_APPLE_MAC_RUNTIME
+                    LogUnified("@@MAC_VM_WAIT@@ auto_boot_first\n");
+#endif
                 } else {
                     Console.WriteLn("[VM] VM Thread: waiting for boot request...");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                    LogUnified("@@MAC_VM_WAIT@@ begin request_boot=%d\n", s_requestVMBoot.load() ? 1 : 0);
+#endif
                     s_vmCV.wait(lk, [] { return s_requestVMBoot.load(); });
+#if ARMSX2_APPLE_MAC_RUNTIME
+                    LogUnified("@@MAC_VM_WAIT@@ woke request_boot=%d request_stop=%d\n",
+                        s_requestVMBoot.load() ? 1 : 0, s_requestVMStop.load() ? 1 : 0);
+#endif
                 }
                 s_requestVMBoot.store(false);
             }
 
             Console.WriteLn("[VM] VM Thread: boot signal received, preparing boot params...");
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_BOOT_SIGNAL@@ active_before=%d\n", s_vmThreadActive.load() ? 1 : 0);
+#endif
             s_vmThreadActive.store(true);
 
             VMBootParameters boot_params;
             boot_params.fast_boot = false;
             {
                 if (!s_settings_interface) {
+#if ARMSX2_APPLE_MAC_RUNTIME
+                    LogUnified("@@MAC_VM_BOOT_ABORT@@ reason=no_settings_interface\n");
+#endif
                     s_vmThreadActive.store(false);
                     dispatch_async(dispatch_get_main_queue(), ^{
                         [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
@@ -1471,6 +1565,13 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 } else {
                     Console.WriteLn("@@ISO_BOOT@@ no ISO='%s', falling back to BIOS only", isoFilename.c_str());
                 }
+#if ARMSX2_APPLE_MAC_RUNTIME
+                const bool mac_fast_boot_value = boot_params.fast_boot.value_or(false);
+                LogUnified("@@MAC_VM_BOOT_ISO@@ iso_name=%s iso_path=%s source_type=%d fast_boot=%d\n",
+                    isoFilename.c_str(), isoPath.c_str(),
+                    boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
+                    mac_fast_boot_value ? 1 : 0);
+#endif
             }
 
             if (getenv("ARMSX2_AUTO_BOOT_BIOS")) {
@@ -1485,8 +1586,23 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
             }
 
             const std::string bios_path = Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios);
+#if ARMSX2_APPLE_MAC_RUNTIME
+            const bool mac_fast_boot_value = boot_params.fast_boot.value_or(false);
+            LogUnified("@@MAC_VM_BOOT_PARAMS@@ filename=%s elf=%s source_type=%d fast_boot=%d bios_name=%s bios_path=%s bios_exists=%d renderer=%d cpu_core=%d rec_ee=%d rec_iop=%d rec_vu0=%d rec_vu1=%d\n",
+                boot_params.filename.c_str(), boot_params.elf_override.c_str(),
+                boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
+                mac_fast_boot_value ? 1 : 0,
+                EmuConfig.BaseFilenames.Bios.c_str(), bios_path.c_str(),
+                FileSystem::FileExists(bios_path.c_str()) ? 1 : 0,
+                static_cast<int>(EmuConfig.GS.Renderer), EmuConfig.Cpu.CoreType,
+                EmuConfig.Cpu.Recompiler.EnableEE ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableIOP ? 1 : 0,
+                EmuConfig.Cpu.Recompiler.EnableVU0 ? 1 : 0, EmuConfig.Cpu.Recompiler.EnableVU1 ? 1 : 0);
+#endif
             if (EmuConfig.BaseFilenames.Bios.empty() || !FileSystem::FileExists(bios_path.c_str())) {
                 Console.Error("CRITICAL: BIOS verification failed inside VM thread.");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                LogUnified("@@MAC_VM_BOOT_ABORT@@ reason=bios_verification_failed\n");
+#endif
                 Host::ReportErrorAsync("BIOS Error", "Validation failed.");
                 s_vmThreadActive.store(false);
                 dispatch_async(dispatch_get_main_queue(), ^{
@@ -1495,38 +1611,86 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
                 continue;
             }
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_INITIALIZE_BEGIN@@ state=%d\n", static_cast<int>(VMManager::GetState()));
+#endif
             const bool initialized = VMManager::Initialize(boot_params);
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_INITIALIZE_END@@ ok=%d state=%d\n", initialized ? 1 : 0, static_cast<int>(VMManager::GetState()));
+#endif
 
             if (initialized) {
                 Console.WriteLn("[VM] VM initialized successfully");
                 VMManager::SetState(VMState::Running);
+#if ARMSX2_APPLE_MAC_RUNTIME
+                LogUnified("@@MAC_VM_SET_RUNNING@@ state=%d\n", static_cast<int>(VMManager::GetState()));
+#endif
 
+                u64 execute_count = 0;
                 while (true) {
                     if (s_requestVMStop.load()) {
                         Console.WriteLn("[VM] VM Thread: stop requested from UI.");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                        LogUnified("@@MAC_VM_EXEC_LOOP_EXIT@@ reason=stop_requested count=%llu state=%d\n",
+                            static_cast<unsigned long long>(execute_count), static_cast<int>(VMManager::GetState()));
+#endif
                         break;
                     }
                     VMState state = VMManager::GetState();
                     if (state == VMState::Stopping || state == VMState::Shutdown) {
                         Console.WriteLn("[VM] VM Thread: shutdown signal received.");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                        LogUnified("@@MAC_VM_EXEC_LOOP_EXIT@@ reason=state count=%llu state=%d\n",
+                            static_cast<unsigned long long>(execute_count), static_cast<int>(state));
+#endif
                         break;
                     } else if (state == VMState::Running) {
+#if ARMSX2_APPLE_MAC_RUNTIME
+                        if (execute_count < 8 || ((execute_count % 120) == 0))
+                            LogUnified("@@MAC_VM_EXECUTE_ENTER@@ count=%llu state=%d\n",
+                                static_cast<unsigned long long>(execute_count), static_cast<int>(state));
+#endif
                         VMManager::Execute();
+#if ARMSX2_APPLE_MAC_RUNTIME
+                        if (execute_count < 8 || ((execute_count % 120) == 0))
+                            LogUnified("@@MAC_VM_EXECUTE_RETURN@@ count=%llu state=%d\n",
+                                static_cast<unsigned long long>(execute_count), static_cast<int>(VMManager::GetState()));
+#endif
+                        execute_count++;
                     } else {
+#if ARMSX2_APPLE_MAC_RUNTIME
+                        static unsigned s_mac_vm_sleep_log_count = 0;
+                        if (s_mac_vm_sleep_log_count < 16 || ((s_mac_vm_sleep_log_count % 120) == 0))
+                            LogUnified("@@MAC_VM_EXEC_SLEEP@@ count=%u state=%d\n", s_mac_vm_sleep_log_count, static_cast<int>(state));
+                        s_mac_vm_sleep_log_count++;
+#endif
                         std::this_thread::sleep_for(std::chrono::milliseconds(10));
                     }
                 }
 
                 Console.WriteLn("[VM] VM Thread: shutting down VM...");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                LogUnified("@@MAC_VM_SHUTDOWN_BEGIN@@ state=%d\n", static_cast<int>(VMManager::GetState()));
+#endif
                 VMManager::Shutdown(false);
+#if ARMSX2_APPLE_MAC_RUNTIME
+                LogUnified("@@MAC_VM_SHUTDOWN_END@@ state=%d\n", static_cast<int>(VMManager::GetState()));
+#endif
             } else {
                 Console.Error("VM Thread: VMManager::Initialize failed!");
+#if ARMSX2_APPLE_MAC_RUNTIME
+                LogUnified("@@MAC_VM_INITIALIZE_FAILED@@ state=%d\n", static_cast<int>(VMManager::GetState()));
+#endif
                 Host::ReportErrorAsync("Startup Error", "VM Initialization Failed.");
             }
 
             s_vmThreadActive.store(false);
             s_requestVMStop.store(false);
             Console.WriteLn("[VM] VM Thread: shutdown complete, posting notification");
+#if ARMSX2_APPLE_MAC_RUNTIME
+            LogUnified("@@MAC_VM_POST_SHUTDOWN_NOTIFY@@ active=%d created=%d\n",
+                s_vmThreadActive.load() ? 1 : 0, s_vmThreadCreated ? 1 : 0);
+#endif
             dispatch_async(dispatch_get_main_queue(), ^{
                 [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
             });
@@ -1610,6 +1774,10 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 
     // Log Proof Tag
     fprintf(stderr, "@@LOG_SINK@@ unified=1 path=%s pid=%d\n", logPath.c_str(), getpid());
+#if ARMSX2_APPLE_MAC_RUNTIME
+    std::remove("/tmp/armsx2_maccatalyst_trace.log");
+#endif
+    LogUnified("@@LOG_UNIFIED_READY@@ path=%s extra=/tmp/armsx2_maccatalyst_trace.log pid=%d\n", logPath.c_str(), getpid());
     NSString* bundleID = [[NSBundle mainBundle] bundleIdentifier];
     fprintf(stderr, "@@BUNDLE_ID@@ %s\n", bundleID ? [bundleID UTF8String] : "(null)");
     fprintf(stderr, "@@BUILD_ID@@ %s_%s_%s\n", ARMSX2_GIT_HASH, __DATE__, __TIME__);

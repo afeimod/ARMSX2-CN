@@ -16,6 +16,7 @@
 #include "VMManager.h"
 
 #include "common/FileSystem.h"
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Image.h"
 #include "common/Path.h"
 #include "common/StringUtil.h"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
 #include <deque>
 #include <thread>
 #include <mutex>
@@ -42,6 +44,15 @@ static std::deque<std::thread> s_screenshot_threads;
 static std::mutex s_screenshot_threads_mutex;
 
 std::unique_ptr<GSRenderer> g_gs_renderer;
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static bool MacGSTraceFrame(u64 frame)
+{
+	return frame < 300 || ((frame % 120) == 0);
+}
+#endif
 
 // Since we read this on the EE thread, we can't put it in the renderer, because
 // we might be switching while the other thread reads it.
@@ -87,8 +98,34 @@ bool GSRenderer::Merge(int field)
 	int y_offset[3] = { 0, 0, 0 };
 	const bool feedback_merge = m_regs->EXTWRITE.WRITE == 1;
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+	const u64 mac_trace_frame = g_perfmon.GetFrame();
+	const bool mac_trace = MacGSTraceFrame(mac_trace_frame);
+	if (mac_trace)
+	{
+		const auto& d0 = PCRTCDisplays.PCRTCDisplays[0];
+		const auto& d1 = PCRTCDisplays.PCRTCDisplays[1];
+		LogUnified(
+			"@@MAC_GS_MERGE_ENTER@@ frame=%llu field=%d fbmerge=%d en0=%d en1=%d frame_match=%d frame_wrap=%d "
+			"d0_fbw=%u d0_psm=%u d0_block=%u d0_fbrect=%d,%d,%d,%d d0_disprect=%d,%d,%d,%d "
+			"d1_fbw=%u d1_psm=%u d1_block=%u d1_fbrect=%d,%d,%d,%d d1_disprect=%d,%d,%d,%d\n",
+			static_cast<unsigned long long>(mac_trace_frame), field, feedback_merge ? 1 : 0,
+			d0.enabled ? 1 : 0, d1.enabled ? 1 : 0, PCRTCDisplays.FrameRectMatch() ? 1 : 0, PCRTCDisplays.FrameWrap() ? 1 : 0,
+			static_cast<unsigned>(d0.FBW), static_cast<unsigned>(d0.PSM), static_cast<unsigned>(d0.Block()),
+			d0.framebufferRect.x, d0.framebufferRect.y, d0.framebufferRect.z, d0.framebufferRect.w,
+			d0.displayRect.x, d0.displayRect.y, d0.displayRect.z, d0.displayRect.w,
+			static_cast<unsigned>(d1.FBW), static_cast<unsigned>(d1.PSM), static_cast<unsigned>(d1.Block()),
+			d1.framebufferRect.x, d1.framebufferRect.y, d1.framebufferRect.z, d1.framebufferRect.w,
+			d1.displayRect.x, d1.displayRect.y, d1.displayRect.z, d1.displayRect.w);
+	}
+#endif
+
 	if (!PCRTCDisplays.PCRTCDisplays[0].enabled && !PCRTCDisplays.PCRTCDisplays[1].enabled)
 	{
+#if ARMSX2_APPLE_MAC_RUNTIME
+		if (mac_trace)
+			LogUnified("@@MAC_GS_MERGE_NO_DISPLAY@@ frame=%llu\n", static_cast<unsigned long long>(mac_trace_frame));
+#endif
 		m_real_size = GSVector2i(0, 0);
 		return false;
 	}
@@ -115,8 +152,22 @@ bool GSRenderer::Merge(int field)
 			tex[2] = GetFeedbackOutput(tex_scale[2]);
 	}
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+	if (mac_trace)
+	{
+		LogUnified(
+			"@@MAC_GS_MERGE_OUTPUTS@@ frame=%llu tex0=%p tex1=%p tex2=%p scale0=%.3f scale1=%.3f scale2=%.3f y0=%d y1=%d y2=%d\n",
+			static_cast<unsigned long long>(mac_trace_frame), static_cast<void*>(tex[0]), static_cast<void*>(tex[1]),
+			static_cast<void*>(tex[2]), tex_scale[0], tex_scale[1], tex_scale[2], y_offset[0], y_offset[1], y_offset[2]);
+	}
+#endif
+
 	if (!tex[0] && !tex[1])
 	{
+#if ARMSX2_APPLE_MAC_RUNTIME
+		if (mac_trace)
+			LogUnified("@@MAC_GS_MERGE_NO_TEXTURE@@ frame=%llu\n", static_cast<unsigned long long>(mac_trace_frame));
+#endif
 		m_real_size = GSVector2i(0, 0);
 
 		// Clear out the MAD buffer as some remnants of the previously shown frame came be left over, causing a flash for one frame.
@@ -227,6 +278,17 @@ bool GSRenderer::Merge(int field)
 
 	const u32 c = (m_regs->BGCOLOR.U32[0] & 0x00FFFFFFu) | (m_regs->PMODE.ALP << 24);
 	g_gs_device->Merge(tex, src_gs_read, dst, fs, m_regs->PMODE, m_regs->EXTBUF, c);
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+	if (mac_trace)
+	{
+		LogUnified(
+			"@@MAC_GS_MERGE_OK@@ frame=%llu s_n=%d fs=%dx%d real=%dx%d bg=0x%08x src0=%.4f,%.4f,%.4f,%.4f dst0=%.1f,%.1f,%.1f,%.1f\n",
+			static_cast<unsigned long long>(mac_trace_frame), static_cast<int>(s_n), fs.x, fs.y, m_real_size.x, m_real_size.y, c,
+			src_gs_read[0].x, src_gs_read[0].y, src_gs_read[0].z, src_gs_read[0].w,
+			dst[0].x, dst[0].y, dst[0].z, dst[0].w);
+	}
+#endif
 
 	if (isReallyInterlaced() && GSConfig.InterlaceMode != GSInterlaceMode::Off)
 	{
@@ -607,6 +669,11 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 
 	const bool blank_frame = !Merge(field);
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+	const u64 mac_trace_frame = g_perfmon.GetFrame();
+	const bool mac_trace = MacGSTraceFrame(mac_trace_frame);
+#endif
+
 	m_last_draw_n = s_n;
 	m_last_transfer_n = s_transfer_n;
 
@@ -632,6 +699,22 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		GSVector4i src_rect;
 		GSVector4 src_uv, draw_rect;
 		GSTexture* current = g_gs_device->GetCurrent();
+#if ARMSX2_APPLE_MAC_RUNTIME
+		if (mac_trace)
+		{
+			const int current_width = current ? current->GetWidth() : 0;
+			const int current_height = current ? current->GetHeight() : 0;
+			const auto& features = g_gs_device->Features();
+			LogUnified(
+				"@@MAC_GS_VSYNC@@ frame=%llu field=%u regs=%d idle=%d skip=%d blank=%d current=%p current_size=%dx%d "
+				"real=%dx%d window=%dx%d renderer=%d fbfetch=%d texbarrier=%d fb_sprite_blits=%d draw_n=%d transfer_n=%d\n",
+				static_cast<unsigned long long>(mac_trace_frame), field, registers_written ? 1 : 0, idle_frame ? 1 : 0,
+				skip_frame ? 1 : 0, blank_frame ? 1 : 0, static_cast<void*>(current), current_width, current_height,
+				m_real_size.x, m_real_size.y, g_gs_device->GetWindowWidth(), g_gs_device->GetWindowHeight(),
+				static_cast<int>(GSConfig.Renderer), features.framebuffer_fetch ? 1 : 0, features.texture_barrier ? 1 : 0,
+				fb_sprite_blits, static_cast<int>(m_last_draw_n), static_cast<int>(m_last_transfer_n));
+		}
+#endif
 		if (current && !blank_frame)
 		{
 			src_rect = CalculateDrawSrcRect(current, m_real_size);
@@ -669,15 +752,39 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				const u64 current_time = Common::Timer::GetCurrentValue();
 				const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+				if (mac_trace)
+				{
+					LogUnified(
+						"@@MAC_GS_PRESENT_RECT@@ frame=%llu src_uv=%.5f,%.5f,%.5f,%.5f draw=%.1f,%.1f,%.1f,%.1f shader=%d linear=%d\n",
+						static_cast<unsigned long long>(mac_trace_frame), src_uv.x, src_uv.y, src_uv.z, src_uv.w,
+						draw_rect.x, draw_rect.y, draw_rect.z, draw_rect.w,
+						static_cast<int>(s_tv_shader_indices[GSConfig.TVShader]), GSConfig.LinearPresent != GSPostBilinearMode::Off ? 1 : 0);
+				}
+#endif
 				g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
 					s_tv_shader_indices[GSConfig.TVShader], shader_time, GSConfig.LinearPresent != GSPostBilinearMode::Off);
 			}
+#if ARMSX2_APPLE_MAC_RUNTIME
+			else if (mac_trace)
+			{
+				LogUnified(
+					"@@MAC_GS_PRESENT_OSD_ONLY@@ frame=%llu current=%p blank=%d\n",
+					static_cast<unsigned long long>(mac_trace_frame), static_cast<void*>(current), blank_frame ? 1 : 0);
+			}
+#endif
 
 			EndPresentFrame();
 
 			if (GSConfig.OsdShowGPU)
 				PerformanceMetrics::OnGPUPresent(g_gs_device->GetAndResetAccumulatedGPUTime());
 		}
+#if ARMSX2_APPLE_MAC_RUNTIME
+		else if (mac_trace)
+		{
+			LogUnified("@@MAC_GS_BEGIN_PRESENT_FAILED@@ frame=%llu\n", static_cast<unsigned long long>(mac_trace_frame));
+		}
+#endif
 
 		PerformanceMetrics::Update(registers_written, fb_sprite_frame, false);
 	}

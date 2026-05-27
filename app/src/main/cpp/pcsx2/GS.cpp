@@ -6,12 +6,87 @@
 #include "Config.h"
 #include "Gif_Unit.h"
 #include "MTGS.h"
+#include "R3000A.h"
 #include "VMManager.h"
+
+#ifdef __APPLE__
+#include "common/Darwin/ApplePlatform.h"
+#endif
 
 #include <list>
 
 alignas(16) u8 g_RealGSMem[Ps2MemSize::GSregs];
 static bool s_GSRegistersWritten = false;
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static const char* MacGSRegName(u32 mem)
+{
+	switch (mem & ~0xf)
+	{
+		case GS_PMODE: return "PMODE";
+		case GS_SMODE1: return "SMODE1";
+		case GS_SMODE2: return "SMODE2";
+		case GS_SRFSH: return "SRFSH";
+		case GS_SYNCH1: return "SYNCH1";
+		case GS_SYNCH2: return "SYNCH2";
+		case GS_SYNCV: return "SYNCV";
+		case GS_DISPFB1: return "DISPFB1";
+		case GS_DISPLAY1: return "DISPLAY1";
+		case GS_DISPFB2: return "DISPFB2";
+		case GS_DISPLAY2: return "DISPLAY2";
+		case GS_EXTBUF: return "EXTBUF";
+		case GS_EXTDATA: return "EXTDATA";
+		case GS_EXTWRITE: return "EXTWRITE";
+		case GS_BGCOLOR: return "BGCOLOR";
+		case GS_CSR: return "CSR";
+		case GS_IMR: return "IMR";
+		case GS_BUSDIR: return "BUSDIR";
+		case GS_SIGLBLID: return "SIGLBLID";
+		default: return "GS_REG";
+	}
+}
+
+static bool MacGSRegIsDisplayCritical(u32 mem)
+{
+	switch (mem & ~0xf)
+	{
+		case GS_PMODE:
+		case GS_SMODE1:
+		case GS_SMODE2:
+		case GS_DISPFB1:
+		case GS_DISPLAY1:
+		case GS_DISPFB2:
+		case GS_DISPLAY2:
+		case GS_BGCOLOR:
+		case GS_CSR:
+		case GS_BUSDIR:
+			return true;
+		default:
+			return false;
+	}
+}
+
+static void MacTraceGSWrite(const char* width, u32 mem, u64 lo, u64 hi = 0)
+{
+	static u32 s_count = 0;
+	const u32 count = s_count++;
+	const bool critical = MacGSRegIsDisplayCritical(mem);
+	if (count >= 192 && (!critical || (count % 60) != 0))
+		return;
+
+	LogUnified("@@MAC_GS_REG_WRITE@@ count=%u width=%s mem=%08x reg=%s lo=%016llx hi=%016llx ee_pc=%08x iop_pc=%08x ee_cycle=%u gs_written=%d csr=%08x pmode=%016llx dispfb1=%016llx display1=%016llx dispfb2=%016llx display2=%016llx\n",
+		count, width, mem, MacGSRegName(mem), static_cast<unsigned long long>(lo),
+		static_cast<unsigned long long>(hi), cpuRegs.pc, psxRegs.pc, cpuRegs.cycle,
+		s_GSRegistersWritten ? 1 : 0, CSRreg._u32,
+		*reinterpret_cast<u64*>(PS2GS_BASE(GS_PMODE)),
+		*reinterpret_cast<u64*>(PS2GS_BASE(GS_DISPFB1)),
+		*reinterpret_cast<u64*>(PS2GS_BASE(GS_DISPLAY1)),
+		*reinterpret_cast<u64*>(PS2GS_BASE(GS_DISPFB2)),
+		*reinterpret_cast<u64*>(PS2GS_BASE(GS_DISPLAY2)));
+}
+#endif
 
 void gsSetVideoMode(GS_VideoMode mode)
 {
@@ -93,6 +168,9 @@ static __fi void IMRwrite(u32 value)
 
 __fi void gsWrite8(u32 mem, u8 value)
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGSWrite("8", mem, value);
+#endif
 	switch (mem)
 	{
 		// CSR 8-bit write handlers.
@@ -124,6 +202,9 @@ __fi void gsWrite8(u32 mem, u8 value)
 
 __fi void gsWrite16(u32 mem, u16 value)
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGSWrite("16", mem, value);
+#endif
 	GIF_LOG("GS write 16 at %8.8lx with data %8.8lx", mem, value);
 
 	switch (mem)
@@ -153,6 +234,9 @@ __fi void gsWrite16(u32 mem, u16 value)
 __fi void gsWrite32(u32 mem, u32 value)
 {
 	pxAssume( (mem & 3) == 0 );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGSWrite("32", mem, value);
+#endif
 	GIF_LOG("GS write 32 at %8.8lx with data %8.8lx", mem, value);
 
 	switch (mem)
@@ -174,6 +258,9 @@ __fi void gsWrite32(u32 mem, u32 value)
 
 void gsWrite64_generic( u32 mem, u64 value )
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGSWrite("64", mem, value);
+#endif
 	GIF_LOG("GS Write64 at %8.8lx with data %8.8x_%8.8x", mem, (u32)(value >> 32), (u32)value);
 
 	std::memcpy(PS2GS_BASE(mem), &value, sizeof(value));
@@ -217,10 +304,16 @@ void gsWrite64_page_01( u32 mem, u64 value )
 		return;
 
 		case GS_CSR:
+#if ARMSX2_APPLE_MAC_RUNTIME
+			MacTraceGSWrite("64", mem, value);
+#endif
 			gsCSRwrite(tGS_CSR(value));
 		return;
 
 		case GS_IMR:
+#if ARMSX2_APPLE_MAC_RUNTIME
+			MacTraceGSWrite("64", mem, value);
+#endif
 			IMRwrite(static_cast<u32>(value));
 		return;
 	}
@@ -241,10 +334,22 @@ void TAKES_R128 gsWrite128_page_01( u32 mem, r128 value )
 	switch( mem )
 	{
 		case GS_CSR:
+#if ARMSX2_APPLE_MAC_RUNTIME
+			{
+				const u128 uvalue = r128_to_u128(value);
+				MacTraceGSWrite("128", mem, uvalue._u64[0], uvalue._u64[1]);
+			}
+#endif
 			gsCSRwrite(r128_to_u32(value));
 		return;
 
 		case GS_IMR:
+#if ARMSX2_APPLE_MAC_RUNTIME
+			{
+				const u128 uvalue = r128_to_u128(value);
+				MacTraceGSWrite("128", mem, uvalue._u64[0], uvalue._u64[1]);
+			}
+#endif
 			IMRwrite(r128_to_u32(value));
 		return;
 	}
@@ -255,6 +360,9 @@ void TAKES_R128 gsWrite128_page_01( u32 mem, r128 value )
 void TAKES_R128 gsWrite128_generic( u32 mem, r128 value )
 {
 	alignas(16) const u128 uvalue = r128_to_u128(value);
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGSWrite("128", mem, uvalue._u64[0], uvalue._u64[1]);
+#endif
 	GIF_LOG("GS Write128 at %8.8lx with data %8.8x_%8.8x_%8.8x_%8.8x", mem,
 		uvalue._u32[3], uvalue._u32[2], uvalue._u32[1], uvalue._u32[0]);
 
@@ -340,4 +448,3 @@ bool SaveStateBase::gsFreeze()
 	Freeze(gsVideoMode);
 	return IsOkay();
 }
-

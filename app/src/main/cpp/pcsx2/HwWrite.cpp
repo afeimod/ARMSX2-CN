@@ -18,6 +18,10 @@
 
 #include "IopDma.h" // for iopIntcIrq
 
+#ifdef __APPLE__
+#include "common/Darwin/ApplePlatform.h"
+#endif
+
 using namespace R5900;
 
 // Shift the middle 8 bits (bits 4-12) into the lower 8 bits.
@@ -30,6 +34,68 @@ template< uint page > void _hwWrite8(u32 mem, u8 value);
 template< uint page > void _hwWrite16(u32 mem, u8 value);
 template< uint page > void TAKES_R128 _hwWrite128(u32 mem, r128 value);
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static bool MacIsGIFWriteAddress(u32 mem)
+{
+	const u32 addr = mem & 0x1fffffff;
+	return ((addr >= EEMemoryMap::GIF_Start) && (addr < EEMemoryMap::GIF_End)) ||
+		((addr >= EEMemoryMap::GIF_FIFO_Start) && (addr < EEMemoryMap::GIF_FIFO_End)) ||
+		((addr >= EEMemoryMap::GIFdma_Start) && (addr < EEMemoryMap::GIFdma_End));
+}
+
+static const char* MacGIFRegName(u32 mem)
+{
+	switch (mem & 0x1fffffff)
+	{
+		case GIF_CTRL: return "GIF_CTRL";
+		case GIF_MODE: return "GIF_MODE";
+		case GIF_STAT: return "GIF_STAT";
+		case GIF_TAG0: return "GIF_TAG0";
+		case GIF_TAG1: return "GIF_TAG1";
+		case GIF_TAG2: return "GIF_TAG2";
+		case GIF_TAG3: return "GIF_TAG3";
+		case GIF_CNT: return "GIF_CNT";
+		case GIF_P3CNT: return "GIF_P3CNT";
+		case GIF_P3TAG: return "GIF_P3TAG";
+		case GIF_FIFO: return "GIF_FIFO";
+		case GIF_CHCR: return "GIF_CHCR";
+		case GIF_MADR: return "GIF_MADR";
+		case GIF_QWC: return "GIF_QWC";
+		case GIF_TADR: return "GIF_TADR";
+		case GIF_ASR0: return "GIF_ASR0";
+		case GIF_ASR1: return "GIF_ASR1";
+		default: return "GIF";
+	}
+}
+
+static bool MacIsImportantGIFWrite(u32 mem)
+{
+	const u32 addr = mem & 0x1fffffff;
+	return addr == GIF_CHCR || addr == GIF_MADR || addr == GIF_QWC || addr == GIF_TADR ||
+		addr == GIF_FIFO || addr == GIF_CTRL || addr == GIF_MODE || addr == GIF_STAT;
+}
+
+static void MacTraceGIFWrite(const char* width, u32 mem, u64 lo, u64 hi = 0)
+{
+	if (!MacIsGIFWriteAddress(mem))
+		return;
+
+	static u32 s_count = 0;
+	const u32 count = s_count++;
+	const bool important = MacIsImportantGIFWrite(mem);
+	if (count >= 192 && (!important || (count % 60) != 0))
+		return;
+
+	LogUnified("@@MAC_GIF_WRITE@@ count=%u width=%s mem=%08x reg=%s lo=%016llx hi=%016llx ee_pc=%08x iop_pc=%08x ee_cycle=%u gif_stat=%08x gif_ctrl=%08x gif_mode=%08x gif_chcr=%08x gif_madr=%08x gif_qwc=%u gif_tadr=%08x fifo=%u dmac_stat=%08x dmac_pcr=%08x intc_stat=%08x intc_mask=%08x\n",
+		count, width, mem, MacGIFRegName(mem), static_cast<unsigned long long>(lo),
+		static_cast<unsigned long long>(hi), cpuRegs.pc, psxRegs.pc, cpuRegs.cycle,
+		gifRegs.stat._u32, gifRegs.ctrl._u32, gifRegs.mode._u32, gifch.chcr._u32,
+		gifch.madr, gifch.qwc, gifch.tadr, gif_fifo.fifoSize,
+		dmacRegs.stat._u32, dmacRegs.pcr._u32, psHu32(INTC_STAT), psHu32(INTC_MASK));
+}
+#endif
 
 template<uint page>
 void _hwWrite32( u32 mem, u32 value )
@@ -270,6 +336,9 @@ template<uint page>
 void hwWrite32( u32 mem, u32 value )
 {
 	eeHwTraceLog( mem, value, false );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGIFWrite("32", mem, value);
+#endif
 	_hwWrite32<page>( mem, value );
 }
 
@@ -330,6 +399,9 @@ template< uint page >
 void hwWrite8(u32 mem, u8 value)
 {
 	eeHwTraceLog( mem, value, false );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGIFWrite("8", mem, value);
+#endif
 	_hwWrite8<page>(mem, value);
 }
 
@@ -361,6 +433,9 @@ template< uint page >
 void hwWrite16(u32 mem, u16 value)
 {
 	eeHwTraceLog( mem, value, false );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGIFWrite("16", mem, value);
+#endif
 	_hwWrite16<page>(mem, value);
 }
 
@@ -407,6 +482,9 @@ template<uint page>
 void hwWrite64( u32 mem, mem64_t value )
 {
 	eeHwTraceLog( mem, value, false );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceGIFWrite("64", mem, value);
+#endif
 	_hwWrite64<page>(mem, value);
 }
 
@@ -483,6 +561,12 @@ template< uint page >
 void TAKES_R128 hwWrite128(u32 mem, r128 srcval)
 {
 	eeHwTraceLog( mem, srcval, false );
+#if ARMSX2_APPLE_MAC_RUNTIME
+	{
+		const u128 value = r128_to_u128(srcval);
+		MacTraceGIFWrite("128", mem, value._u64[0], value._u64[1]);
+	}
+#endif
 	_hwWrite128<page>(mem, srcval);
 }
 

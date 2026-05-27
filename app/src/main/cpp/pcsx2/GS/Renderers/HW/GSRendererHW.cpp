@@ -9,8 +9,19 @@
 #include "Host.h"
 #include "common/Console.h"
 #include "common/BitUtils.h"
+#include "common/Darwin/ApplePlatform.h"
 #include "common/StringUtil.h"
 #include <bit>
+#include <cstdio>
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static bool MacGSOutputTraceFrame(u64 frame)
+{
+	return frame < 300 || ((frame % 120) == 0);
+}
+#endif
 
 GSRendererHW::GSRendererHW()
 	: GSRenderer()
@@ -149,9 +160,33 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 
 	GSPCRTCRegs::PCRTCDisplay& curFramebuffer = PCRTCDisplays.PCRTCDisplays[index];
 	const GSVector2i framebufferSize(PCRTCDisplays.GetFramebufferSize(i));
+	const bool empty_framebuffer = curFramebuffer.framebufferRect.rempty();
 
-	if (curFramebuffer.framebufferRect.rempty() || curFramebuffer.FBW == 0)
+#if ARMSX2_APPLE_MAC_RUNTIME
+	const u64 mac_trace_frame = g_perfmon.GetFrame();
+	const bool mac_trace = MacGSOutputTraceFrame(mac_trace_frame);
+	if (mac_trace)
+	{
+		LogUnified(
+			"@@MAC_GS_GET_OUTPUT_ENTER@@ frame=%llu i=%d index=%d enabled=%d empty=%d fbw=%u psm=%u block=%u fbsize=%dx%d "
+			"fbrect=%d,%d,%d,%d disprect=%d,%d,%d,%d\n",
+			static_cast<unsigned long long>(mac_trace_frame), i, index, curFramebuffer.enabled ? 1 : 0, empty_framebuffer ? 1 : 0,
+			static_cast<unsigned>(curFramebuffer.FBW), static_cast<unsigned>(curFramebuffer.PSM), static_cast<unsigned>(curFramebuffer.Block()),
+			framebufferSize.x, framebufferSize.y,
+			curFramebuffer.framebufferRect.x, curFramebuffer.framebufferRect.y, curFramebuffer.framebufferRect.z, curFramebuffer.framebufferRect.w,
+			curFramebuffer.displayRect.x, curFramebuffer.displayRect.y, curFramebuffer.displayRect.z, curFramebuffer.displayRect.w);
+	}
+#endif
+
+	if (empty_framebuffer || curFramebuffer.FBW == 0)
+	{
+#if ARMSX2_APPLE_MAC_RUNTIME
+		if (mac_trace)
+			LogUnified("@@MAC_GS_GET_OUTPUT_SKIP@@ frame=%llu i=%d reason=%s\n",
+				static_cast<unsigned long long>(mac_trace_frame), i, empty_framebuffer ? "empty_rect" : "zero_fbw");
+#endif
 		return nullptr;
+	}
 
 	PCRTCDisplays.RemoveFramebufferOffset(i);
 	// TRACE(_T("[%d] GetOutput %d %05x (%d)\n"), (int)m_perfmon.GetFrame(), i, (int)TEX0.TBP0, (int)TEX0.PSM);
@@ -162,12 +197,24 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 	TEX0.TBP0 = curFramebuffer.Block();
 	TEX0.TBW = curFramebuffer.FBW;
 	TEX0.PSM = curFramebuffer.PSM;
+	const float texture_scale_factor = GetTextureScaleFactor();
 
-	if (GSTextureCache::Target* rt = g_texture_cache->LookupDisplayTarget(TEX0, framebufferSize, GetTextureScaleFactor(), false))
+	GSTextureCache::Target* rt = g_texture_cache->LookupDisplayTarget(TEX0, framebufferSize, texture_scale_factor, false);
+	if (rt)
 	{
 		rt->Update();
 		t = rt->m_texture;
 		scale = rt->m_scale;
+#if ARMSX2_APPLE_MAC_RUNTIME
+		if (mac_trace)
+		{
+			LogUnified(
+				"@@MAC_GS_GET_OUTPUT_HIT@@ frame=%llu i=%d tex=%p tex_size=%dx%d request_tbp0=%u rt_tbp0=%u tbw=%u psm=%u request_scale=%.3f rt_scale=%.3f\n",
+				static_cast<unsigned long long>(mac_trace_frame), i, static_cast<void*>(t),
+				t ? t->GetWidth() : 0, t ? t->GetHeight() : 0, static_cast<unsigned>(TEX0.TBP0), static_cast<unsigned>(rt->m_TEX0.TBP0),
+				static_cast<unsigned>(TEX0.TBW), static_cast<unsigned>(TEX0.PSM), texture_scale_factor, scale);
+		}
+#endif
 
 		const int delta = TEX0.TBP0 - rt->m_TEX0.TBP0;
 		if (delta > 0 && curFramebuffer.FBW != 0)
@@ -183,6 +230,15 @@ GSTexture* GSRendererHW::GetOutput(int i, float& scale, int& y_offset)
 			t->Save(GetDrawDumpPath("%05d_f%05lld_fr%d_%05x_%s.bmp", s_n, g_perfmon.GetFrame(), i, static_cast<int>(TEX0.TBP0), psm_str(TEX0.PSM)));
 		}
 	}
+#if ARMSX2_APPLE_MAC_RUNTIME
+	else if (mac_trace)
+	{
+		LogUnified(
+			"@@MAC_GS_GET_OUTPUT_MISS@@ frame=%llu i=%d tbp0=%u tbw=%u psm=%u fbsize=%dx%d request_scale=%.3f\n",
+			static_cast<unsigned long long>(mac_trace_frame), i, static_cast<unsigned>(TEX0.TBP0), static_cast<unsigned>(TEX0.TBW),
+			static_cast<unsigned>(TEX0.PSM), framebufferSize.x, framebufferSize.y, texture_scale_factor);
+	}
+#endif
 
 	return t;
 }

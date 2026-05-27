@@ -94,6 +94,7 @@
 #endif
 
 #ifdef __APPLE__
+#include "common/Darwin/ApplePlatform.h"
 #include "common/Darwin/DarwinMisc.h"
 #endif
 
@@ -204,6 +205,34 @@ static float s_target_speed = 0.0f;
 static bool s_target_speed_can_sync_to_host = false;
 static bool s_target_speed_synced_to_host = false;
 static bool s_use_vsync_for_timing = false;
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static const char* MacCDVDSourceName(CDVD_SourceType type)
+{
+	switch (type)
+	{
+		case CDVD_SourceType::Iso:
+			return "Iso";
+		case CDVD_SourceType::Disc:
+			return "Disc";
+		case CDVD_SourceType::NoDisc:
+			return "NoDisc";
+		default:
+			return "Unknown";
+	}
+}
+
+static void MacLogCDVDState(const char* tag)
+{
+	const CDVD_SourceType source = CDVDsys_GetSourceType();
+	LogUnified("@@MAC_BOOT_CDVD@@ tag=%s source=%d(%s) file=%s elf=%s fast_boot_requested=%d title=%s serial=%s crc=%08x state=%d\n",
+		tag, static_cast<int>(source), MacCDVDSourceName(source), CDVDsys_GetFile(source).c_str(),
+		s_elf_override.c_str(), s_fast_boot_requested ? 1 : 0, s_title.c_str(), s_disc_serial.c_str(),
+		s_disc_crc, static_cast<int>(s_state.load(std::memory_order_acquire)));
+}
+#endif
 
 static const char* VMStateToLogString(VMState state)
 {
@@ -1713,6 +1742,14 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 {
 	const Common::Timer init_timer;
 	pxAssertRel(s_state.load(std::memory_order_acquire) == VMState::Shutdown, "VM is shutdown");
+#if ARMSX2_APPLE_MAC_RUNTIME
+	LogUnified("@@MAC_BOOT_PARAMS_IN@@ filename=%s elf=%s source=%d(%s) fast_boot_set=%d fast_boot=%d save_state=%s state_index_set=%d\n",
+		boot_params.filename.c_str(), boot_params.elf_override.c_str(),
+		boot_params.source_type.has_value() ? static_cast<int>(*boot_params.source_type) : -1,
+		boot_params.source_type.has_value() ? MacCDVDSourceName(*boot_params.source_type) : "Auto",
+		boot_params.fast_boot.has_value() ? 1 : 0, boot_params.fast_boot.value_or(false) ? 1 : 0,
+		boot_params.save_state.c_str(), boot_params.state_index.has_value() ? 1 : 0);
+#endif
 
 	// cancel any game list scanning, we need to use CDVD!
 	// TODO: we can get rid of this once, we make CDVD not use globals...
@@ -1774,6 +1811,11 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		if (boot_params.source_type.value() == CDVD_SourceType::Iso &&
 			!FileSystem::FileExists(boot_params.filename.c_str()))
 		{
+#if ARMSX2_APPLE_MAC_RUNTIME
+			LogUnified("@@MAC_BOOT_SOURCE_FAIL@@ reason=missing_iso source=%d(%s) filename=%s\n",
+				static_cast<int>(*boot_params.source_type), MacCDVDSourceName(*boot_params.source_type),
+				boot_params.filename.c_str());
+#endif
 			Host::ReportErrorAsync(
 				"Error", fmt::format("Requested filename '{}' does not exist.", boot_params.filename));
 			return false;
@@ -1787,8 +1829,16 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	{
 		// Automatic type detection of boot parameter based on filename.
 		if (!AutoDetectSource(boot_params.filename))
+		{
+#if ARMSX2_APPLE_MAC_RUNTIME
+			LogUnified("@@MAC_BOOT_SOURCE_FAIL@@ reason=autodetect filename=%s\n", boot_params.filename.c_str());
+#endif
 			return false;
+		}
 	}
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacLogCDVDState("after_source_resolve");
+#endif
 
 	ScopedGuard close_cdvd_files(&CDVDsys_ClearFiles);
 
@@ -1796,7 +1846,16 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 	if (!GSDumpReplayer::IsReplayingDump())
 	{
 		ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Loading BIOS...");
-		if (!LoadBIOS())
+#if ARMSX2_APPLE_MAC_RUNTIME
+		LogUnified("@@MAC_BOOT_BIOS_LOAD_BEGIN@@ bios_name=%s bios_path=%s exists=%d\n",
+			EmuConfig.BaseFilenames.Bios.c_str(), Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str(),
+			FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str()) ? 1 : 0);
+#endif
+		const bool bios_loaded = LoadBIOS();
+#if ARMSX2_APPLE_MAC_RUNTIME
+		LogUnified("@@MAC_BOOT_BIOS_LOAD_END@@ ok=%d\n", bios_loaded ? 1 : 0);
+#endif
+		if (!bios_loaded)
 		{
 			Host::ReportErrorAsync(TRANSLATE_SV("VMManager", "Error"),
 				TRANSLATE_SV("VMManager",
@@ -1811,11 +1870,22 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 
 		// Must happen after BIOS load, depends on BIOS version.
 		cdvdLoadNVRAM();
+#if ARMSX2_APPLE_MAC_RUNTIME
+		LogUnified("@@MAC_BOOT_NVRAM_LOADED@@\n");
+#endif
 	}
 
 	Error error;
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn("Opening CDVD...");
-	if (!DoCDVDopen(&error))
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacLogCDVDState("before_cdvd_open");
+#endif
+	const bool cdvd_opened = DoCDVDopen(&error);
+#if ARMSX2_APPLE_MAC_RUNTIME
+	LogUnified("@@MAC_BOOT_CDVD_OPEN_END@@ ok=%d error=%s\n", cdvd_opened ? 1 : 0,
+		cdvd_opened ? "" : error.GetDescription().c_str());
+#endif
+	if (!cdvd_opened)
 	{
 		Host::ReportErrorAsync("Startup Error", fmt::format("Failed to open CDVD '{}': {}.",
 													Path::GetFileName(CDVDsys_GetFile(CDVDsys_GetSourceType())),
@@ -1826,6 +1896,9 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 
 	// Figure out which game we're running! This also loads game settings.
 	UpdateDiscDetails(true);
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacLogCDVDState("after_disc_details");
+#endif
 
 	ScopedGuard close_memcards(&FileMcd_EmuClose);
 
@@ -1835,6 +1908,9 @@ bool VMManager::Initialize(VMBootParameters boot_params)
 		(boot_params.fast_boot.value_or(static_cast<bool>(EmuConfig.EnableFastBoot)) || !s_elf_override.empty()) &&
 		(CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc || !s_elf_override.empty()) &&
 		!GSDumpReplayer::IsReplayingDump();
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacLogCDVDState("after_fast_boot_resolve");
+#endif
 
 	if (!s_elf_override.empty())
 	{

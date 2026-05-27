@@ -29,6 +29,10 @@
 
 #include "fmt/format.h"
 
+#ifdef __APPLE__
+#include "common/Darwin/ApplePlatform.h"
+#endif
+
 using namespace R5900;	// for R5900 disasm tools
 
 s32 EEsCycle;		// used to sync the IOP to the EE
@@ -46,6 +50,24 @@ bool eeEventTestIsActive = false;
 EE_intProcessStatus eeRunInterruptScan = INT_NOT_RUNNING;
 
 u32 g_eeloadMain = 0, g_eeloadExec = 0, g_osdsys_str = 0;
+
+#if ARMSX2_APPLE_MAC_RUNTIME
+extern "C" void LogUnified(const char* fmt, ...);
+
+static void MacTraceCPUProgress(const char* tag)
+{
+	static u64 s_cpu_progress_count = 0;
+	const u64 count = s_cpu_progress_count++;
+	if (count >= 256 && (count % 60) != 0)
+		return;
+
+	LogUnified("@@MAC_CPU_PROGRESS@@ count=%llu tag=%s ee_pc=%08x ee_cycle=%u ee_next=%u ee_last=%u iop_pc=%08x iop_cycle=%u iop_next=%u ees=%d iop_cycle_ee=%d interrupt=%08x intc_stat=%08x intc_mask=%08x dmac_stat=%08x dmac_pcr=%08x\n",
+		static_cast<unsigned long long>(count), tag, cpuRegs.pc, cpuRegs.cycle, cpuRegs.nextEventCycle,
+		cpuRegs.lastEventCycle, psxRegs.pc, psxRegs.cycle, psxRegs.iopNextEventCycle, EEsCycle,
+		psxRegs.iopCycleEE, cpuRegs.interrupt, psHu32(INTC_STAT), psHu32(INTC_MASK),
+		dmacRegs.stat._u32, dmacRegs.pcr._u32);
+}
+#endif
 
 /* I don't know how much space for args there is in the memory block used for args in full boot mode,
 but in fast boot mode, the block we use can fit at least 16 argv pointers (varies with BIOS version).
@@ -364,6 +386,9 @@ static bool cpuIntsEnabled(int Interrupt)
 // and the recompiler.  (moved here to help alleviate redundant code)
 __fi void _cpuEventTest_Shared()
 {
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceCPUProgress("event_enter");
+#endif
 	eeEventTestIsActive = true;
 	cpuRegs.nextEventCycle = cpuRegs.cycle + eeWaitCycles;
 	cpuRegs.lastEventCycle = cpuRegs.cycle;
@@ -463,6 +488,9 @@ __fi void _cpuEventTest_Shared()
 	// Apply vsync and other counter nextCycles
 	cpuSetNextEvent(nextStartCounter, nextDeltaCounter);
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+	MacTraceCPUProgress("event_exit");
+#endif
 	eeEventTestIsActive = false;
 }
 
