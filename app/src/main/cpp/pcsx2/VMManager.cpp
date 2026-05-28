@@ -3160,6 +3160,7 @@ void VMManager::UpdateCPUImplementations()
 //#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// CPU core selection: 0=Translator, 1=Interpreter, 2=ARM64 Dynarec (if available)
 	const s32 core_type = EmuConfig.Cpu.CoreType;
+	EmuConfig.Cpu.Recompiler.EnableEE = (core_type != 1);
 	if (core_type == 1)
 	{
 		Cpu = &intCpu;
@@ -3185,19 +3186,25 @@ void VMManager::UpdateCPUImplementations()
 		Cpu = &recCpu;
 #endif
 	}
+	if (Cpu == &intCpu)
+	{
+		psxCpu = &psxInt;
+	}
 #if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 0)
+	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 0)
 		psxCpu = &psxRec;
-	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 1 || Cpu == &intCpu)
+	else if (DarwinMisc::ARMSX2_IOP_CORE_TYPE == 1)
 		psxCpu = &psxInt;
 	else
 		psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 #else
-	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
+	else
+		psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 #endif
 
-	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
-	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+	const bool force_vu_interp = (Cpu == &intCpu) || DarwinMisc::ARMSX2_FORCE_EE_INTERP;
+	CpuVU0 = (EmuConfig.Cpu.Recompiler.EnableVU0 && !force_vu_interp) ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+	CpuVU1 = (EmuConfig.Cpu.Recompiler.EnableVU1 && !force_vu_interp) ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
 //#else
 //	Cpu = &intCpu;
 //	psxCpu = &psxInt;

@@ -414,6 +414,241 @@ void ClampValues(int regd)
 }
 //------------------------------------------------------------------
 
+static void fpuFlushDouble_NEON(int reg)
+{
+	auto regQ = a64::QRegister(reg);
+	a64::Label l_zero, l_inf, l_done;
+	a64::UseScratchRegisterScope temps(armAsm);
+	a64::Register tmp = temps.AcquireW();
+	armAsm->Fmov(EAX, regQ.S());
+	armAsm->And(tmp, EAX, 0x7f800000);
+	armAsm->Cbz(tmp, &l_zero);
+	armAsm->Cmp(tmp, 0x7f800000);
+	armAsm->B(&l_inf, a64::Condition::eq);
+	armAsm->B(&l_done);
+	armBind(&l_zero);
+	armAsm->And(EAX, EAX, 0x80000000);
+	armAsm->Fmov(regQ.S(), EAX);
+	armAsm->B(&l_done);
+	armBind(&l_inf);
+	armAsm->And(EAX, EAX, 0x80000000);
+	armAsm->Mov(tmp, 0x7f7fffff);
+	armAsm->Orr(EAX, EAX, tmp);
+	armAsm->Fmov(regQ.S(), EAX);
+	armBind(&l_done);
+}
+
+static void fpuCheckOverflow_NEON(int reg, u32 cFlagsToSet, a64::Label* skip_underflow)
+{
+	auto regQ = a64::QRegister(reg);
+	a64::Label l_no_overflow;
+	{
+		a64::UseScratchRegisterScope temps(armAsm);
+		a64::Register tmp = temps.AcquireW();
+		armAsm->Fmov(EAX, regQ.S());
+		armAsm->And(tmp, EAX, 0x7fffffff);
+		armAsm->Cmp(tmp, 0x7f800000);
+		armAsm->B(&l_no_overflow, a64::Condition::ne);
+		armAsm->And(EAX, EAX, 0x80000000);
+		armAsm->Mov(tmp, 0x7f7fffff);
+		armAsm->Orr(EAX, EAX, tmp);
+		armAsm->Fmov(regQ.S(), EAX);
+	}
+	armOrr(PTR_CPU(fpuRegs.fprc[31]), cFlagsToSet);
+	armAsm->B(skip_underflow);
+	armBind(&l_no_overflow);
+	if (cFlagsToSet & FPUflagO)
+		armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagO);
+}
+
+static void fpuCheckUnderflow_NEON(int reg, u32 cFlagsToSet)
+{
+	auto regQ = a64::QRegister(reg);
+	a64::Label l_no_underflow, l_done;
+	{
+		a64::UseScratchRegisterScope temps(armAsm);
+		a64::Register tmp = temps.AcquireW();
+		armAsm->Fmov(EAX, regQ.S());
+		armAsm->And(tmp, EAX, 0x7f800000);
+		armAsm->Cbnz(tmp, &l_no_underflow);
+		armAsm->And(tmp, EAX, 0x007fffff);
+		armAsm->Cbz(tmp, &l_no_underflow);
+		armAsm->And(EAX, EAX, 0x80000000);
+		armAsm->Fmov(regQ.S(), EAX);
+	}
+	armOrr(PTR_CPU(fpuRegs.fprc[31]), cFlagsToSet);
+	armAsm->B(&l_done);
+	armBind(&l_no_underflow);
+	if (cFlagsToSet & FPUflagU)
+		armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagU);
+	armBind(&l_done);
+}
+
+static void recADDA_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::ADDA_F);
+	auto regAcc = a64::QRegister(EEREC_ACC);
+	int t_fs = _allocTempXMMreg(XMMT_FPS);
+	auto regFs = a64::QRegister(t_fs);
+	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
+	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
+	fpuFlushDouble_NEON(t_fs);
+	int t_ft = _allocTempXMMreg(XMMT_FPS);
+	auto regFt = a64::QRegister(t_ft);
+	if (info & PROCESS_EE_T) armAsm->Mov(regFt.S(), 0, a64::QRegister(EEREC_T).S(), 0);
+	else armLoad(regFt.S(), PTR_CPU(fpuRegs.fpr[_Ft_]));
+	fpuFlushDouble_NEON(t_ft);
+	armAsm->Fadd(regAcc.S(), regFs.S(), regFt.S());
+	_freeXMMreg(t_fs);
+	_freeXMMreg(t_ft);
+	a64::Label l_done;
+	fpuCheckOverflow_NEON(EEREC_ACC, FPUflagO | FPUflagSO, &l_done);
+	fpuCheckUnderflow_NEON(EEREC_ACC, FPUflagU | FPUflagSU);
+	armBind(&l_done);
+}
+
+static void recMULA_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::MULA_F);
+	auto regAcc = a64::QRegister(EEREC_ACC);
+	int t_fs = _allocTempXMMreg(XMMT_FPS);
+	auto regFs = a64::QRegister(t_fs);
+	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
+	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
+	fpuFlushDouble_NEON(t_fs);
+	int t_ft = _allocTempXMMreg(XMMT_FPS);
+	auto regFt = a64::QRegister(t_ft);
+	if (info & PROCESS_EE_T) armAsm->Mov(regFt.S(), 0, a64::QRegister(EEREC_T).S(), 0);
+	else armLoad(regFt.S(), PTR_CPU(fpuRegs.fpr[_Ft_]));
+	fpuFlushDouble_NEON(t_ft);
+	armAsm->Fmul(regAcc.S(), regFs.S(), regFt.S());
+	_freeXMMreg(t_fs);
+	_freeXMMreg(t_ft);
+	a64::Label l_done;
+	fpuCheckOverflow_NEON(EEREC_ACC, FPUflagO | FPUflagSO, &l_done);
+	fpuCheckUnderflow_NEON(EEREC_ACC, FPUflagU | FPUflagSU);
+	armBind(&l_done);
+}
+
+static void recSUBA_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::SUBA_F);
+	auto regAcc = a64::QRegister(EEREC_ACC);
+	int t_fs = _allocTempXMMreg(XMMT_FPS);
+	auto regFs = a64::QRegister(t_fs);
+	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
+	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
+	fpuFlushDouble_NEON(t_fs);
+	int t_ft = _allocTempXMMreg(XMMT_FPS);
+	auto regFt = a64::QRegister(t_ft);
+	if (info & PROCESS_EE_T) armAsm->Mov(regFt.S(), 0, a64::QRegister(EEREC_T).S(), 0);
+	else armLoad(regFt.S(), PTR_CPU(fpuRegs.fpr[_Ft_]));
+	fpuFlushDouble_NEON(t_ft);
+	armAsm->Fsub(regAcc.S(), regFs.S(), regFt.S());
+	_freeXMMreg(t_fs);
+	_freeXMMreg(t_ft);
+	a64::Label l_done;
+	fpuCheckOverflow_NEON(EEREC_ACC, FPUflagO | FPUflagSO, &l_done);
+	fpuCheckUnderflow_NEON(EEREC_ACC, FPUflagU | FPUflagSU);
+	armBind(&l_done);
+}
+
+static void recMADDtemp_iv2(int info, int regd, bool is_sub)
+{
+	auto regD = a64::QRegister(regd);
+
+	int t_fs = _allocTempXMMreg(XMMT_FPS);
+	auto regFs = a64::QRegister(t_fs);
+	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
+	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
+
+	int t_ft = _allocTempXMMreg(XMMT_FPS);
+	auto regFt = a64::QRegister(t_ft);
+	if (info & PROCESS_EE_T) armAsm->Mov(regFt.S(), 0, a64::QRegister(EEREC_T).S(), 0);
+	else armLoad(regFt.S(), PTR_CPU(fpuRegs.fpr[_Ft_]));
+
+	int t_acc = _allocTempXMMreg(XMMT_FPS);
+	auto regAccTmp = a64::QRegister(t_acc);
+	if (info & PROCESS_EE_ACC) armAsm->Mov(regAccTmp.S(), 0, a64::QRegister(EEREC_ACC).S(), 0);
+	else armLoad(regAccTmp.S(), PTR_CPU(fpuRegs.ACC));
+
+	armAsm->Fmul(regFs.S(), regFs.S(), regFt.S());
+
+	if (is_sub)
+		armAsm->Fsub(regD.S(), regAccTmp.S(), regFs.S());
+	else
+		armAsm->Fadd(regD.S(), regAccTmp.S(), regFs.S());
+
+	_freeXMMreg(t_fs);
+	_freeXMMreg(t_ft);
+	_freeXMMreg(t_acc);
+}
+
+static void recMADDMSUB_v147_only(int info, bool is_sub)
+{
+	int t_fs  = _allocTempXMMreg(XMMT_FPS);
+	int t_ft  = _allocTempXMMreg(XMMT_FPS);
+	int t_acc = _allocTempXMMreg(XMMT_FPS);
+	auto regFs  = a64::QRegister(t_fs);
+	auto regFt  = a64::QRegister(t_ft);
+	auto regAcc = a64::QRegister(t_acc);
+
+	if (info & PROCESS_EE_S) armAsm->Mov(regFs.S(), 0, a64::QRegister(EEREC_S).S(), 0);
+	else armLoad(regFs.S(), PTR_CPU(fpuRegs.fpr[_Fs_]));
+	fpuFlushDouble_NEON(t_fs);
+
+	if (info & PROCESS_EE_T) armAsm->Mov(regFt.S(), 0, a64::QRegister(EEREC_T).S(), 0);
+	else armLoad(regFt.S(), PTR_CPU(fpuRegs.fpr[_Ft_]));
+	fpuFlushDouble_NEON(t_ft);
+
+	if (info & PROCESS_EE_ACC) armAsm->Mov(regAcc.S(), 0, a64::QRegister(EEREC_ACC).S(), 0);
+	else armLoad(regAcc.S(), PTR_CPU(fpuRegs.ACC));
+	fpuFlushDouble_NEON(t_acc);
+
+	armAsm->Fmul(regFs.S(), regFs.S(), regFt.S());
+	fpuFlushDouble_NEON(t_fs);
+
+	if (is_sub)
+		armAsm->Fsub(regFs.S(), regAcc.S(), regFs.S());
+	else
+		armAsm->Fadd(regFs.S(), regAcc.S(), regFs.S());
+
+	a64::Label l_done;
+	fpuCheckOverflow_NEON(t_fs, FPUflagO | FPUflagSO, &l_done);
+	fpuCheckUnderflow_NEON(t_fs, FPUflagU | FPUflagSU);
+	armBind(&l_done);
+
+	_deleteFPtoXMMreg(_Fd_, DELETE_REG_FREE_NO_WRITEBACK);
+	armStore(PTR_CPU(fpuRegs.fpr[_Fd_]), regFs.S());
+
+	_freeXMMreg(t_fs);
+	_freeXMMreg(t_ft);
+	_freeXMMreg(t_acc);
+}
+
+static void recMADD_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::MADD_F);
+	recMADDMSUB_v147_only(info, false);
+}
+
+static void recMSUB_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::MSUB_F);
+	recMADDMSUB_v147_only(info, true);
+}
+
+static void recMADDA_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::MADDA_F);
+	recMADDtemp_iv2(info, EEREC_ACC, false);
+}
+
+static void recMSUBA_S_xmm_iv2(int info)
+{
+	EE::Profiler.EmitOp(eeOpcode::MSUBA_F);
+	recMADDtemp_iv2(info, EEREC_ACC, true);
+}
 
 //------------------------------------------------------------------
 // ABS XMM
@@ -691,11 +926,11 @@ void FPU_MUL_REV(int regd, int regt) { FPU_MUL(regd, regt, true); } //reversed o
 
 void ARM_MAXSS_XMM_to_XMM(int regd, int regt) {
     auto regD = a64::QRegister(regd);
-    armAsm->Fmaxnm(regD.V4S(), regD.V4S(), a64::QRegister(regt).V4S());
+    armAsm->Fmaxnm(regD.S(), regD.S(), a64::QRegister(regt).S());
 }
 void ARM_MINSS_XMM_to_XMM(int regd, int regt) {
     auto regD = a64::QRegister(regd);
-    armAsm->Fminnm(regD.V4S(), regD.V4S(), a64::QRegister(regt).V4S());
+    armAsm->Fminnm(regD.S(), regD.S(), a64::QRegister(regt).S());
 }
 
 //------------------------------------------------------------------
@@ -825,9 +1060,7 @@ FPURECOMPILE_CONSTCODE(ADD_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 
 void recADDA_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::ADDA_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	ClampValues(recCommutativeOp(info, EEREC_ACC, 0));
+	recADDA_S_xmm_iv2(info);
 }
 
 FPURECOMPILE_CONSTCODE(ADDA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
@@ -996,6 +1229,7 @@ void recC_EQ_xmm(int info)
 
 //	j8Ptr[0] = JZ8(0);
     armAsm->B(&j8Ptr0, a64::Condition::eq);
+    armAsm->B(&j8Ptr0, a64::Condition::vs);
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
         armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagC);
 //		j8Ptr[1] = JMP8(0);
@@ -1108,7 +1342,7 @@ void recC_LE_xmm(int info)
 	}
 
 //	j8Ptr[0] = JBE8(0);
-    armAsm->B(&j8Ptr0, a64::Condition::ls);
+    armAsm->B(&j8Ptr0, a64::Condition::le);
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
         armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagC);
 //		j8Ptr[1] = JMP8(0);
@@ -1213,7 +1447,7 @@ void recC_LT_xmm(int info)
 	}
 
 //	j8Ptr[0] = JB8(0);
-    armAsm->B(&j8Ptr0, a64::Condition::cc);
+    armAsm->B(&j8Ptr0, a64::Condition::lt);
 //		xAND(ptr32[&fpuRegs.fprc[31]], ~FPUflagC);
         armAnd(PTR_CPU(fpuRegs.fprc[31]), ~FPUflagC);
 //		j8Ptr[1] = JMP8(0);
@@ -1297,14 +1531,27 @@ void recCVT_W()
 	//kill register allocation for dst because we write directly to fpuRegs.fpr[_Fd_]
 	_deleteFPtoXMMreg(_Fd_, DELETE_REG_FREE_NO_WRITEBACK);
 
-	// cvttss2si converts unrepresentable values to 0x80000000, so negative values are already handled.
-	// So we just need to handle positive values.
-//	xCMP(edx, 0x4f000000); // If the input is greater than INT_MAX
-    armAsm->Cmp(EDX, 0x4f000000);
-//	xMOV(edx, 0x7fffffff);
-    armAsm->Mov(EDX, 0x7fffffff);
-//	xCMOVGE(eax, edx);     // Saturate it
-    armAsm->Csel(EAX, EDX, EAX, a64::Condition::ge);
+	{
+		a64::UseScratchRegisterScope temps(armAsm);
+		a64::Register tmp = temps.AcquireW();
+		a64::Label store_label, nan_label;
+
+		armAsm->And(tmp, EDX, 0x7FFFFFFF);
+		armAsm->Cmp(tmp, 0x7F800000);
+		armAsm->B(&nan_label, a64::Condition::gt);
+
+		// cvttss2si converts unrepresentable values to 0x80000000, so negative values are already handled.
+		// So we just need to handle positive values.
+		armAsm->Cmp(EDX, 0x4f000000);
+		armAsm->Mov(tmp, 0x7fffffff);
+		armAsm->Csel(EAX, tmp, EAX, a64::Condition::ge);
+		armAsm->B(&store_label);
+
+		armBind(&nan_label);
+		armAsm->Mov(EAX, 0x80000000);
+
+		armBind(&store_label);
+	}
 
 	//Write the result
 //	xMOV(ptr[&fpuRegs.fpr[_Fd_]], eax);
@@ -1732,18 +1979,14 @@ void recMADDtemp(int info, int regd)
 
 void recMADD_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::MADD_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	recMADDtemp(info, EEREC_D);
+	recMADD_S_xmm_iv2(info);
 }
 
-FPURECOMPILE_CONSTCODE(MADD_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE(MADD_S, XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
 
 void recMADDA_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::MADDA_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	recMADDtemp(info, EEREC_ACC);
+	recMADDA_S_xmm_iv2(info);
 }
 
 FPURECOMPILE_CONSTCODE(MADDA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
@@ -2026,18 +2269,14 @@ void recMSUBtemp(int info, int regd)
 
 void recMSUB_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::MSUB_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	recMSUBtemp(info, EEREC_D);
+	recMSUB_S_xmm_iv2(info);
 }
 
-FPURECOMPILE_CONSTCODE(MSUB_S, XMMINFO_WRITED | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
+FPURECOMPILE_CONSTCODE(MSUB_S, XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
 
 void recMSUBA_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::MSUBA_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	recMSUBtemp(info, EEREC_ACC);
+	recMSUBA_S_xmm_iv2(info);
 }
 
 FPURECOMPILE_CONSTCODE(MSUBA_S, XMMINFO_WRITEACC | XMMINFO_READACC | XMMINFO_READS | XMMINFO_READT);
@@ -2058,9 +2297,7 @@ FPURECOMPILE_CONSTCODE(MUL_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 
 void recMULA_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::MULA_F);
-	//xAND(ptr32[&fpuRegs.fprc[31]], ~(FPUflagO|FPUflagU)); // Clear O and U flags
-	ClampValues(recCommutativeOp(info, EEREC_ACC, 1));
+	recMULA_S_xmm_iv2(info);
 }
 
 FPURECOMPILE_CONSTCODE(MULA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);
@@ -2187,8 +2424,7 @@ FPURECOMPILE_CONSTCODE(SUB_S, XMMINFO_WRITED | XMMINFO_READS | XMMINFO_READT);
 
 void recSUBA_S_xmm(int info)
 {
-	EE::Profiler.EmitOp(eeOpcode::SUBA_F);
-	recSUBop(info, EEREC_ACC);
+	recSUBA_S_xmm_iv2(info);
 }
 
 FPURECOMPILE_CONSTCODE(SUBA_S, XMMINFO_WRITEACC | XMMINFO_READS | XMMINFO_READT);

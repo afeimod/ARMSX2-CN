@@ -19,7 +19,43 @@ extern s64 PSXCLK;	/* 36.864 Mhz */
 #include "SaveState.h"
 #include "DebugTools/Debug.h"
 
+#include <cstdlib>
+#include <cstring>
 #include <string>
+
+inline const char* ARMSX2_GetRuntimeEnv(const char* name)
+{
+	if (!name || !name[0])
+		return nullptr;
+
+	const char* value = std::getenv(name);
+	if (value && value[0])
+		return value;
+
+	if (std::strncmp(name, "ARMSX2_", 7) != 0)
+		return nullptr;
+
+	std::string child_name = "SIMCTL_CHILD_";
+	child_name += name;
+	value = std::getenv(child_name.c_str());
+	return (value && value[0]) ? value : nullptr;
+}
+
+inline bool ARMSX2_GetRuntimeEnvBool(const char* name, bool default_value = false)
+{
+	const char* value = ARMSX2_GetRuntimeEnv(name);
+	if (!value)
+		return default_value;
+	return (value[0] == '1' && value[1] == '\0');
+}
+
+inline bool ARMSX2_IsDebugVerbose()
+{
+	static int s_cached = -1;
+	if (s_cached < 0)
+		s_cached = ARMSX2_GetRuntimeEnvBool("ARMSX2_DEBUG_VERBOSE", false) ? 1 : 0;
+	return (s_cached == 1);
+}
 
 extern std::string ShiftJIS_ConvertString( const char* src );
 extern std::string ShiftJIS_ConvertString( const char* src, int maxlen );

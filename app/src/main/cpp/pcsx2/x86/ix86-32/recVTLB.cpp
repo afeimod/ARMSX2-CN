@@ -7,12 +7,128 @@
 #include "x86/iR5900.h"
 
 #include "common/Darwin/ApplePlatform.h"
+#include "common/Darwin/DarwinMisc.h"
 #include "common/Perf.h"
 
 using namespace vtlb_private;
 #if !defined(__ANDROID__)
 using namespace x86Emitter;
 #endif
+
+namespace armsx2_fastmem_dbg
+{
+	static int s_init = 0;
+	static int s_d8 = 0, s_d16 = 0, s_d32 = 0, s_d64 = 0, s_d128 = 0;
+	static int s_d_w = 0, s_d_r = 0;
+	static int s_dw8 = 0, s_dw16 = 0, s_dw32 = 0, s_dw64 = 0, s_dw128 = 0;
+	static int s_dr8 = 0, s_dr16 = 0, s_dr32 = 0, s_dr64 = 0, s_dr128 = 0;
+	static int s_dw32_xmm = -1;
+	static int s_dw32_gpr = -1;
+	static int s_disable_sw_fix = -1;
+
+	static bool env_on(const char* name)
+	{
+		const char* value = ARMSX2_GetRuntimeEnv(name);
+		return value && value[0] != '0';
+	}
+
+	static void ensure_init()
+	{
+		if (s_init)
+			return;
+
+		s_init = 1;
+		s_d8 = env_on("ARMSX2_FASTMEM_DISABLE_8") ? 1 : 0;
+		s_d16 = env_on("ARMSX2_FASTMEM_DISABLE_16") ? 1 : 0;
+		s_d32 = env_on("ARMSX2_FASTMEM_DISABLE_32") ? 1 : 0;
+		s_d64 = env_on("ARMSX2_FASTMEM_DISABLE_64") ? 1 : 0;
+		s_d128 = env_on("ARMSX2_FASTMEM_DISABLE_128") ? 1 : 0;
+		s_d_w = env_on("ARMSX2_FASTMEM_DISABLE_WRITE") ? 1 : 0;
+		s_d_r = env_on("ARMSX2_FASTMEM_DISABLE_READ") ? 1 : 0;
+		s_dw8 = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_8") ? 1 : 0;
+		s_dw16 = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_16") ? 1 : 0;
+		s_dw32 = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_32") ? 1 : 0;
+		s_dw64 = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_64") ? 1 : 0;
+		s_dw128 = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_128") ? 1 : 0;
+		s_dr8 = env_on("ARMSX2_FASTMEM_DISABLE_READ_8") ? 1 : 0;
+		s_dr16 = env_on("ARMSX2_FASTMEM_DISABLE_READ_16") ? 1 : 0;
+		s_dr32 = env_on("ARMSX2_FASTMEM_DISABLE_READ_32") ? 1 : 0;
+		s_dr64 = env_on("ARMSX2_FASTMEM_DISABLE_READ_64") ? 1 : 0;
+		s_dr128 = env_on("ARMSX2_FASTMEM_DISABLE_READ_128") ? 1 : 0;
+	}
+
+	static bool disable_for_bits(u32 bits)
+	{
+		ensure_init();
+		switch (bits)
+		{
+			case 8: return s_d8 != 0;
+			case 16: return s_d16 != 0;
+			case 32: return s_d32 != 0;
+			case 64: return s_d64 != 0;
+			case 128: return s_d128 != 0;
+			default: return false;
+		}
+	}
+
+	static bool disable_write_path()
+	{
+		ensure_init();
+		return s_d_w != 0;
+	}
+
+	static bool disable_write_for_bits(u32 bits)
+	{
+		ensure_init();
+		switch (bits)
+		{
+			case 8: return s_dw8 != 0;
+			case 16: return s_dw16 != 0;
+			case 32: return s_dw32 != 0;
+			case 64: return s_dw64 != 0;
+			case 128: return s_dw128 != 0;
+			default: return false;
+		}
+	}
+
+	static bool disable_write_split(u32 bits, bool xmm)
+	{
+		if (bits != 32)
+			return false;
+		if (s_dw32_xmm < 0)
+			s_dw32_xmm = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_32_XMM") ? 1 : 0;
+		if (s_dw32_gpr < 0)
+			s_dw32_gpr = env_on("ARMSX2_FASTMEM_DISABLE_WRITE_32_GPR") ? 1 : 0;
+		return (xmm && s_dw32_xmm) || (!xmm && s_dw32_gpr);
+	}
+
+	static bool apply_sw_fastmem_fix(u32 bits, bool xmm)
+	{
+		if (s_disable_sw_fix < 0)
+			s_disable_sw_fix = env_on("ARMSX2_DISABLE_SW_FASTMEM_FIX") ? 1 : 0;
+		return !xmm && bits == 32 && !s_disable_sw_fix;
+	}
+
+	static bool force_bios_414x_no_fastmem()
+	{
+		static int s_enabled = -1;
+		if (s_enabled < 0)
+		{
+#if defined(__APPLE__)
+			const bool is_dual_map = (DarwinMisc::g_code_rw_offset != 0);
+			const ptrdiff_t rw_offset = DarwinMisc::g_code_rw_offset;
+#else
+			const bool is_dual_map = false;
+			const ptrdiff_t rw_offset = 0;
+#endif
+			const bool env_override = ARMSX2_GetRuntimeEnvBool("ARMSX2_FIX_BIOS_414X_NO_FASTMEM", true);
+			s_enabled = (!is_dual_map || env_override) ? 1 : 0;
+			Console.WriteLn("@@CFG@@ ARMSX2_FIX_BIOS_414X_NO_FASTMEM=%d (dual_map=%d offset=%td)",
+				s_enabled, static_cast<int>(is_dual_map), rw_offset);
+		}
+		return s_enabled != 0;
+	}
+}
 
 // we need enough for a 32-bit jump forwards (5 bytes)
 //static constexpr u32 LOADSTORE_PADDING = 5;
@@ -823,12 +939,74 @@ void vtlb_DynGenWrite(u32 sz, bool xmm, int addr_reg, int value_reg)
 	}
 #endif
 
-	if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc))
+	const bool force_bios_414x_no_fastmem =
+		armsx2_fastmem_dbg::force_bios_414x_no_fastmem() &&
+		((!xmm && (sz == 8 || sz == 16 || sz == 32 || sz == 64)) || (xmm && (sz == 32 || sz == 128))) &&
+		((pc >= 0x9FC00000u && pc < 0x9FC80000u) ||
+		 (pc >= 0xBFC00000u && pc < 0xBFC80000u) ||
+		 (pc >= 0x80000000u && pc < 0x82000000u) ||
+		 (pc < 0x02000000u));
+
+	if (!CHECK_FASTMEM || vtlb_IsFaultingPC(pc) ||
+		force_bios_414x_no_fastmem ||
+		armsx2_fastmem_dbg::disable_for_bits(sz) ||
+		armsx2_fastmem_dbg::disable_write_path() ||
+		armsx2_fastmem_dbg::disable_write_for_bits(sz) ||
+		armsx2_fastmem_dbg::disable_write_split(sz, xmm) ||
+		armsx2_fastmem_dbg::apply_sw_fastmem_fix(sz, xmm))
 	{
 		iFlushCall(FLUSH_FULLVTLB);
 
-		DynGen_PrepRegs(addr_reg, value_reg, sz, xmm);
-		DynGen_HandlerTest([sz]() { DynGen_DirectWrite(sz); }, 1, sz);
+		armAsm->Mov(a64::w0, a64::WRegister(addr_reg));
+		if (xmm)
+		{
+			if (sz == 128)
+			{
+				if (value_reg != 0)
+					armAsm->Mov(armQRegister(0), armQRegister(value_reg));
+				armEmitCall(reinterpret_cast<void*>(vtlb_memWrite128));
+			}
+			else
+			{
+				if (sz == 64)
+					armAsm->Fmov(a64::x1, armQRegister(value_reg).D());
+				else
+					armAsm->Fmov(a64::w1, armQRegister(value_reg).S());
+				switch (sz)
+				{
+					case 32: armEmitCall(reinterpret_cast<void*>(memWrite32)); break;
+					case 64: armEmitCall(reinterpret_cast<void*>(memWrite64)); break;
+					default: pxAssert(false); break;
+				}
+			}
+		}
+		else
+		{
+			if (sz == 64)
+				armAsm->Mov(a64::x1, a64::XRegister(value_reg));
+			else
+				armAsm->Mov(a64::w1, a64::WRegister(value_reg));
+			switch (sz)
+			{
+				case 8:
+					armAsm->And(a64::w1, a64::w1, 0xFF);
+					armEmitCall(reinterpret_cast<void*>(memWrite8));
+					break;
+				case 16:
+					armAsm->And(a64::w1, a64::w1, 0xFFFF);
+					armEmitCall(reinterpret_cast<void*>(memWrite16));
+					break;
+				case 32:
+					armEmitCall(reinterpret_cast<void*>(memWrite32));
+					break;
+				case 64:
+					armEmitCall(reinterpret_cast<void*>(memWrite64));
+					break;
+				default:
+					pxAssert(false);
+					break;
+			}
+		}
 		return;
 	}
 
@@ -953,7 +1131,15 @@ void vtlb_DynGenWrite_Const(u32 bits, bool xmm, u32 addr_const, int value_reg)
 #endif
 
 	auto vmv = vtlbdata.vmap[addr_const >> VTLB_PAGE_BITS];
-	if (!vmv.isHandler(addr_const))
+	const bool force_slow_write =
+		!CHECK_FASTMEM ||
+		armsx2_fastmem_dbg::force_bios_414x_no_fastmem() ||
+		armsx2_fastmem_dbg::disable_for_bits(bits) ||
+		armsx2_fastmem_dbg::disable_write_path() ||
+		armsx2_fastmem_dbg::disable_write_for_bits(bits) ||
+		armsx2_fastmem_dbg::disable_write_split(bits, xmm) ||
+		armsx2_fastmem_dbg::apply_sw_fastmem_fix(bits, xmm);
+	if (!vmv.isHandler(addr_const) && !force_slow_write)
 	{
 //		auto ppf = vmv.assumePtr(addr_const);
 //        a64::MemOperand mop = armMemOperandPtr((u8*)ppf);

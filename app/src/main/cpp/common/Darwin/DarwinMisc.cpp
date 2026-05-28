@@ -595,9 +595,18 @@ void HostSys::FlushInstructionCache(void* address, u32 size)
 {
     sys_icache_invalidate(address, size);
 
-    static int s_ficache_n = 0;
-    if (s_ficache_n++ < 20)
-        Console.WriteLn("DEBUG: FlushInstructionCache(sys_icache_invalidate) Addr=%p Size=0x%x", address, size);
+    static int s_dbg = -1;
+    if (s_dbg < 0)
+    {
+        const char* value = std::getenv("ARMSX2_DEBUG_VERBOSE");
+        s_dbg = (value && value[0] == '1') ? 1 : 0;
+    }
+    if (s_dbg)
+    {
+        static int s_ficache_n = 0;
+        if (s_ficache_n++ < 20)
+            Console.WriteLn("DEBUG: FlushInstructionCache(sys_icache_invalidate) Addr=%p Size=0x%x", address, size);
+    }
 }
 
 #endif

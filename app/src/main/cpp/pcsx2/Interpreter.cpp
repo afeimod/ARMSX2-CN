@@ -18,7 +18,7 @@ using namespace R5900;		// for OPCODE and OpcodeImpl
 extern int vu0branch, vu1branch;
 
 static int branch2 = 0;
-static u32 cpuBlockCycles = 0;		// 3 bit fixed point version of cycle count
+u32 cpuBlockCycles = 0;		// 3 bit fixed point version of cycle count
 static std::string disOut;
 static bool intExitExecution = false;
 static fastjmp_buf intJmpBuf;

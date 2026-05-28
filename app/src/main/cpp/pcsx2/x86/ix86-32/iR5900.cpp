@@ -1432,6 +1432,111 @@ u32 scaleblockcycles_clear()
 	return scaled;
 }
 
+static bool jit_runtime_blk_enabled()
+{
+	static int s_flag = -1;
+	if (s_flag < 0)
+	{
+		const char* all = ARMSX2_GetRuntimeEnv("ARMSX2_GTAVC_FIXES");
+		const char* specific = ARMSX2_GetRuntimeEnv("ARMSX2_JIT_RUNTIME_BLK");
+		if (specific && specific[0])
+			s_flag = (specific[0] != '0') ? 1 : 0;
+		else
+			s_flag = (!all || all[0] != '0') ? 1 : 0;
+		Console.WriteLn("@@CFG@@ ARMSX2_JIT_RUNTIME_BLK=%d", s_flag);
+	}
+	return s_flag != 0;
+}
+
+static bool jit_interp_fallback_enabled()
+{
+	static int s_flag = -1;
+	if (s_flag < 0)
+	{
+		const char* value = ARMSX2_GetRuntimeEnv("ARMSX2_JIT_INTERP_FALLBACK");
+		s_flag = (value && value[0] && value[0] != '0') ? 1 : 0;
+		Console.WriteLn("@@CFG@@ ARMSX2_JIT_INTERP_FALLBACK=%d", s_flag);
+	}
+	return s_flag != 0;
+}
+
+static bool is_branch_opcode_for_interp_fallback(u32 op)
+{
+	const u32 mainop = op >> 26;
+	if (mainop == 0x02 || mainop == 0x03 || (mainop >= 0x04 && mainop <= 0x07) ||
+		mainop == 0x14 || mainop == 0x15 || mainop == 0x16 || mainop == 0x17 ||
+		mainop == 0x01)
+		return true;
+	if (mainop == 0x11 || mainop == 0x10)
+	{
+		const u32 fmt = (op >> 21) & 0x1F;
+		if (fmt == 0x08)
+			return true;
+		if (mainop == 0x10 && (op & 0xFFFFFFE0) == 0x42000000 && (op & 0x3F) == 0x18)
+			return true;
+	}
+	if (mainop == 0x00)
+	{
+		const u32 funct = op & 0x3F;
+		return funct == 0x08 || funct == 0x09 || funct == 0x0C || funct == 0x0D;
+	}
+	return false;
+}
+
+extern u32 cpuBlockCycles;
+
+static void armEmitFlushBlockCycles_runtime(bool clear)
+{
+	using namespace a64;
+	armMoveAddressToReg(x16, &cpuBlockCycles);
+	armAsm->Ldr(w14, MemOperand(x16));
+	armAsm->Lsr(w15, w14, 3);
+	armAsm->Mov(w17, 1);
+	armAsm->Cmp(w15, 0);
+	armAsm->Csel(w15, w17, w15, eq);
+	armMoveAddressToReg(x16, &cpuRegs.cycle);
+	armAsm->Ldr(w17, MemOperand(x16));
+	armAsm->Add(w17, w17, w15);
+	armAsm->Str(w17, MemOperand(x16));
+	armMoveAddressToReg(x16, &cpuBlockCycles);
+	armAsm->And(w14, w14, 7);
+	armAsm->Str(w14, MemOperand(x16));
+	if (clear)
+		s_nBlockCycles = 0;
+}
+
+static void armEmitPerInstCycleAdd_runtime(u32 raw_cycles)
+{
+	using namespace a64;
+	armMoveAddressToReg(x16, &cpuBlockCycles);
+	armAsm->Ldr(w14, MemOperand(x16));
+	armMoveAddressToReg(x17, &cpuRegs.CP0.r[16]);
+	armAsm->Ldr(w15, MemOperand(x17));
+	armAsm->Lsr(w15, w15, 18);
+	armAsm->And(w15, w15, 1);
+	armAsm->Mov(w17, 2);
+	armAsm->Sub(w15, w17, w15);
+	armAsm->Mov(w17, raw_cycles);
+	armAsm->Mul(w15, w17, w15);
+	armAsm->Add(w14, w14, w15);
+	armMoveAddressToReg(x16, &cpuBlockCycles);
+	armAsm->Str(w14, MemOperand(x16));
+}
+
+static void armEmitPerInstCycleAdd(u32 raw_cycles)
+{
+	if (jit_runtime_blk_enabled())
+		armEmitPerInstCycleAdd_runtime(raw_cycles);
+}
+
+static void armEmitCycleAdd(bool clear)
+{
+	if (jit_runtime_blk_enabled())
+		armEmitFlushBlockCycles_runtime(clear);
+	else
+		armAdd(PTR_CPU(cpuRegs.cycle), clear ? scaleblockcycles_clear() : scaleblockcycles());
+}
+
 // Generates dynarec code for Event tests followed by a block dispatch (branch).
 // Parameters:
 //   newpc - address to jump to at the end of the block.  If newpc == 0xffffffff then
@@ -1454,7 +1559,7 @@ static void iBranchTest(u32 newpc)
 //		xMOV(eax, ptr32[&cpuRegs.nextEventCycle]);
         armLoad(EAX, PTR_CPU(cpuRegs.nextEventCycle));
 //		xADD(ptr32[&cpuRegs.cycle], scaleblockcycles());
-        armAdd(PTR_CPU(cpuRegs.cycle), scaleblockcycles());
+        armEmitCycleAdd(false);
 //		xCMP(eax, ptr32[&cpuRegs.cycle]);
         armLoadsw(EEX, PTR_CPU(cpuRegs.cycle));
         armAsm->Cmp(EAX, EEX);
@@ -1471,7 +1576,9 @@ static void iBranchTest(u32 newpc)
 //		xMOV(eax, ptr[&cpuRegs.cycle]);
 //		xADD(eax, scaleblockcycles());
 //		xMOV(ptr[&cpuRegs.cycle], eax); // update cycles
-        armAdd(EAX, PTR_CPU(cpuRegs.cycle), scaleblockcycles());
+        armLoad(EAX, PTR_CPU(cpuRegs.cycle));
+        armEmitCycleAdd(false);
+        armLoad(EAX, PTR_CPU(cpuRegs.cycle));
 //		xSUB(eax, ptr[&cpuRegs.nextEventCycle]);
         armAsm->Subs(EAX, EAX, armLoadsw(PTR_CPU(cpuRegs.nextEventCycle)));
 
@@ -1940,12 +2047,22 @@ void recompileNextInstruction(bool delayslot, bool swapped_delay_slot)
 	{
 		// Note: Tests on a ps2 suggested more like 5 cycles for a NOP. But there's many factors in this..
 		s_nBlockCycles += 9 * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+		armEmitPerInstCycleAdd(9);
 	}
 	else
 	{
 		//If the COP0 DIE bit is disabled, cycles should be doubled.
 		s_nBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-		opcode.recompile();
+		if (jit_interp_fallback_enabled() && opcode.interpret && !is_branch_opcode_for_interp_fallback(cpuRegs.code))
+		{
+			iFlushCall(FLUSH_INTERPRETER);
+			recCall(opcode.interpret);
+		}
+		else
+		{
+			opcode.recompile();
+		}
+		armEmitPerInstCycleAdd(opcode.cycles);
 	}
 
 	if (!swapped_delay_slot)
@@ -2897,7 +3014,7 @@ StartRecomp:
 //				xMOV(ptr32[&cpuRegs.pc], pc);
                 armStore(PTR_CPU(cpuRegs.pc), pc);
 //				xADD(ptr32[&cpuRegs.cycle], scaleblockcycles());
-                armAdd(PTR_CPU(cpuRegs.cycle), scaleblockcycles());
+                armEmitCycleAdd(false);
 //				recBlocks.Link(HWADDR(pc), xJcc32());
                 armAsm->Nop();
                 recBlocks.Link(HWADDR(pc), (s32*)armGetCurrentCodePointer()-1);
