@@ -872,7 +872,7 @@ bool DarwinMisc::IsNoJitModeActive()
 		return true;
 	if (ARMSX2_FORCE_JIT != 0)
 		return false;
-	return true;
+	return !IsJITAvailable();
 #else
 	return false;
 #endif

@@ -844,18 +844,91 @@ static void ARMSX2LogIOSSettingsSnapshot(const char* tag, INISettingsInterface* 
         vuThread ? 1 : 0);
 }
 
+static constexpr const char* ARMSX2_IOS_JIT_SECTION = "ARMSX2iOS/JIT";
+static constexpr const char* ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY = "AutoNoJitFallback";
+
+static bool ARMSX2LooksLikeAutoNoJitFallback(INISettingsInterface* si)
+{
+    if (!si)
+        return false;
+
+    return si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 &&
+           !si->GetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true) &&
+           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true) &&
+           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true) &&
+           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true) &&
+           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true) &&
+           !si->GetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+}
+
+static bool ARMSX2WasAutoNoJitFallback(INISettingsInterface* si)
+{
+    return si &&
+           si->GetBoolValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY, false) &&
+           ARMSX2LooksLikeAutoNoJitFallback(si);
+}
+
+static void ARMSX2SetAutoNoJitFallback(INISettingsInterface* si)
+{
+    if (si)
+        si->SetBoolValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY, true);
+}
+
+static void ARMSX2ClearAutoNoJitFallback(INISettingsInterface* si)
+{
+    if (si)
+        si->DeleteValue(ARMSX2_IOS_JIT_SECTION, ARMSX2_IOS_AUTO_NO_JIT_FALLBACK_KEY);
+}
+
+static void ARMSX2RestoreIOSJitDefaults(INISettingsInterface* si)
+{
+    if (!si)
+        return;
+
+    si->SetIntValue("EmuCore/CPU", "CoreType", 2);
+    si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableEE", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableIOP", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU0", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableVU1", true);
+    si->SetBoolValue("EmuCore/CPU/Recompiler", "EnableFastmem", true);
+}
+
 static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
 {
     if (!si)
         return;
 
+#if ARMSX2_APPLE_MAC_RUNTIME
+    const bool jit_unavailable = false;
+    const bool no_jit_active =
+        false;
+#else
+    const bool force_ee_interp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
+    const bool force_jit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
+    const bool jit_unavailable = !force_ee_interp && !force_jit && !DarwinMisc::IsJITAvailable();
+    const bool no_jit_active = force_ee_interp || jit_unavailable;
+#endif
+
+#if !ARMSX2_APPLE_MAC_RUNTIME
+    if (!no_jit_active && ARMSX2WasAutoNoJitFallback(si)) {
+        ARMSX2RestoreIOSJitDefaults(si);
+        ARMSX2ClearAutoNoJitFallback(si);
+        Console.WriteLn("@@IOS_SETTINGS@@ migrated stale no-JIT fallback settings to JIT defaults");
+    } else if (!no_jit_active) {
+        ARMSX2ClearAutoNoJitFallback(si);
+    }
+#endif
+
     const bool interpreter_requested =
 #if ARMSX2_APPLE_MAC_RUNTIME
         false;
 #else
-        si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || DarwinMisc::IsNoJitModeActive();
+        si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1 || no_jit_active;
 #endif
     if (interpreter_requested) {
+        if (jit_unavailable)
+            ARMSX2SetAutoNoJitFallback(si);
         DarwinMisc::ForceNoJitMode();
         si->SetIntValue("EmuCore/CPU", "CoreType", 1);
         si->SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", false);
@@ -924,12 +997,14 @@ static void ARMSX2ApplyIOSRuntimeDefaults(INISettingsInterface* si)
     si->SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
 }
 
-static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
+static bool ARMSX2IOSConfigRequestsInterpreter(INISettingsInterface* si)
 {
 #if ARMSX2_APPLE_MAC_RUNTIME
     return false;
 #else
-    return DarwinMisc::IsNoJitModeActive() || (si && si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1);
+    if (ARMSX2WasAutoNoJitFallback(si))
+        return false;
+    return si && si->GetIntValue("EmuCore/CPU", "CoreType", 2) == 1;
 #endif
 }
 
@@ -1430,18 +1505,29 @@ static bool ARMSX2IOSInterpreterRequested(INISettingsInterface* si)
 // CS_DEBUGGED check only (DolphiniOS approach) — no blocking, runs on main thread
 - (void)checkJITAndStartVM {
 #if ARMSX2_APPLE_IOS_DEVICE
-    if (ARMSX2IOSInterpreterRequested(s_settings_interface)) {
-        DarwinMisc::ForceNoJitMode();
+    const bool force_ee_interp = (DarwinMisc::ARMSX2_FORCE_EE_INTERP != 0);
+    const bool force_jit = (DarwinMisc::ARMSX2_FORCE_JIT != 0);
+    const bool jit_available = force_jit || (!force_ee_interp && DarwinMisc::IsJITAvailable());
+    const bool jit_unavailable = !force_ee_interp && !force_jit && !jit_available;
+
+    if (!jit_available || force_ee_interp || ARMSX2IOSConfigRequestsInterpreter(s_settings_interface)) {
         if (s_settings_interface) {
+            if (jit_unavailable)
+                ARMSX2SetAutoNoJitFallback(s_settings_interface);
             ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
             s_settings_interface->Save();
         }
+        DarwinMisc::ForceNoJitMode();
         Console.WriteLn("@@JIT_GATE@@ interpreter requested — starting VM with JIT disabled");
         [self startVMThread];
         return;
     }
 
-    if (DarwinMisc::IsJITAvailable()) {
+    if (jit_available) {
+        if (s_settings_interface) {
+            ARMSX2ApplyIOSRuntimeDefaults(s_settings_interface);
+            s_settings_interface->Save();
+        }
         Console.WriteLn("@@JIT_GATE@@ JIT available — starting VM in JIT mode");
         [self startVMThread];
         return;
