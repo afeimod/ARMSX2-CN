@@ -15,6 +15,26 @@ class ARMSX2HostingController<Content: View>: UIHostingController<Content> {
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
         .fade
     }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        applyNativeContentScale(to: view)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        applyNativeContentScale(to: view)
+    }
+
+    private func applyNativeContentScale(to view: UIView) {
+        let screen = view.window?.screen ?? UIScreen.main
+        let scale = max(screen.nativeScale, screen.scale, 1.0)
+        view.contentScaleFactor = scale
+        view.layer.contentsScale = scale
+        for subview in view.subviews {
+            applyNativeContentScale(to: subview)
+        }
+    }
 }
 
 @objc public class SwiftUIHost: NSObject {

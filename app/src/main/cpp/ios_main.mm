@@ -500,15 +500,40 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 @end
 @implementation ARMSX2GameView
 + (Class)layerClass { return [CAMetalLayer class]; }
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self)
+        [self armsx2ApplyNativeContentScale];
+    return self;
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    [self armsx2ApplyNativeContentScale];
+    [self setNeedsLayout];
+}
+- (CGFloat)armsx2NativeContentScale {
+    UIScreen* screen = self.window.screen ?: UIScreen.mainScreen;
+    CGFloat scale = screen.nativeScale > 0.0 ? screen.nativeScale : screen.scale;
+    return scale > 0.0 ? scale : 1.0;
+}
+- (void)armsx2ApplyNativeContentScale {
+    const CGFloat scale = [self armsx2NativeContentScale];
+    self.contentScaleFactor = scale;
+    self.layer.contentsScale = scale;
+    ((CAMetalLayer*)self.layer).contentsScale = scale;
+}
 - (void)layoutSubviews {
     [super layoutSubviews];
-    // Frame is set by SwiftUI — only update Metal drawable size
+    [self armsx2ApplyNativeContentScale];
+    if (self.bounds.size.width <= 0.0 || self.bounds.size.height <= 0.0)
+        return;
+
     CGFloat scale = self.contentScaleFactor;
     CAMetalLayer *mtl = (CAMetalLayer *)self.layer;
     mtl.drawableSize = CGSizeMake(self.bounds.size.width * scale,
                                    self.bounds.size.height * scale);
-    int w = (int)(self.bounds.size.width * scale);
-    int h = (int)(self.bounds.size.height * scale);
+    int w = std::max(1, (int)(self.bounds.size.width * scale + 0.5));
+    int h = std::max(1, (int)(self.bounds.size.height * scale + 0.5));
     float s = (float)scale;
     MTGS::RunOnGSThread([w, h, s]() {
         GSResizeDisplayWindow(w, h, s);
@@ -691,12 +716,12 @@ namespace Host
             UIWindow* window = (__bridge UIWindow*)SDL_GetPointerProperty(props, SDL_PROP_WINDOW_UIKIT_WINDOW_POINTER, NULL);
             
             if (window) {
-// Use dedicated game render view if available (sized for portrait)
-                 if (g_gameRenderView) {
-                     wi.window_handle = (__bridge void*)g_gameRenderView;
-                 } else {
-                     wi.window_handle = (__bridge void*)[window rootViewController].view;
-                 }
+                // Use dedicated game render view if available (sized for portrait).
+                if (g_gameRenderView) {
+                    wi.window_handle = (__bridge void*)g_gameRenderView;
+                } else {
+                    wi.window_handle = (__bridge void*)[window rootViewController].view;
+                }
             }
 
             if (!wi.window_handle) {
@@ -705,12 +730,14 @@ namespace Host
                  if (!wi.window_handle) wi.window_handle = (__bridge void*)window;
             }
 
-// Get render size from the actual render view
+            // Get render size from the actual render view.
             UIView* renderView = (__bridge UIView*)wi.window_handle;
-            CGFloat scale = renderView.contentScaleFactor;
-            wi.surface_width = static_cast<u32>(renderView.bounds.size.width * scale);
-            wi.surface_height = static_cast<u32>(renderView.bounds.size.height * scale);
-            wi.surface_scale = SDL_GetWindowDisplayScale(g_sdl_window);
+            CGFloat scale = renderView.contentScaleFactor > 0.0 ? renderView.contentScaleFactor : UIScreen.mainScreen.nativeScale;
+            if (scale <= 0.0)
+                scale = 1.0;
+            wi.surface_width = static_cast<u32>(std::max<CGFloat>(1.0, renderView.bounds.size.width * scale));
+            wi.surface_height = static_cast<u32>(std::max<CGFloat>(1.0, renderView.bounds.size.height * scale));
+            wi.surface_scale = static_cast<float>(scale);
             
             SDL_DisplayID display = SDL_GetDisplayForWindow(g_sdl_window);
             const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display);
@@ -719,8 +746,8 @@ namespace Host
             else
                 wi.surface_refresh_rate = 60.0f;
         });
-            
-        Console.WriteLn("Host::AcquireRenderWindow: Returning WindowInfo (Type=%d, View=%p, Size=%ux%u, Scale=%.2f)", 
+
+        Console.WriteLn("Host::AcquireRenderWindow: Returning WindowInfo (Type=%d, View=%p, Size=%ux%u, Scale=%.2f)",
             (int)wi.type, wi.window_handle, wi.surface_width, wi.surface_height, wi.surface_scale);
 
         return wi;
@@ -1052,19 +1079,44 @@ public:
             configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
             configuration.URLCache = nil;
             configuration.HTTPShouldSetCookies = NO;
-            m_session = [NSURLSession sessionWithConfiguration:configuration];
+            NSURLSession* session = [NSURLSession sessionWithConfiguration:configuration];
+#if __has_feature(objc_arc)
+            m_session = (__bridge_retained void*)session;
+#else
+            m_session = (void*)[session retain];
+#endif
+            NSLog(@"[ARMSX2 iOS HTTP] NSURLSession created: %@", session);
         }
     }
 
     ~IOSHTTPDownloader() override
     {
-        [m_session invalidateAndCancel];
+        if (m_session)
+        {
+#if __has_feature(objc_arc)
+            NSURLSession* session = (__bridge_transfer NSURLSession*)m_session;
+#else
+            NSURLSession* session = (NSURLSession*)m_session;
+#endif
+            m_session = nullptr;
+            [session invalidateAndCancel];
+#if !__has_feature(objc_arc)
+            [session release];
+#endif
+        }
     }
 
 protected:
     struct IOSRequest final : Request
     {
         NSURLSessionDataTask* task = nil;
+
+#if !__has_feature(objc_arc)
+        ~IOSRequest()
+        {
+            [task release];
+        }
+#endif
     };
 
     Request* InternalCreateRequest() override
@@ -1110,10 +1162,22 @@ protected:
                 url_request.HTTPMethod = @"GET";
             }
 
-            NSString* debug_url = url.absoluteString;
+            NSString* debug_url = url.absoluteString ?: @"";
+#if __has_feature(objc_arc)
+            NSURLSession* session = (__bridge NSURLSession*)m_session;
+#else
+            NSURLSession* session = (NSURLSession*)m_session;
+#endif
+            if (!session || ![session respondsToSelector:@selector(dataTaskWithRequest:completionHandler:)])
+            {
+                request->status_code = HTTP_STATUS_ERROR;
+                request->state.store(Request::State::Complete);
+                NSLog(@"[ARMSX2 iOS HTTP] Invalid NSURLSession while starting %@", debug_url);
+                return true;
+            }
             request->state.store(Request::State::Started);
 
-            native_request->task = [m_session dataTaskWithRequest:url_request completionHandler:
+            NSURLSessionDataTask* task = [session dataTaskWithRequest:url_request completionHandler:
                 ^(NSData* data, NSURLResponse* response, NSError* error) {
                     s32 status_code = HTTP_STATUS_ERROR;
                     std::string content_type;
@@ -1158,6 +1222,11 @@ protected:
                     native_request->state.store(Request::State::Complete);
                 }];
 
+#if __has_feature(objc_arc)
+            native_request->task = task;
+#else
+            native_request->task = [task retain];
+#endif
             [native_request->task resume];
         }
 
@@ -1178,12 +1247,15 @@ protected:
         // NSURLSession can still deliver a completion after cancellation. Keep the tiny
         // request object alive in that rare timeout/cancel path to avoid a use-after-free.
         [native_request->task cancel];
+#if !__has_feature(objc_arc)
+        [native_request->task release];
+#endif
         native_request->task = nil;
     }
 
 private:
     std::string m_user_agent;
-    NSURLSession* m_session = nil;
+    void* m_session = nullptr;
 };
 
 std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)

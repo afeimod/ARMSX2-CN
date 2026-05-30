@@ -88,13 +88,25 @@ extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void)
     });
 }
 
-static void ARMSX2EnsureAchievementsClientInitialized()
+static dispatch_queue_t ARMSX2RetroAchievementsQueue()
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("org.armsx2.ios.retroachievements", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static bool ARMSX2EnsureAchievementsClientInitialized()
 {
     if (!EmuConfig.Achievements.Enabled)
-        return;
+        return false;
 
     if (!Achievements::IsActive())
-        Achievements::Initialize();
+        return Achievements::Initialize();
+
+    return true;
 }
 
 static void ARMSX2SaveBaseSettingBool(const char* section, const char* key, bool value)
@@ -1118,55 +1130,65 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 
 + (void)setRetroAchievementsEnabled:(BOOL)enabled {
     const bool enable = enabled ? true : false;
-    if (EmuConfig.Achievements.Enabled == enable) {
-        ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
-        ARMSX2_PostRetroAchievementsStateChanged();
-        return;
-    }
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        if (EmuConfig.Achievements.Enabled == enable) {
+            ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+            ARMSX2_PostRetroAchievementsStateChanged();
+            return;
+        }
 
-    ARMSX2UpdateAchievementsSettings(^{
-        EmuConfig.Achievements.Enabled = enable;
-        ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+        ARMSX2UpdateAchievementsSettings(^{
+            EmuConfig.Achievements.Enabled = enable;
+            ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+        });
+        NSLog(@"[ARMSX2Bridge] RetroAchievements enabled=%d", enable ? 1 : 0);
     });
-    NSLog(@"[ARMSX2Bridge] RetroAchievements enabled=%d", enable ? 1 : 0);
 }
 
 + (void)setRetroAchievementsHardcore:(BOOL)enabled {
     const bool enable = enabled ? true : false;
-    if (EmuConfig.Achievements.HardcoreMode == enable) {
-        ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
-        ARMSX2_PostRetroAchievementsStateChanged();
-        return;
-    }
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        if (EmuConfig.Achievements.HardcoreMode == enable) {
+            ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
+            ARMSX2_PostRetroAchievementsStateChanged();
+            return;
+        }
 
-    ARMSX2UpdateAchievementsSettings(^{
-        EmuConfig.Achievements.HardcoreMode = enable;
-        ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
+        ARMSX2UpdateAchievementsSettings(^{
+            EmuConfig.Achievements.HardcoreMode = enable;
+            ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
+        });
+        NSLog(@"[ARMSX2Bridge] RetroAchievements hardcore=%d", enable ? 1 : 0);
     });
-    NSLog(@"[ARMSX2Bridge] RetroAchievements hardcore=%d", enable ? 1 : 0);
 }
 
 + (void)setRetroAchievementsNotifications:(BOOL)enabled {
     const bool enable = enabled ? true : false;
-    ARMSX2UpdateAchievementsSettings(^{
-        EmuConfig.Achievements.Notifications = enable;
-        ARMSX2SaveBaseSettingBool("Achievements", "Notifications", enable);
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        ARMSX2UpdateAchievementsSettings(^{
+            EmuConfig.Achievements.Notifications = enable;
+            ARMSX2SaveBaseSettingBool("Achievements", "Notifications", enable);
+        });
     });
 }
 
 + (void)setRetroAchievementsLeaderboards:(BOOL)enabled {
     const bool enable = enabled ? true : false;
-    ARMSX2UpdateAchievementsSettings(^{
-        EmuConfig.Achievements.LeaderboardNotifications = enable;
-        ARMSX2SaveBaseSettingBool("Achievements", "LeaderboardNotifications", enable);
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        ARMSX2UpdateAchievementsSettings(^{
+            EmuConfig.Achievements.LeaderboardNotifications = enable;
+            ARMSX2SaveBaseSettingBool("Achievements", "LeaderboardNotifications", enable);
+        });
     });
 }
 
 + (void)setRetroAchievementsOverlays:(BOOL)enabled {
     const bool enable = enabled ? true : false;
-    ARMSX2UpdateAchievementsSettings(^{
-        EmuConfig.Achievements.Overlays = enable;
-        ARMSX2SaveBaseSettingBool("Achievements", "Overlays", enable);
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        ARMSX2UpdateAchievementsSettings(^{
+            EmuConfig.Achievements.Overlays = enable;
+            ARMSX2SaveBaseSettingBool("Achievements", "Overlays", enable);
+        });
     });
 }
 
@@ -1184,31 +1206,40 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     std::string user(trimmedUsername.UTF8String ?: "");
     std::string pass(nativePassword.UTF8String ?: "");
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-        if (!EmuConfig.Achievements.Enabled) {
-            Pcsx2Config::AchievementsOptions old_config = EmuConfig.Achievements;
-            EmuConfig.Achievements.Enabled = true;
-            ARMSX2SaveBaseSettingBool("Achievements", "Enabled", true);
-            Achievements::UpdateSettings(old_config);
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        @autoreleasepool {
+            if (!EmuConfig.Achievements.Enabled) {
+                Pcsx2Config::AchievementsOptions old_config = EmuConfig.Achievements;
+                EmuConfig.Achievements.Enabled = true;
+                ARMSX2SaveBaseSettingBool("Achievements", "Enabled", true);
+                Achievements::UpdateSettings(old_config);
+            }
+
+            if (!ARMSX2EnsureAchievementsClientInitialized()) {
+                NSString* message = @"RetroAchievements could not initialize its network client.";
+                NSLog(@"[ARMSX2Bridge] RetroAchievements login username=%@ result=0 message=%@", trimmedUsername, message);
+                ARMSX2_PostRetroAchievementsStateChanged();
+                if (callback)
+                    dispatch_async(dispatch_get_main_queue(), ^{ callback(NO, message); });
+                return;
+            }
+
+            Error error;
+            const bool result = Achievements::Login(user.c_str(), pass.c_str(), &error);
+            NSString* message = result ? @"RetroAchievements login successful." :
+                (error.IsValid() ? ARMSX2NSStringFromStdString(error.GetDescription()) : @"RetroAchievements login failed.");
+
+            NSLog(@"[ARMSX2Bridge] RetroAchievements login username=%@ result=%d message=%@", trimmedUsername, result ? 1 : 0, message);
+            ARMSX2_PostRetroAchievementsStateChanged();
+
+            if (callback)
+                dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO, message); });
         }
-
-        ARMSX2EnsureAchievementsClientInitialized();
-
-        Error error;
-        const bool result = Achievements::Login(user.c_str(), pass.c_str(), &error);
-        NSString* message = result ? @"RetroAchievements login successful." :
-            (error.IsValid() ? ARMSX2NSStringFromStdString(error.GetDescription()) : @"RetroAchievements login failed.");
-
-        NSLog(@"[ARMSX2Bridge] RetroAchievements login username=%@ result=%d message=%@", trimmedUsername, result ? 1 : 0, message);
-        ARMSX2_PostRetroAchievementsStateChanged();
-
-        if (callback)
-            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO, message); });
     });
 }
 
 + (void)logoutRetroAchievements {
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
         Achievements::Logout();
         if (g_p44_settings_interface)
             g_p44_settings_interface->Save();
