@@ -12,6 +12,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "SIO/Pad/PadDualshock2.h"
 #include "Counters.h"
 #include "GS/GSState.h"
+#include "GameList.h"
 #include "pcsx2/Host.h"
 #include "pcsx2/INISettingsInterface.h"
 #include "common/FileSystem.h"
@@ -327,6 +328,45 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
     scanDir(docsPath);
 
     return isos;
+}
+
++ (nonnull NSDictionary<NSString *, NSString *> *)gameMetadataForISO:(nonnull NSString *)isoName {
+    if (isoName.length == 0)
+        return @{};
+
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSString *path = [[self isoDirectory] stringByAppendingPathComponent:isoName];
+    if (![fm fileExistsAtPath:path]) {
+        path = [[self documentsDirectory] stringByAppendingPathComponent:isoName];
+    }
+
+    NSMutableDictionary<NSString *, NSString *> *metadata = [NSMutableDictionary dictionary];
+    metadata[@"fileTitle"] = isoName.stringByDeletingPathExtension ?: isoName;
+
+    if (![fm fileExistsAtPath:path]) {
+        return metadata;
+    }
+
+    GameList::Entry entry;
+    if (GameList::PopulateEntryFromPath(path.UTF8String, &entry)) {
+        NSString *title = ARMSX2NSStringFromStdString(entry.GetTitle(false));
+        NSString *serial = ARMSX2NSStringFromStdString(entry.serial);
+        const char *regionText = GameList::RegionToString(entry.region, false);
+
+        if (title.length > 0)
+            metadata[@"title"] = title;
+        if (serial.length > 0)
+            metadata[@"serial"] = serial;
+        if (regionText && *regionText)
+            metadata[@"region"] = @(regionText);
+
+        NSLog(@"[ARMSX2 iOS Covers] metadata %@ title=%@ serial=%@ region=%@",
+              isoName, metadata[@"title"] ?: @"", metadata[@"serial"] ?: @"", metadata[@"region"] ?: @"");
+    } else {
+        NSLog(@"[ARMSX2 iOS Covers] metadata unavailable %@", isoName);
+    }
+
+    return metadata;
 }
 
 // Toggle overlay visibility via position (None vs TopRight).

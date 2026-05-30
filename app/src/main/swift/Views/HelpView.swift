@@ -72,7 +72,7 @@ private let helpData: [HelpSection] = [
         HelpItem(question: "BIOS formats", answer: "BIN, ROM (dumped from your own PS2)"),
         HelpItem(
             question: "Game covers",
-            answer: "Import covers from the Games toolbar or long-press a game and choose a cover. ARMSX2 iOS also scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, or serial-like names such as SLUS-20312. This also works for CHD games."
+            answer: "Open the Covers menu in Games to import local images, download missing covers, or edit the online Cover Source template. Templates support ${serial}, ${title}, and ${filetitle}; the default example is https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/${serial}.jpg. ARMSX2 iOS scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, game title, or serial-like names such as SLUS-20312. This also works for CHD games when metadata can be resolved."
         ),
     ]),
 ]

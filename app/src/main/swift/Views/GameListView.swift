@@ -10,8 +10,13 @@ struct ISOEntry: Identifiable {
     let name: String
     let fileURL: URL?
     let coverURL: URL?
+    let metadata: [String: String]
     let size: UInt64
     var isFavorite: Bool
+
+    var coverInfo: CoverGameInfo {
+        CoverGameInfo(name: name, fileURL: fileURL, metadata: metadata, hasCover: coverURL != nil)
+    }
 }
 
 struct GameListView: View {
@@ -23,6 +28,8 @@ struct GameListView: View {
     @State private var showCoverImporter = false
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
+    @State private var showCoverTemplateEditor = false
+    @State private var coverTemplateDraft = CoverStore.defaultCoverURLTemplate
     @State private var pendingGameName: String = ""
     @State private var pendingCoverGameName: String?
 
@@ -62,13 +69,39 @@ struct GameListView: View {
                     .accessibilityLabel("Import Games")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        pendingCoverGameName = nil
-                        showCoverImporter = true
+                    Menu {
+                        Button {
+                            pendingCoverGameName = nil
+                            showCoverImporter = true
+                        } label: {
+                            Label("Import Local Covers", systemImage: "photo.badge.plus")
+                        }
+
+                        Button {
+                            downloadMissingCovers()
+                        } label: {
+                            Label("Download Missing Covers", systemImage: "icloud.and.arrow.down")
+                        }
+                        .disabled(coverStore.isDownloadingCovers || games.isEmpty)
+
+                        Button {
+                            coverTemplateDraft = coverStore.coverURLTemplate
+                            showCoverTemplateEditor = true
+                        } label: {
+                            Label("Cover Source", systemImage: "link")
+                        }
+
+                        Button {
+                            coverStore.coverURLTemplate = CoverStore.defaultCoverURLTemplate
+                            coverStore.lastCoverMessage = "Cover URL template reset to the ARMSX2 Android default."
+                            coverStore.showCoverAlert = true
+                        } label: {
+                            Label("Reset Cover Template", systemImage: "arrow.counterclockwise")
+                        }
                     } label: {
-                        Image(systemName: "photo.badge.plus")
+                        Image(systemName: coverStore.isDownloadingCovers ? "icloud.and.arrow.down" : "photo.stack")
                     }
-                    .accessibilityLabel("Import Covers")
+                    .accessibilityLabel("Covers")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { loadGames() } label: {
@@ -100,6 +133,23 @@ struct GameListView: View {
                 Button("OK") {}
             } message: {
                 Text(coverStore.lastCoverMessage ?? "")
+            }
+            .alert("Cover Source", isPresented: $showCoverTemplateEditor) {
+                TextField("https://.../${serial}.jpg", text: $coverTemplateDraft)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                Button("Cancel", role: .cancel) {}
+                Button("Save") {
+                    coverStore.coverURLTemplate = coverTemplateDraft
+                    if games.isEmpty {
+                        coverStore.lastCoverMessage = "Cover URL template saved."
+                        coverStore.showCoverAlert = true
+                    } else {
+                        downloadMissingCovers()
+                    }
+                }
+            } message: {
+                Text("Use ${serial}, ${title}, or ${filetitle}. Default: \(CoverStore.defaultCoverURLTemplate)")
             }
             .alert("Restart VM?", isPresented: $showRestartAlert) {
                 Button("Cancel", role: .cancel) {}
@@ -251,6 +301,13 @@ struct GameListView: View {
         .foregroundStyle(.primary)
         .contextMenu {
             Button {
+                downloadCover(for: game)
+            } label: {
+                Label("Download Cover", systemImage: "icloud.and.arrow.down")
+            }
+            .disabled(coverStore.isDownloadingCovers)
+
+            Button {
                 pendingCoverGameName = game.name
                 showCoverImporter = true
             } label: {
@@ -334,8 +391,24 @@ struct GameListView: View {
             let size = attrs?[.size] as? UInt64 ?? 0
             let fav = ARMSX2Bridge.isFavorite(name)
             let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
-            let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL)
-            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, size: size, isFavorite: fav)
+            let metadata = ARMSX2Bridge.gameMetadata(forISO: name)
+            let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL, metadata: metadata)
+            return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, metadata: metadata, size: size, isFavorite: fav)
+        }
+    }
+
+    private func downloadMissingCovers() {
+        let targets = games.map(\.coverInfo)
+        Task {
+            _ = await coverStore.downloadMissingCovers(for: targets)
+            loadGames()
+        }
+    }
+
+    private func downloadCover(for game: ISOEntry) {
+        Task {
+            _ = await coverStore.downloadMissingCovers(for: [game.coverInfo])
+            loadGames()
         }
     }
 

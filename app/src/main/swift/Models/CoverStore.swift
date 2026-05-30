@@ -5,9 +5,25 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct CoverGameInfo: Sendable {
+    let name: String
+    let fileURL: URL?
+    let metadata: [String: String]
+    let hasCover: Bool
+}
+
+struct CoverDownloadSummary: Sendable {
+    let downloaded: Int
+    let skippedExisting: Int
+    let failed: Int
+}
+
+@MainActor
 @Observable
 final class CoverStore: @unchecked Sendable {
     static let shared = CoverStore()
+
+    static let defaultCoverURLTemplate = "https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/${serial}.jpg"
 
     static let imageExtensions: [String] = ["jpg", "jpeg", "png", "webp", "heic", "heif"]
     static let coverContentTypes: [UTType] = {
@@ -24,6 +40,16 @@ final class CoverStore: @unchecked Sendable {
 
     var lastCoverMessage: String?
     var showCoverAlert = false
+    var coverURLTemplate: String {
+        get {
+            let stored = UserDefaults.standard.string(forKey: "ARMSX2iOSCoverURLTemplate")
+            return stored?.isEmpty == false ? stored! : Self.defaultCoverURLTemplate
+        }
+        set {
+            UserDefaults.standard.set(newValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "ARMSX2iOSCoverURLTemplate")
+        }
+    }
+    var isDownloadingCovers = false
 
     private init() {}
 
@@ -35,13 +61,75 @@ final class CoverStore: @unchecked Sendable {
     }
 
     func coverURL(forGameName gameName: String, gamePath: URL?) -> URL? {
-        let candidates = coverBaseCandidates(forGameName: gameName)
+        let candidates = coverBaseCandidates(forGameName: gameName, metadata: [:])
         for dir in coverSearchDirectories(gamePath: gamePath) {
             if let url = findCover(in: dir, matching: candidates) {
                 return url
             }
         }
         return nil
+    }
+
+    func coverURL(forGameName gameName: String, gamePath: URL?, metadata: [String: String]) -> URL? {
+        let candidates = coverBaseCandidates(forGameName: gameName, metadata: metadata)
+        for dir in coverSearchDirectories(gamePath: gamePath) {
+            if let url = findCover(in: dir, matching: candidates) {
+                return url
+            }
+        }
+        return nil
+    }
+
+    func downloadMissingCovers(for games: [CoverGameInfo]) async -> CoverDownloadSummary {
+        let template = coverURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !template.isEmpty else {
+            lastCoverMessage = "Set a cover URL template first."
+            showCoverAlert = true
+            return CoverDownloadSummary(downloaded: 0, skippedExisting: 0, failed: games.count)
+        }
+
+        guard !isDownloadingCovers else {
+            lastCoverMessage = "Cover download already in progress."
+            showCoverAlert = true
+            return CoverDownloadSummary(downloaded: 0, skippedExisting: 0, failed: 0)
+        }
+
+        isDownloadingCovers = true
+        defer { isDownloadingCovers = false }
+
+        var downloaded = 0
+        var skipped = 0
+        var failed = 0
+        var attempted = Set<String>()
+
+        for game in games {
+            if game.hasCover || coverURL(forGameName: game.name, gamePath: game.fileURL, metadata: game.metadata) != nil {
+                skipped += 1
+                continue
+            }
+
+            let candidates = buildCoverCandidateURLs(forGameName: game.name, metadata: game.metadata, template: template)
+            guard !candidates.isEmpty else {
+                failed += 1
+                continue
+            }
+
+            var didDownload = false
+            for url in candidates where attempted.insert(url.absoluteString).inserted {
+                if await downloadCover(from: url, forGameName: game.name, metadata: game.metadata) {
+                    downloaded += 1
+                    didDownload = true
+                    break
+                }
+            }
+            if !didDownload {
+                failed += 1
+            }
+        }
+
+        lastCoverMessage = "Downloaded \(downloaded) cover(s). Skipped \(skipped) existing. Failed \(failed)."
+        showCoverAlert = true
+        return CoverDownloadSummary(downloaded: downloaded, skippedExisting: skipped, failed: failed)
     }
 
     @discardableResult
@@ -107,7 +195,7 @@ final class CoverStore: @unchecked Sendable {
 
     @discardableResult
     func removeManagedCovers(forGameNamed gameName: String) -> Int {
-        let candidates = Set(coverBaseCandidates(forGameName: gameName).map { $0.lowercased() })
+        let candidates = Set(coverBaseCandidates(forGameName: gameName, metadata: [:]).map { $0.lowercased() })
         var removed = 0
 
         for dir in managedCoverDirectories() {
@@ -140,6 +228,48 @@ final class CoverStore: @unchecked Sendable {
 
     func displayName(forGameName gameName: String) -> String {
         URL(fileURLWithPath: gameName).deletingPathExtension().lastPathComponent
+    }
+
+    func buildCoverCandidateURLs(forGameName gameName: String, metadata: [String: String], template: String? = nil) -> [URL] {
+        let template = (template ?? coverURLTemplate).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !template.isEmpty else { return [] }
+
+        let fileBase = displayName(forGameName: gameName)
+        let title = metadata["title"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let serial = metadata["serial"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var rawURLs: [String] = []
+
+        if template.contains("${serial}") {
+            var serialValues: [String] = []
+            if let serial, !serial.isEmpty {
+                serialValues.append(serial)
+            }
+            serialValues.append(contentsOf: serialCandidates(from: fileBase))
+            serialValues.append(contentsOf: titleVariants(from: fileBase))
+            for value in uniqueStrings(serialValues) {
+                rawURLs.append(fillTemplate(template, serial: value, title: "", fileTitle: ""))
+            }
+        }
+
+        if template.contains("${title}") {
+            var titleValues = titleVariants(from: title?.isEmpty == false ? title! : fileBase)
+            if title != fileBase {
+                titleValues.append(contentsOf: titleVariants(from: fileBase))
+            }
+            for value in uniqueStrings(titleValues) {
+                rawURLs.append(fillTemplate(template, serial: "", title: value, fileTitle: ""))
+            }
+        }
+
+        if template.contains("${filetitle}") {
+            for value in uniqueStrings(titleVariants(from: fileBase)) {
+                rawURLs.append(fillTemplate(template, serial: "", title: "", fileTitle: value))
+            }
+        }
+
+        return uniqueStrings(rawURLs)
+            .filter { !$0.contains("${") }
+            .compactMap(URL.init(string:))
     }
 
     private func managedCoverDirectories() -> [URL] {
@@ -189,12 +319,18 @@ final class CoverStore: @unchecked Sendable {
         return nil
     }
 
-    private func coverBaseCandidates(forGameName gameName: String) -> [String] {
+    private func coverBaseCandidates(forGameName gameName: String, metadata: [String: String]) -> [String] {
         let fileName = URL(fileURLWithPath: gameName).lastPathComponent
         let stem = URL(fileURLWithPath: fileName).deletingPathExtension().lastPathComponent
         let nestedStem = nestedDiscStem(from: stem)
         var raw: [String] = [stem, fileName]
 
+        if let serial = metadata["serial"], !serial.isEmpty {
+            raw.append(serial)
+        }
+        if let title = metadata["title"], !title.isEmpty {
+            raw.append(title)
+        }
         if let nestedStem, nestedStem != stem {
             raw.append(nestedStem)
         }
@@ -222,6 +358,82 @@ final class CoverStore: @unchecked Sendable {
         return result
     }
 
+    private func downloadCover(from remoteURL: URL, forGameName gameName: String, metadata: [String: String]) async -> Bool {
+        do {
+            var request = URLRequest(url: remoteURL)
+            request.timeoutInterval = 8
+            request.cachePolicy = .reloadIgnoringLocalCacheData
+
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200, !data.isEmpty else {
+                NSLog("[ARMSX2 iOS Covers] HTTP miss %@", remoteURL.absoluteString)
+                return false
+            }
+
+            let ext = imageExtension(from: remoteURL, response: http)
+            let baseName = preferredDownloadedCoverBaseName(forGameName: gameName, metadata: metadata)
+            let target = primaryCoverDirectory.appendingPathComponent(baseName).appendingPathExtension(ext)
+            let temp = primaryCoverDirectory.appendingPathComponent("\(baseName).download").appendingPathExtension(ext)
+
+            if fileManager.fileExists(atPath: target.path) {
+                try fileManager.removeItem(at: target)
+            }
+            if fileManager.fileExists(atPath: temp.path) {
+                try fileManager.removeItem(at: temp)
+            }
+            try data.write(to: temp, options: .atomic)
+            try fileManager.moveItem(at: temp, to: target)
+            NSLog("[ARMSX2 iOS Covers] downloaded %@ -> %@", remoteURL.absoluteString, target.path)
+            return true
+        } catch {
+            NSLog("[ARMSX2 iOS Covers] download failed %@ error=%@", remoteURL.absoluteString, error.localizedDescription)
+            return false
+        }
+    }
+
+    private func preferredDownloadedCoverBaseName(forGameName gameName: String, metadata: [String: String]) -> String {
+        if let serial = metadata["serial"], !serial.isEmpty {
+            let sanitized = sanitizedCoverComponent(serial)
+            if !sanitized.isEmpty {
+                return sanitized
+            }
+        }
+        if let title = metadata["title"], !title.isEmpty {
+            let sanitized = sanitizedCoverComponent(title)
+            if !sanitized.isEmpty {
+                return sanitized
+            }
+        }
+        return preferredManagedCoverBaseName(forGameName: gameName)
+    }
+
+    private func fillTemplate(_ template: String, serial: String, title: String, fileTitle: String) -> String {
+        template
+            .replacingOccurrences(of: "${serial}", with: urlComponent(serial))
+            .replacingOccurrences(of: "${title}", with: urlComponent(title))
+            .replacingOccurrences(of: "${filetitle}", with: urlComponent(fileTitle))
+    }
+
+    private func urlComponent(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
+    }
+
+    private func imageExtension(from url: URL, response: HTTPURLResponse) -> String {
+        if let contentType = response.value(forHTTPHeaderField: "Content-Type")?.lowercased() {
+            if contentType.contains("png") { return "png" }
+            if contentType.contains("webp") { return "webp" }
+            if contentType.contains("heic") { return "heic" }
+            if contentType.contains("heif") { return "heif" }
+            if contentType.contains("jpeg") || contentType.contains("jpg") { return "jpg" }
+        }
+
+        let ext = url.pathExtension.lowercased()
+        if Self.imageExtensions.contains(ext) {
+            return ext == "jpeg" ? "jpg" : ext
+        }
+        return "jpg"
+    }
+
     private func preferredManagedCoverBaseName(forGameName gameName: String) -> String {
         let stem = URL(fileURLWithPath: gameName).deletingPathExtension().lastPathComponent
         let sanitized = sanitizedCoverComponent(stem)
@@ -238,11 +450,29 @@ final class CoverStore: @unchecked Sendable {
     }
 
     private func titleVariants(from base: String) -> [String] {
-        var variants: [String] = []
-        variants.append(base.replacingOccurrences(of: "_", with: " "))
-        variants.append(strippingBracketedTags(from: base.replacingOccurrences(of: "_", with: " ")))
-        variants.append(base.replacingOccurrences(of: " - ", with: ": "))
-        return variants
+        let normalized = base.trimmingCharacters(in: .whitespacesAndNewlines)
+        let spaceNormalized = normalized.replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let stripped = strippingBracketedTags(from: spaceNormalized)
+        var variants: [String] = [normalized, spaceNormalized, stripped]
+
+        let colonToDash = spaceNormalized.replacingOccurrences(of: ":", with: " - ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        variants.append(colonToDash)
+
+        let dashToColon = spaceNormalized.replacingOccurrences(of: " - ", with: ": ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        variants.append(dashToColon)
+
+        let strippedDashToColon = stripped.replacingOccurrences(of: " - ", with: ": ")
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        variants.append(strippedDashToColon)
+
+        return uniqueStrings(variants)
     }
 
     private func strippingBracketedTags(from base: String) -> String {
@@ -292,6 +522,20 @@ final class CoverStore: @unchecked Sendable {
             let key = url.standardizedFileURL.path
             if seen.insert(key).inserted {
                 result.append(url)
+            }
+        }
+        return result
+    }
+
+    private func uniqueStrings(_ values: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for value in values {
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let key = trimmed.lowercased()
+            if seen.insert(key).inserted {
+                result.append(trimmed)
             }
         }
         return result

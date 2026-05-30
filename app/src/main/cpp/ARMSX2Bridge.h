@@ -89,6 +89,7 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (nonnull NSString *)isoDirectory;
 + (nonnull NSString *)documentsDirectory;
 + (nonnull NSArray<NSString *> *)availableISOs;
++ (nonnull NSDictionary<NSString *, NSString *> *)gameMetadataForISO:(nonnull NSString *)isoName;
 
 // [P44] ISO boot
 + (void)bootISO:(nonnull NSString *)isoName;
