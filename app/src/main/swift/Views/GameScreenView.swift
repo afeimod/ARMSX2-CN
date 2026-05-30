@@ -709,53 +709,59 @@ private struct SaveStateSlotRow: View {
     let onOverwrite: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            SaveStatePreview(data: info.previewPNGData, occupied: info.occupied)
-                .frame(width: 96, height: 72)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                SaveStatePreview(data: info.previewPNGData, occupied: info.occupied)
+                    .frame(width: 96, height: 72)
 
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Slot \(info.slot)")
-                    .font(.headline)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Slot \(info.slot)")
+                        .font(.headline)
 
-                if info.occupied {
-                    if let modifiedDate = info.modifiedDate {
-                        Text(Self.dateFormatter.string(from: modifiedDate))
+                    if info.occupied {
+                        if let modifiedDate = info.modifiedDate {
+                            Text(Self.dateFormatter.string(from: modifiedDate))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Text(info.fileName)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    } else {
+                        Text("Empty")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(info.fileName)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                } else {
-                    Text("Empty")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+
+                if isBusy {
+                    ProgressView()
+                        .frame(width: 88)
+                } else if !info.occupied {
+                    Button(action: onSave) {
+                        Label("Save", systemImage: "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
             }
 
-            Spacer(minLength: 8)
-
-            if isBusy {
-                ProgressView()
-                    .frame(width: 88)
-            } else if info.occupied {
+            if info.occupied && !isBusy {
                 HStack(spacing: 8) {
                     Button(action: onLoad) {
                         Label("Load", systemImage: "arrow.down.circle")
                     }
                     .buttonStyle(.borderedProminent)
+                    .frame(maxWidth: .infinity)
 
                     Button(action: onOverwrite) {
                         Label("Overwrite", systemImage: "arrow.triangle.2.circlepath")
                     }
                     .buttonStyle(.bordered)
+                    .frame(maxWidth: .infinity)
                 }
-            } else {
-                Button(action: onSave) {
-                    Label("Save", systemImage: "square.and.arrow.down")
-                }
-                .buttonStyle(.borderedProminent)
             }
         }
         .padding(12)
