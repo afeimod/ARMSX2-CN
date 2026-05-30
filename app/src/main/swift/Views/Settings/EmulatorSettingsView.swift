@@ -73,15 +73,21 @@ struct EmulatorSettingsView: View {
                 Toggle("Frame Limiter", isOn: $settings.frameLimiterEnabled)
 
                 if settings.frameLimiterEnabled {
-                    Picker("FPS Limit", selection: $settings.customFPSLimit) {
-                        ForEach(SettingsStore.supportedFPSLimits, id: \.self) { fps in
-                            Text("\(fps) FPS").tag(fps)
-                        }
+                    HStack {
+                        Text("Speed Target")
+                        Spacer()
+                        Text("Normal")
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
                     }
                 } else {
-                    Text("Limiter disabled uses the Android/ARMSX2 unlimited-speed setting and can increase heat and battery drain.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    HStack {
+                        Text("Speed Target")
+                        Spacer()
+                        Text("Unlocked")
+                            .foregroundStyle(.orange)
+                            .font(.callout.monospacedDigit())
+                    }
                 }
 
                 HStack {
@@ -100,7 +106,7 @@ struct EmulatorSettingsView: View {
                         .font(.callout.monospacedDigit())
                 }
 
-                Text("FPS limit uses safe presets instead of live slider writes. Base PS2 video rates stay locked because changing them can break timing or freeze games.")
+                Text("Frame Limiter controls emulator speed, not a safe 30 FPS display cap. Keep it ON for normal PS2 timing; OFF unlocks speed and can increase heat and battery drain.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

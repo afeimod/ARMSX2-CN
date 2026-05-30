@@ -26,6 +26,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "common/Error.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -576,13 +577,25 @@ static void ARMSX2ApplyLiveTargetSpeedSetting(std::function<void()> update, cons
     }, false);
 }
 
+static float ARMSX2NormalizeIOSNominalScalar(float value)
+{
+    const float clamped = std::clamp(value, 0.05f, 10.0f);
+    return (clamped >= 5.0f) ? 10.0f : 1.0f;
+}
+
 static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, float value)
 {
     if (std::strcmp(section, "Framerate") == 0) {
         const float clamped = std::clamp(value, 0.05f, 10.0f);
-        if (std::strcmp(key, "NominalScalar") == 0)
-            ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.NominalScalar = clamped; }, section, key, clamped);
-        else if (std::strcmp(key, "TurboScalar") == 0)
+        if (std::strcmp(key, "NominalScalar") == 0) {
+            // iOS UI only supports normal-speed limiting or unlocked speed.
+            // Older test builds exposed this as an FPS dropdown and could write
+            // 0.5 for "30 FPS", which slows/freezes the whole VM instead.
+            const float normalized = ARMSX2NormalizeIOSNominalScalar(value);
+            if (std::fabs(normalized - clamped) > 0.001f)
+                NSLog(@"[ARMSX2Bridge] normalizing unsupported NominalScalar %.3f -> %.3f", clamped, normalized);
+            ARMSX2ApplyLiveTargetSpeedSetting([normalized]() { EmuConfig.EmulationSpeed.NominalScalar = normalized; }, section, key, normalized);
+        } else if (std::strcmp(key, "TurboScalar") == 0)
             ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.TurboScalar = clamped; }, section, key, clamped);
         else if (std::strcmp(key, "SlomoScalar") == 0)
             ARMSX2ApplyLiveTargetSpeedSetting([clamped]() { EmuConfig.EmulationSpeed.SlomoScalar = clamped; }, section, key, clamped);
@@ -1114,9 +1127,13 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 
 + (void)setINIFloat:(nonnull NSString *)section key:(nonnull NSString *)key value:(float)value {
     if (!g_p44_settings_interface) return;
-    g_p44_settings_interface->SetFloatValue(section.UTF8String, key.UTF8String, value);
+    float valueToStore = value;
+    if (std::strcmp(section.UTF8String, "Framerate") == 0 && std::strcmp(key.UTF8String, "NominalScalar") == 0)
+        valueToStore = ARMSX2NormalizeIOSNominalScalar(value);
+
+    g_p44_settings_interface->SetFloatValue(section.UTF8String, key.UTF8String, valueToStore);
     g_p44_settings_interface->Save();
-    ARMSX2ApplyLiveFloatSetting(section.UTF8String, key.UTF8String, value);
+    ARMSX2ApplyLiveFloatSetting(section.UTF8String, key.UTF8String, valueToStore);
 }
 
 + (void)setINIString:(nonnull NSString *)section key:(nonnull NSString *)key value:(nonnull NSString *)value {

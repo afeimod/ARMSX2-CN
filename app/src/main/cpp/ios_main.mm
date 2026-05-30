@@ -474,6 +474,7 @@ int main(int argc, char* argv[]) {
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <cmath>
 #include <deque>
 #include <memory>
 #include <optional>
@@ -542,6 +543,33 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 @end
 ARMSX2GameView* g_gameRenderView = nil;  // non-static: accessed from ARMSX2Bridge.mm
 static INISettingsInterface* s_settings_interface = nullptr;
+
+static float ARMSX2SanitizedNominalScalar(float scalar)
+{
+    if (!std::isfinite(scalar))
+        return 1.0f;
+
+    // iOS exposes normal-speed limiting or unlocked speed only. Legacy test
+    // builds could save 0.5 for "30 FPS", which is a half-speed VM target.
+    return (scalar >= 5.0f) ? 10.0f : 1.0f;
+}
+
+static void ARMSX2SanitizeFrameLimiterConfig(const char* reason)
+{
+    if (!s_settings_interface)
+        return;
+
+    const float raw = s_settings_interface->GetFloatValue("Framerate", "NominalScalar", 1.0f);
+    const float sanitized = ARMSX2SanitizedNominalScalar(raw);
+    if (std::fabs(raw - sanitized) > 0.001f) {
+        Console.Warning("@@FRAMELIMIT@@ sanitizing unsupported NominalScalar %.3f -> %.3f reason=%s",
+            raw, sanitized, reason ? reason : "unknown");
+        s_settings_interface->SetFloatValue("Framerate", "NominalScalar", sanitized);
+        s_settings_interface->Save();
+    }
+
+    EmuConfig.EmulationSpeed.NominalScalar = sanitized;
+}
 
 // Touch pad state
 bool g_touchPadState[64] = {};
@@ -1411,6 +1439,10 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             // GS
             s_settings_interface->SetIntValue("EmuCore/GS", "VsyncQueueSize", 8);
 
+            // Normal console-speed frame limiter. Do not save reduced nominal
+            // speed here; that is not a safe FPS cap for iOS.
+            s_settings_interface->SetFloatValue("Framerate", "NominalScalar", 1.0f);
+
             // Speedhacks
             s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
 
@@ -1443,6 +1475,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode")) {
         s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
     }
+    ARMSX2SanitizeFrameLimiterConfig("scene-connect");
     s_settings_interface->Save();
     [self checkAndConfigureBIOS];
 
@@ -1459,6 +1492,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     s_settings_interface->Save();
 
     VMManager::Internal::LoadStartupSettings();
+    ARMSX2SanitizeFrameLimiterConfig("after-startup-settings");
     VMManager::ApplySettings();
     if (EmuConfig.Achievements.Enabled && !Achievements::IsActive())
         Achievements::Initialize();
@@ -1967,6 +2001,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 });
                 continue; // back to wait loop
             }
+
+            ARMSX2SanitizeFrameLimiterConfig("pre-vm-initialize");
+            Console.WriteLn("@@FRAMELIMIT@@ boot nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f",
+                EmuConfig.EmulationSpeed.NominalScalar,
+                EmuConfig.EmulationSpeed.TurboScalar,
+                EmuConfig.EmulationSpeed.SlomoScalar,
+                EmuConfig.GS.FramerateNTSC,
+                EmuConfig.GS.FrameratePAL);
 
             // --- Initialize & Execute VM ---
             if (VMManager::Initialize(boot_params)) {
