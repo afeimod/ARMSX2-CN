@@ -73,22 +73,10 @@ struct EmulatorSettingsView: View {
                 Toggle("Frame Limiter", isOn: $settings.frameLimiterEnabled)
 
                 if settings.frameLimiterEnabled {
-                    VStack(alignment: .leading, spacing: 8) {
-                        HStack {
-                            Text("Custom FPS Limit")
-                            Spacer()
-                            Text("\(settings.customFPSLimit) FPS")
-                                .foregroundStyle(.secondary)
-                                .font(.callout.monospacedDigit())
+                    Picker("FPS Limit", selection: $settings.customFPSLimit) {
+                        ForEach(SettingsStore.supportedFPSLimits, id: \.self) { fps in
+                            Text("\(fps) FPS").tag(fps)
                         }
-                        Slider(
-                            value: Binding(
-                                get: { Double(settings.customFPSLimit) },
-                                set: { settings.customFPSLimit = Int($0.rounded()) }
-                            ),
-                            in: 30...180,
-                            step: 1
-                        )
                     }
                 } else {
                     Text("Limiter disabled uses the Android/ARMSX2 unlimited-speed setting and can increase heat and battery drain.")
@@ -96,43 +84,23 @@ struct EmulatorSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("NTSC Base Rate")
-                        Spacer()
-                        Text(Self.formatFPS(settings.ntscFramerate))
-                            .foregroundStyle(.secondary)
-                            .font(.callout.monospacedDigit())
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(settings.ntscFramerate) },
-                            set: { settings.ntscFramerate = Float($0) }
-                        ),
-                        in: 50...120,
-                        step: 0.01
-                    )
+                HStack {
+                    Text("NTSC Base Rate")
+                    Spacer()
+                    Text(Self.formatFPS(settings.ntscFramerate))
+                        .foregroundStyle(.secondary)
+                        .font(.callout.monospacedDigit())
                 }
 
-                VStack(alignment: .leading, spacing: 8) {
-                    HStack {
-                        Text("PAL Base Rate")
-                        Spacer()
-                        Text(Self.formatFPS(settings.palFramerate))
-                            .foregroundStyle(.secondary)
-                            .font(.callout.monospacedDigit())
-                    }
-                    Slider(
-                        value: Binding(
-                            get: { Double(settings.palFramerate) },
-                            set: { settings.palFramerate = Float($0) }
-                        ),
-                        in: 40...100,
-                        step: 0.01
-                    )
+                HStack {
+                    Text("PAL Base Rate")
+                    Spacer()
+                    Text(Self.formatFPS(settings.palFramerate))
+                        .foregroundStyle(.secondary)
+                        .font(.callout.monospacedDigit())
                 }
 
-                Text("Matches Android's frame limiter and framerate controls. Changes are applied on the emulator CPU thread; use Reset ROM from the quick menu if a game needs a clean timing restart.")
+                Text("FPS limit uses safe presets instead of live slider writes. Base PS2 video rates stay locked because changing them can break timing or freeze games.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -159,7 +127,7 @@ struct EmulatorSettingsView: View {
                 Toggle("Widescreen Patches", isOn: $settings.enableWidescreenPatches)
                 Toggle("No-Interlacing Patches", isOn: $settings.enableNoInterlacingPatches)
 
-                Text("PNACH cheats imported from the in-game quick menu are renamed to the current game's Serial_CRC.pnach and automatically enable PNACH cheats.")
+                Text("PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu. They are renamed to Serial_CRC.pnach automatically.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

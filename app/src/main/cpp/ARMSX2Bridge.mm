@@ -33,6 +33,8 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include <optional>
 #include <string_view>
 #include <vector>
+#include <ifaddrs.h>
+#include <net/if.h>
 
 // Access the global settings interface from ios_main.mm
 extern INISettingsInterface* g_p44_settings_interface;
@@ -1361,6 +1363,22 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     return ARMSX2NSStringFromStdString(Patch::GetPnachFilename(serial, crc, asCheat));
 }
 
++ (nullable NSString *)pnachPathForISO:(nonnull NSString *)isoName asCheat:(BOOL)asCheat {
+    NSString* path = ARMSX2ResolveISOPath(isoName);
+    if (path.length == 0) {
+        NSLog(@"[ARMSX2Bridge] PNACH path unavailable for %@: ISO not found", isoName);
+        return nil;
+    }
+
+    GameList::Entry entry;
+    if (!GameList::PopulateEntryFromPath(path.UTF8String, &entry) || entry.serial.empty()) {
+        NSLog(@"[ARMSX2Bridge] PNACH path unavailable for %@: metadata missing", isoName);
+        return nil;
+    }
+
+    return ARMSX2NSStringFromStdString(Patch::GetPnachFilename(entry.serial, entry.crc, asCheat));
+}
+
 + (void)reloadPatches {
     std::string serial;
     u32 crc = 0;
@@ -1462,6 +1480,32 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSLog(@"[ARMSX2Bridge] MemoryCard create name=%@ folder=%d size=%ld result=%d",
           sanitized, folder ? 1 : 0, static_cast<long>(sizeMB), result ? 1 : 0);
     return result ? YES : NO;
+}
+
+#pragma mark - DEV9 / Network
+
++ (nonnull NSArray<NSString *> *)dev9NetworkAdapters {
+    NSMutableOrderedSet<NSString *> *adapters = [NSMutableOrderedSet orderedSetWithObject:@"Auto"];
+
+    struct ifaddrs *interfaces = nullptr;
+    if (getifaddrs(&interfaces) == 0) {
+        for (struct ifaddrs *ifa = interfaces; ifa != nullptr; ifa = ifa->ifa_next) {
+            if (!ifa->ifa_name || !ifa->ifa_addr)
+                continue;
+
+            const sa_family_t family = ifa->ifa_addr->sa_family;
+            if (family != AF_INET && family != AF_INET6)
+                continue;
+
+            if ((ifa->ifa_flags & IFF_UP) == 0 || (ifa->ifa_flags & IFF_LOOPBACK) != 0)
+                continue;
+
+            [adapters addObject:[NSString stringWithUTF8String:ifa->ifa_name]];
+        }
+        freeifaddrs(interfaces);
+    }
+
+    return adapters.array;
 }
 
 #pragma mark - RetroAchievements

@@ -245,14 +245,17 @@ private struct NetworkSettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                HStack {
-                    Text("Adapter")
-                    Spacer()
-                    Text("Auto")
-                        .foregroundStyle(.secondary)
+                Picker("Adapter", selection: $settings.dev9EthDevice) {
+                    ForEach(ARMSX2Bridge.dev9NetworkAdapters(), id: \.self) { adapter in
+                        Text(adapter).tag(adapter)
+                    }
                 }
 
-                Text("Socket mode is the only iOS-safe DEV9 Ethernet mode currently exposed. PCAP bridged/switched networking is disabled in this iOS build and needs a separate native entitlement/surface investigation before it can be safely enabled.")
+                Toggle("Intercept DHCP", isOn: $settings.dev9InterceptDHCP)
+                Toggle("Log DHCP", isOn: $settings.dev9EthLogDHCP)
+                Toggle("Log DNS", isOn: $settings.dev9EthLogDNS)
+
+                Text("Sockets is the iOS-safe DEV9 Ethernet mode exposed here. PCAP bridged/switched modes are compiled out of this iOS build, so they are intentionally not selectable until a real iOS backend exists.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

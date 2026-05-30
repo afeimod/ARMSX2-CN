@@ -96,6 +96,12 @@ final class AppState: @unchecked Sendable {
     }
 
     func resetCurrentVM() {
-        ARMSX2Bridge.resetVM()
+        guard let runningGameName else { return }
+
+        if runningGameName == "BIOS" {
+            shutdownAndBootBIOS()
+        } else {
+            shutdownAndBoot(isoName: runningGameName)
+        }
     }
 }

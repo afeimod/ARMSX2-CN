@@ -194,7 +194,7 @@ struct GameScreenView: View {
                 Button {
                     showPNACHImporter = true
                 } label: {
-                    Label("Import PNACH Cheat", systemImage: "wand.and.stars")
+                    Label("Import PNACH / 60 FPS Patch", systemImage: "wand.and.stars")
                 }
 
                 Button {
@@ -387,7 +387,7 @@ struct GameScreenView: View {
 
     private func resetCurrentROM() {
         appState.resetCurrentVM()
-        presentSaveStateStatus("Reset ROM requested")
+        presentSaveStateStatus("Restarting ROM...")
     }
 
     @ViewBuilder

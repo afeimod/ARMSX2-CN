@@ -23,6 +23,7 @@ enum OsdPreset: Int, CaseIterable {
 @Observable
 final class SettingsStore: @unchecked Sendable {
     static let shared = SettingsStore()
+    static let supportedFPSLimits = [30, 50, 60, 75, 90, 120]
 
     @ObservationIgnored private var suppressINIWrites = false
 
@@ -55,7 +56,14 @@ final class SettingsStore: @unchecked Sendable {
         didSet { applyFrameLimiterSettings() }
     }
     var customFPSLimit: Int {
-        didSet { applyFrameLimiterSettings() }
+        didSet {
+            let normalized = Self.nearestSupportedFPSLimit(customFPSLimit)
+            guard customFPSLimit == normalized else {
+                customFPSLimit = normalized
+                return
+            }
+            applyFrameLimiterSettings()
+        }
     }
     var ntscFramerate: Float {
         didSet {
@@ -245,8 +253,33 @@ final class SettingsStore: @unchecked Sendable {
             ARMSX2Bridge.setINIBool("DEV9/Eth", key: "EthEnable", value: dev9EthernetEnabled)
             if dev9EthernetEnabled {
                 ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthApi", value: "Sockets")
-                ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthDevice", value: "Auto")
+                ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthDevice", value: dev9EthDevice.isEmpty ? "Auto" : dev9EthDevice)
             }
+        }
+    }
+    var dev9EthDevice: String {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthApi", value: "Sockets")
+            ARMSX2Bridge.setINIString("DEV9/Eth", key: "EthDevice", value: dev9EthDevice.isEmpty ? "Auto" : dev9EthDevice)
+        }
+    }
+    var dev9InterceptDHCP: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("DEV9/Eth", key: "InterceptDHCP", value: dev9InterceptDHCP)
+        }
+    }
+    var dev9EthLogDHCP: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("DEV9/Eth", key: "EthLogDHCP", value: dev9EthLogDHCP)
+        }
+    }
+    var dev9EthLogDNS: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("DEV9/Eth", key: "EthLogDNS", value: dev9EthLogDNS)
         }
     }
 
@@ -349,6 +382,10 @@ final class SettingsStore: @unchecked Sendable {
         dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
         dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
         dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
+        dev9EthDevice = ARMSX2Bridge.getINIString("DEV9/Eth", key: "EthDevice", defaultValue: "Auto")
+        dev9InterceptDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "InterceptDHCP", defaultValue: false)
+        dev9EthLogDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDHCP", defaultValue: false)
+        dev9EthLogDNS = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDNS", defaultValue: false)
         ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
         // Apply OSD preset
         ARMSX2Bridge.applyOsdPreset(Int32(osdPreset.rawValue))
@@ -426,11 +463,19 @@ final class SettingsStore: @unchecked Sendable {
         dev9HddEnabled = ARMSX2Bridge.getINIBool("DEV9/Hdd", key: "HddEnable", defaultValue: false)
         dev9HddFile = ARMSX2Bridge.getINIString("DEV9/Hdd", key: "HddFile", defaultValue: "DEV9hdd.raw")
         dev9EthernetEnabled = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthEnable", defaultValue: false)
+        dev9EthDevice = ARMSX2Bridge.getINIString("DEV9/Eth", key: "EthDevice", defaultValue: "Auto")
+        dev9InterceptDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "InterceptDHCP", defaultValue: false)
+        dev9EthLogDHCP = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDHCP", defaultValue: false)
+        dev9EthLogDNS = ARMSX2Bridge.getINIBool("DEV9/Eth", key: "EthLogDNS", defaultValue: false)
     }
 
     private static func fpsLimit(fromScalar scalar: Float, baseFramerate: Float) -> Int {
         let fps = Int((scalar * max(baseFramerate, 1.0)).rounded())
-        return min(180, max(30, fps))
+        return nearestSupportedFPSLimit(fps)
+    }
+
+    private static func nearestSupportedFPSLimit(_ fps: Int) -> Int {
+        supportedFPSLimits.min { abs($0 - fps) < abs($1 - fps) } ?? 60
     }
 
     private func applyFrameLimiterSettings() {

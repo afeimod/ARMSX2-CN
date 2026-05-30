@@ -142,6 +142,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 
 // PNACH cheats/patches
 + (nullable NSString *)pnachPathForCurrentGameAsCheat:(BOOL)asCheat NS_SWIFT_NAME(pnachPathForCurrentGame(asCheat:));
++ (nullable NSString *)pnachPathForISO:(nonnull NSString *)isoName asCheat:(BOOL)asCheat NS_SWIFT_NAME(pnachPath(forISO:asCheat:));
 + (void)reloadPatches;
 
 // Memory card management
@@ -160,6 +161,9 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (void)setRetroAchievementsOverlays:(BOOL)enabled;
 + (void)loginRetroAchievementsWithUsername:(nonnull NSString *)username password:(nonnull NSString *)password completion:(nullable ARMSX2RetroAchievementsCompletion)completion NS_SWIFT_NAME(loginRetroAchievements(username:password:completion:));
 + (void)logoutRetroAchievements;
+
+// DEV9 / Network
++ (nonnull NSArray<NSString *> *)dev9NetworkAdapters;
 
 // [P53] Gamepad button mapping
 + (void)startButtonCapture;

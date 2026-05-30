@@ -31,17 +31,12 @@ struct GameListView: View {
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
     @State private var showCoverTemplateEditor = false
+    @State private var showPNACHImporter = false
     @State private var coverTemplateDraft = CoverStore.defaultCoverURLTemplate
     @State private var pendingGameName: String = ""
     @State private var pendingCoverGameName: String?
+    @State private var pendingPNACHGameName: String?
     @AppStorage("ARMSX2iOSGameLibraryLayout") private var libraryLayout = "grid"
-
-    var sortedGames: [ISOEntry] {
-        games.sorted { a, b in
-            if a.isFavorite != b.isFavorite { return a.isFavorite }
-            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
-        }
-    }
 
     var body: some View {
         NavigationStack {
@@ -170,18 +165,22 @@ struct GameListView: View {
                 let target = pendingGameName.isEmpty ? "BIOS Only" : pendingGameName
                 Text("VM is currently running.\nShut down and start \(target)?")
             }
-            .fileImporter(
-                isPresented: $showGameImporter,
-                allowedContentTypes: FileImportHandler.gameContentTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    fileImporter.handleURLs(urls, preferredDestination: .game)
-                    loadGames()
-                case .failure(let error):
-                    fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
-                    fileImporter.showImportAlert = true
+            .sheet(isPresented: $showGameImporter) {
+                ImportDocumentPicker(
+                    allowedContentTypes: FileImportHandler.gameContentTypes,
+                    allowsMultipleSelection: true
+                ) { result in
+                    showGameImporter = false
+                    switch result {
+                    case .success(let urls):
+                        fileImporter.handleURLs(urls, preferredDestination: .game)
+                        loadGames()
+                    case .failure(let error):
+                        if (error as NSError).code != NSUserCancelledError {
+                            fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
+                            fileImporter.showImportAlert = true
+                        }
+                    }
                 }
             }
             .fileImporter(
@@ -200,6 +199,30 @@ struct GameListView: View {
                     pendingCoverGameName = nil
                 }
             }
+            .sheet(isPresented: $showPNACHImporter) {
+                ImportDocumentPicker(
+                    allowedContentTypes: FileImportHandler.pnachContentTypes,
+                    allowsMultipleSelection: true
+                ) { result in
+                    showPNACHImporter = false
+                    switch result {
+                    case .success(let urls):
+                        if let pendingPNACHGameName {
+                            fileImporter.importPNACHURLs(urls, forISO: pendingPNACHGameName, asCheat: true)
+                        } else {
+                            fileImporter.lastImportMessage = "Pick a game first, then import its PNACH patch."
+                            fileImporter.showImportAlert = true
+                        }
+                        pendingPNACHGameName = nil
+                    case .failure(let error):
+                        if (error as NSError).code != NSUserCancelledError {
+                            fileImporter.lastImportMessage = "PNACH import failed: \(error.localizedDescription)"
+                            fileImporter.showImportAlert = true
+                        }
+                        pendingPNACHGameName = nil
+                    }
+                }
+            }
         }
         .onAppear { loadGames() }
     }
@@ -209,7 +232,7 @@ struct GameListView: View {
             if let gameName = appState.runningGameName {
                 vmStatusSection(gameName: gameName)
             }
-            ForEach(sortedGames) { game in
+            ForEach(games) { game in
                 gameRow(game)
             }
         }
@@ -224,7 +247,7 @@ struct GameListView: View {
                 }
 
                 LazyVGrid(columns: [GridItem(.adaptive(minimum: 142), spacing: 14, alignment: .top)], spacing: 18) {
-                    ForEach(sortedGames) { game in
+                    ForEach(games) { game in
                         gameGridCard(game)
                     }
                 }
@@ -445,6 +468,13 @@ struct GameListView: View {
     @ViewBuilder
     private func gameContextMenu(for game: ISOEntry) -> some View {
         Button {
+            pendingPNACHGameName = game.name
+            showPNACHImporter = true
+        } label: {
+            Label("Import PNACH / 60 FPS Patch", systemImage: "wand.and.stars")
+        }
+
+        Button {
             downloadCover(for: game)
         } label: {
             Label("Download Cover", systemImage: "icloud.and.arrow.down")
@@ -520,6 +550,9 @@ struct GameListView: View {
             let coverURL = coverStore.coverURL(forGameName: name, gamePath: fileURL, metadata: metadata)
             let coverSignature = CoverThumbnailCache.signature(for: coverURL)
             return ISOEntry(name: name, fileURL: fileURL, coverURL: coverURL, coverSignature: coverSignature, metadata: metadata, size: size, isFavorite: fav)
+        }.sorted { a, b in
+            if a.isFavorite != b.isFavorite { return a.isFavorite }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
         }
     }
 
@@ -621,8 +654,8 @@ private final class CoverThumbnailCache: @unchecked Sendable {
     private let cache = NSCache<NSString, UIImage>()
 
     private init() {
-        cache.countLimit = 320
-        cache.totalCostLimit = 48 * 1024 * 1024
+        cache.countLimit = 768
+        cache.totalCostLimit = 96 * 1024 * 1024
     }
 
     func cachedImage(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) -> UIImage? {

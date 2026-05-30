@@ -699,6 +699,49 @@ DarwinMisc::JitMode DarwinMisc::GetJitMode()
     return s_jit_mode;
 }
 
+#if defined(__aarch64__) && defined(__APPLE__)
+static bool TryStikDebugUniversalPrepareRegion(void* rx_ptr, size_t size)
+{
+    static sigjmp_buf s_universal_brk_jmp;
+    struct sigaction sa_brk = {}, sa_brk_old = {};
+    sa_brk.sa_handler = +[](int) { siglongjmp(s_universal_brk_jmp, 1); };
+    sa_brk.sa_flags = 0;
+    sigemptyset(&sa_brk.sa_mask);
+    sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
+
+    uintptr_t result = 0;
+    fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0xf00d universal CMD_PREPARE_REGION phase=rx_mapped mode=2 (x0=%p x1=0x%zx x16=1)...\n",
+            rx_ptr, size);
+
+    if (sigsetjmp(s_universal_brk_jmp, 1) == 0) {
+        asm volatile("mov x0, %1\n"
+                     "mov x1, %2\n"
+                     "mov x16, #1\n"
+                     "brk #0xf00d\n"
+                     "mov %0, x0"
+                     : "=r"(result)
+                     : "r"(rx_ptr), "r"(size)
+                     : "x0", "x1", "x16", "memory");
+    } else {
+        fprintf(stderr, "@@JIT_ALLOC@@ brk #0xf00d SIGTRAP phase=rx_mapped - Universal StikDebug did not handle CMD_PREPARE_REGION\n");
+        sigaction(SIGTRAP, &sa_brk_old, NULL);
+        return false;
+    }
+
+    sigaction(SIGTRAP, &sa_brk_old, NULL);
+
+    const bool ok = (result == reinterpret_cast<uintptr_t>(rx_ptr));
+    fprintf(stderr, "@@JIT_ALLOC@@ brk #0xf00d return phase=rx_mapped x0=%p ok=%d\n",
+            reinterpret_cast<void*>(result), ok ? 1 : 0);
+    return ok;
+}
+#else
+static bool TryStikDebugUniversalPrepareRegion(void*, size_t)
+{
+    return false;
+}
+#endif
+
 // [P43] Allocate executable code memory with dual-mapping for iOS 26
 void* DarwinMisc::MmapCodeDualMap(size_t size)
 {
@@ -775,13 +818,14 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
     }
     fprintf(stderr, "@@JIT_ALLOC@@ dual-map mmap(RX) OK rx=%p size=0x%zx\n", rx_ptr, size);
 
-    // Step 2: TXM page registration via brk #0x69 (only for LuckTXM)
-    // [P45-2] DolphiniOS approach: issue brk #0x69 with x0=addr, x1=size.
-    // StikDebug's iPSX2.js script catches this via send_command("c"),
-    // calls prepare_memory_region() for TXM page registration, then advances PC.
-    // SIGTRAP handler is a safety net — if StikDebug isn't handling brk,
-    // we catch SIGTRAP instead of crashing (unlike DolphiniOS which crashes).
+    // Step 2: TXM page registration (only for LuckTXM).
+    // Try Universal StikDebug's brk #0xf00d command first, then fall back to the
+    // legacy iPSX2/DolphiniOS brk #0x69 path so UTM-Dolphin remains supported.
     if (mode == JitMode::LuckTXM) {
+        bool brk_ok = TryStikDebugUniversalPrepareRegion(rx_ptr, size);
+        if (!brk_ok)
+            fprintf(stderr, "@@JIT_ALLOC@@ Universal CMD_PREPARE_REGION unavailable; trying legacy brk #0x69\n");
+
         static sigjmp_buf s_alloc_brk_jmp;
         struct sigaction sa_brk = {}, sa_brk_old = {};
         sa_brk.sa_handler = +[](int) { siglongjmp(s_alloc_brk_jmp, 1); };
@@ -789,17 +833,18 @@ void* DarwinMisc::MmapCodeDualMap(size_t size)
         sigemptyset(&sa_brk.sa_mask);
         sigaction(SIGTRAP, &sa_brk, &sa_brk_old);
 
-        bool brk_ok = false;
-        fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0x69 for TXM registration (x0=%p x1=0x%zx)...\n", rx_ptr, size);
-        if (sigsetjmp(s_alloc_brk_jmp, 1) == 0) {
-            asm volatile("mov x0, %0\n"
-                         "mov x1, %1\n"
-                         "brk #0x69"
-                         :: "r"(rx_ptr), "r"(size) : "x0", "x1");
-            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 OK (StikDebug handled)\n");
-            brk_ok = true;
-        } else {
-            fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 SIGTRAP — StikDebug not handling brk\n");
+        if (!brk_ok) {
+            fprintf(stderr, "@@JIT_ALLOC@@ issuing brk #0x69 for TXM registration (x0=%p x1=0x%zx)...\n", rx_ptr, size);
+            if (sigsetjmp(s_alloc_brk_jmp, 1) == 0) {
+                asm volatile("mov x0, %0\n"
+                             "mov x1, %1\n"
+                             "brk #0x69"
+                             :: "r"(rx_ptr), "r"(size) : "x0", "x1");
+                fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 OK (legacy StikDebug handled)\n");
+                brk_ok = true;
+            } else {
+                fprintf(stderr, "@@JIT_ALLOC@@ brk #0x69 SIGTRAP - legacy StikDebug not handling brk\n");
+            }
         }
         sigaction(SIGTRAP, &sa_brk_old, NULL);
 

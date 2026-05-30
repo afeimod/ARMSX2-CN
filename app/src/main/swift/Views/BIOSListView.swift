@@ -41,22 +41,31 @@ struct BIOSListView: View {
                     }
                 }
             }
-            .fileImporter(
-                isPresented: $showBIOSImporter,
-                allowedContentTypes: FileImportHandler.biosContentTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    fileImporter.handleURLs(urls, preferredDestination: .bios)
-                    loadBIOSes()
-                    if defaultBIOS.isEmpty, let firstBIOS = bioses.first {
-                        ARMSX2Bridge.setDefaultBIOS(firstBIOS)
-                        defaultBIOS = firstBIOS
+            .alert("Import Result", isPresented: $fileImporter.showImportAlert) {
+                Button("OK") {}
+            } message: {
+                Text(fileImporter.lastImportMessage ?? "")
+            }
+            .sheet(isPresented: $showBIOSImporter) {
+                ImportDocumentPicker(
+                    allowedContentTypes: FileImportHandler.biosContentTypes,
+                    allowsMultipleSelection: true
+                ) { result in
+                    showBIOSImporter = false
+                    switch result {
+                    case .success(let urls):
+                        fileImporter.handleURLs(urls, preferredDestination: .bios)
+                        loadBIOSes()
+                        if defaultBIOS.isEmpty, let firstBIOS = bioses.first {
+                            ARMSX2Bridge.setDefaultBIOS(firstBIOS)
+                            defaultBIOS = firstBIOS
+                        }
+                    case .failure(let error):
+                        if (error as NSError).code != NSUserCancelledError {
+                            fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
+                            fileImporter.showImportAlert = true
+                        }
                     }
-                case .failure(let error):
-                    fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
-                    fileImporter.showImportAlert = true
                 }
             }
         }

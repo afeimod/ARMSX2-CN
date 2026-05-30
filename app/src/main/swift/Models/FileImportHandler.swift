@@ -4,6 +4,7 @@
 import SwiftUI
 import Foundation
 import UniformTypeIdentifiers
+import UIKit
 
 @Observable
 final class FileImportHandler: @unchecked Sendable {
@@ -25,9 +26,9 @@ final class FileImportHandler: @unchecked Sendable {
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
-    static let biosContentTypes: [UTType] = contentTypes(for: ["bin", "rom"])
+    static let biosContentTypes: [UTType] = broaderContentTypes(for: ["bin", "rom"])
     static let gameContentTypes: [UTType] = broaderContentTypes(for: ["iso", "chd", "img", "bin", "cue", "mdf", "cso", "zso", "gz", "elf"])
-    static let pnachContentTypes: [UTType] = contentTypes(for: ["pnach"])
+    static let pnachContentTypes: [UTType] = broaderContentTypes(for: ["pnach"])
 
     private init() {}
 
@@ -68,7 +69,19 @@ final class FileImportHandler: @unchecked Sendable {
 
     @discardableResult
     func importPNACHURLs(_ urls: [URL], asCheat: Bool = true) -> String {
-        let results = urls.map { importPNACHFile($0, asCheat: asCheat) }
+        let destinationPath = ARMSX2Bridge.pnachPathForCurrentGame(asCheat: asCheat)
+        let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
+        return finishPNACHImport(results)
+    }
+
+    @discardableResult
+    func importPNACHURLs(_ urls: [URL], forISO isoName: String, asCheat: Bool = true) -> String {
+        let destinationPath = ARMSX2Bridge.pnachPath(forISO: isoName, asCheat: asCheat)
+        let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
+        return finishPNACHImport(results)
+    }
+
+    private func finishPNACHImport(_ results: [ImportResult]) -> String {
         let messages = results.map { result -> String in
             switch result {
             case .success(let message):
@@ -100,7 +113,7 @@ final class FileImportHandler: @unchecked Sendable {
         let fileName = url.lastPathComponent
 
         if preferredDestination == .pnachCheat || (preferredDestination == .automatic && Self.pnachExtensions.contains(ext)) {
-            return importPNACHFile(url, asCheat: true)
+            return importPNACHFile(url, destinationPath: ARMSX2Bridge.pnachPathForCurrentGame(asCheat: true), asCheat: true)
         }
 
         let docsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
@@ -161,7 +174,7 @@ final class FileImportHandler: @unchecked Sendable {
         }
     }
 
-    private func importPNACHFile(_ url: URL, asCheat: Bool) -> ImportResult {
+    private func importPNACHFile(_ url: URL, destinationPath: String?, asCheat: Bool) -> ImportResult {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
@@ -171,7 +184,7 @@ final class FileImportHandler: @unchecked Sendable {
             return .unsupported(fileName)
         }
 
-        guard let destinationPath = ARMSX2Bridge.pnachPathForCurrentGame(asCheat: asCheat), !destinationPath.isEmpty else {
+        guard let destinationPath, !destinationPath.isEmpty else {
             return .failure("Boot the target game before importing \(fileName), so ARMSX2 can rename it to Serial_CRC.pnach.")
         }
 
@@ -233,5 +246,40 @@ final class FileImportHandler: @unchecked Sendable {
         }
 
         return normalized
+    }
+}
+
+struct ImportDocumentPicker: UIViewControllerRepresentable {
+    let allowedContentTypes: [UTType]
+    let allowsMultipleSelection: Bool
+    let onComplete: (Result<[URL], Error>) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onComplete: onComplete)
+    }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: allowedContentTypes, asCopy: true)
+        picker.allowsMultipleSelection = allowsMultipleSelection
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        private let onComplete: (Result<[URL], Error>) -> Void
+
+        init(onComplete: @escaping (Result<[URL], Error>) -> Void) {
+            self.onComplete = onComplete
+        }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            onComplete(.success(urls))
+        }
+
+        func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+            onComplete(.failure(CocoaError(.userCancelled)))
+        }
     }
 }
