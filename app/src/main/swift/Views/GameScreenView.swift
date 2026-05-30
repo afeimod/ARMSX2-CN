@@ -35,6 +35,7 @@ struct GameScreenView: View {
     @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
     @State private var showSpeedControl = false
+    @State private var showCompatibilityLab = false
     @State private var showPNACHImporter = false
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
@@ -84,6 +85,10 @@ struct GameScreenView: View {
         .sheet(isPresented: $showSpeedControl) {
             SpeedControlPanel(settings: settings)
                 .presentationDetents([.medium])
+        }
+        .sheet(isPresented: $showCompatibilityLab) {
+            compatibilityLabPanel
+                .presentationDetents([.medium, .large])
         }
         .fileImporter(
             isPresented: $showPNACHImporter,
@@ -147,7 +152,12 @@ struct GameScreenView: View {
                 }
             }
             Divider()
-            compatibilityLabSection
+            Button {
+                refreshCompatibilityState()
+                showCompatibilityLab = true
+            } label: {
+                Label("Compatibility Lab", systemImage: "wand.and.stars")
+            }
             if vmMenuAvailable {
                 Button {
                     resetCurrentROM()
@@ -247,101 +257,140 @@ struct GameScreenView: View {
         refreshCompatibilityState()
     }
 
-    private var compatibilityLabSection: some View {
-        Section("Compatibility Lab") {
-            Toggle(isOn: Binding(
-                get: { compatibilityAutoPresets },
-                set: { newValue in
-                    compatibilityAutoPresets = newValue
-                    ARMSX2Bridge.setCompatibilityAutoGamePresetsEnabled(newValue)
-                    refreshCompatibilityState()
+    private var compatibilityLabPanel: some View {
+        NavigationStack {
+            Form {
+                let currentPreset = compatibilityPreset(for: compatibilityPresetKey)
+
+                Section {
+                    Toggle(isOn: Binding(
+                        get: { compatibilityAutoPresets },
+                        set: { newValue in
+                            compatibilityAutoPresets = newValue
+                            ARMSX2Bridge.setCompatibilityAutoGamePresetsEnabled(newValue)
+                            refreshCompatibilityState()
+                        }
+                    )) {
+                        Label("Auto Game Presets", systemImage: "sparkles")
+                    }
+
+                    LabeledContent("Current Mode") {
+                        Text(currentPreset.title)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+
+                    if !compatibilityIdentity.isEmpty {
+                        LabeledContent("Current Game") {
+                            Text(compatibilityIdentity)
+                                .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Text("Start a game to remember presets per title.")
+                            .foregroundStyle(.secondary)
+                    }
+                } header: {
+                    Text("Status")
+                } footer: {
+                    Text("Auto Game Presets applies known safe defaults. Manual changes here are remembered for the current game when a game is running.")
                 }
-            )) {
-                Label("Auto Game Presets", systemImage: "sparkles")
-            }
 
-            Text("Use Custom Advanced Flags for games that need multiple compatibility fallbacks at once. Custom flags are saved per running game.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                Section {
+                    ForEach(compatibilityPresets) { preset in
+                        Button {
+                            applyCompatibilityPreset(preset)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Label(preset.title, systemImage: preset.systemImage)
+                                Spacer()
+                                if preset.id == compatibilityPresetKey {
+                                    Image(systemName: "checkmark")
+                                        .font(.body.weight(.semibold))
+                                }
+                            }
+                        }
+                        .foregroundStyle(.primary)
+                    }
+                } header: {
+                    Text("Presets")
+                } footer: {
+                    Text("Choose one preset when a game needs a known compatibility fallback.")
+                }
 
-            let currentPreset = compatibilityPreset(for: compatibilityPresetKey)
-            Menu {
-                ForEach(compatibilityPresets) { preset in
-                    Button {
-                        applyCompatibilityPreset(preset)
-                    } label: {
-                        Label(
-                            preset.title,
-                            systemImage: preset.id == compatibilityPresetKey ? "checkmark" : preset.systemImage
-                        )
+                Section {
+                    compatibilityLabToggle(
+                        "COP1EverythingOnly",
+                        title: "COP1 Everything Only",
+                        systemImage: "function"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusLoadStore",
+                        title: "COP1 Everything + EE Load/Store",
+                        systemImage: "arrow.left.arrow.right"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusMMI",
+                        title: "COP1 Everything + EE MMI",
+                        systemImage: "rectangle.3.group"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusCOP2VU",
+                        title: "COP1 Everything + EE COP2/VU Macro",
+                        systemImage: "cube.transparent"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusMultDiv",
+                        title: "COP1 Everything + EE Mult/Div",
+                        systemImage: "multiply"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusShifts",
+                        title: "COP1 Everything + EE Shifts",
+                        systemImage: "arrow.left.and.right"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusMoves",
+                        title: "COP1 Everything + EE Moves/HI-LO",
+                        systemImage: "arrow.triangle.swap"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusIntegerALU",
+                        title: "COP1 Everything + EE Integer ALU",
+                        systemImage: "plus.forwardslash.minus"
+                    )
+                    compatibilityLabToggle(
+                        "COP1EverythingPlusBranches",
+                        title: "COP1 Everything + EE Branches/Jumps",
+                        systemImage: "arrow.triangle.branch"
+                    )
+                } header: {
+                    Text("Advanced Custom Flags")
+                } footer: {
+                    Text("Use these only when one preset is not enough. Turning any flag on or off switches this game to Custom Advanced Flags.")
+                }
+
+                if !compatibilityIdentity.isEmpty {
+                    Section {
+                        Button(role: .destructive) {
+                            let identity = compatibilityIdentity
+                            ARMSX2Bridge.forgetCompatibilityPresetForCurrentGame()
+                            refreshCompatibilityState()
+                            presentSaveStateStatus("Compatibility preset reset for \(identity)")
+                        } label: {
+                            Label("Forget Current Game Preset", systemImage: "trash")
+                        }
                     }
                 }
-            } label: {
-                Label("Preset: \(currentPreset.title)", systemImage: "wand.and.stars")
             }
-
-            if !compatibilityIdentity.isEmpty {
-                Text("Current game: \(compatibilityIdentity)")
-                Text("Preset changes are remembered for this game.")
-
-                Button {
-                    ARMSX2Bridge.forgetCompatibilityPresetForCurrentGame()
-                    refreshCompatibilityState()
-                    presentSaveStateStatus("Compatibility preset reset for \(compatibilityIdentity)")
-                } label: {
-                    Label("Forget Current Game Preset", systemImage: "trash")
+            .navigationTitle("Compatibility Lab")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        showCompatibilityLab = false
+                    }
                 }
-            } else {
-                Text("Start a game to remember presets per title.")
             }
-
-            Divider()
-
-            compatibilityLabToggle(
-                "COP1EverythingOnly",
-                title: "COP1 Everything Only",
-                systemImage: "function"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusLoadStore",
-                title: "COP1 Everything + EE Load/Store",
-                systemImage: "arrow.left.arrow.right"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMMI",
-                title: "COP1 Everything + EE MMI",
-                systemImage: "rectangle.3.group"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusCOP2VU",
-                title: "COP1 Everything + EE COP2/VU Macro",
-                systemImage: "cube.transparent"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMultDiv",
-                title: "COP1 Everything + EE Mult/Div",
-                systemImage: "multiply"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusShifts",
-                title: "COP1 Everything + EE Shifts",
-                systemImage: "arrow.left.and.right"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMoves",
-                title: "COP1 Everything + EE Moves/HI-LO",
-                systemImage: "arrow.triangle.swap"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusIntegerALU",
-                title: "COP1 Everything + EE Integer ALU",
-                systemImage: "plus.forwardslash.minus"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusBranches",
-                title: "COP1 Everything + EE Branches/Jumps",
-                systemImage: "arrow.triangle.branch"
-            )
+            .onAppear(perform: refreshCompatibilityState)
         }
     }
 
