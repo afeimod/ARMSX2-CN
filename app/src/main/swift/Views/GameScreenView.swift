@@ -172,13 +172,13 @@ struct GameScreenView: View {
                 Button {
                     showSaveStates = true
                 } label: {
-                    Label("Save States", systemImage: "square.stack.3d.up.fill")
+                    Label("Save / Load States", systemImage: "square.stack.3d.up.fill")
                 }
             } else if vmMenuAvailable {
                 Button {
                     showSaveStates = true
                 } label: {
-                    Label("Save States", systemImage: "square.stack.3d.up.fill")
+                    Label("Save / Load States", systemImage: "square.stack.3d.up.fill")
                 }
             }
             Divider()
@@ -360,7 +360,16 @@ private struct SaveStatesPanel: View {
                     .padding()
                 }
             }
-            .navigationTitle("Save States")
+            .safeAreaInset(edge: .top) {
+                Text("Empty slots can save. Occupied slots can load or overwrite.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(.regularMaterial)
+            }
+            .navigationTitle("Save / Load States")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("Done") {
