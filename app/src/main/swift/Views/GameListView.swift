@@ -173,8 +173,9 @@ struct GameListView: View {
                     showGameImporter = false
                     switch result {
                     case .success(let urls):
-                        fileImporter.handleURLs(urls, preferredDestination: .game)
+                        let importedGames = fileImporter.importURLs(urls, preferredDestination: .game)
                         loadGames()
+                        autoDownloadCovers(for: importedGames)
                     case .failure(let error):
                         if (error as NSError).code != NSUserCancelledError {
                             fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
@@ -568,6 +569,23 @@ struct GameListView: View {
         Task {
             _ = await coverStore.downloadMissingCovers(for: [game.coverInfo])
             loadGames()
+        }
+    }
+
+    private func autoDownloadCovers(for importedGames: [FileImportHandler.ImportedGame]) {
+        guard !importedGames.isEmpty else { return }
+
+        let targets = importedGames.map { game in
+            let metadata = ARMSX2Bridge.gameMetadata(forISO: game.name)
+            let existingCover = coverStore.coverURL(forGameName: game.name, gamePath: game.fileURL, metadata: metadata)
+            return CoverGameInfo(name: game.name, fileURL: game.fileURL, metadata: metadata, hasCover: existingCover != nil)
+        }
+
+        Task {
+            let summary = await coverStore.downloadMissingCovers(for: targets, showResult: false)
+            if summary.downloaded > 0 {
+                loadGames()
+            }
         }
     }
 

@@ -80,17 +80,25 @@ final class CoverStore: @unchecked Sendable {
         return nil
     }
 
-    func downloadMissingCovers(for games: [CoverGameInfo]) async -> CoverDownloadSummary {
+    func downloadMissingCovers(for games: [CoverGameInfo], showResult: Bool = true) async -> CoverDownloadSummary {
         let template = coverURLTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !template.isEmpty else {
-            lastCoverMessage = "Set a cover URL template first."
-            showCoverAlert = true
+            if showResult {
+                lastCoverMessage = "Set a cover URL template first."
+                showCoverAlert = true
+            } else {
+                NSLog("[ARMSX2 iOS Covers] auto-download skipped: cover URL template is empty")
+            }
             return CoverDownloadSummary(downloaded: 0, skippedExisting: 0, failed: games.count)
         }
 
         guard !isDownloadingCovers else {
-            lastCoverMessage = "Cover download already in progress."
-            showCoverAlert = true
+            if showResult {
+                lastCoverMessage = "Cover download already in progress."
+                showCoverAlert = true
+            } else {
+                NSLog("[ARMSX2 iOS Covers] auto-download skipped: cover download already in progress")
+            }
             return CoverDownloadSummary(downloaded: 0, skippedExisting: 0, failed: 0)
         }
 
@@ -127,8 +135,12 @@ final class CoverStore: @unchecked Sendable {
             }
         }
 
-        lastCoverMessage = "Downloaded \(downloaded) cover(s). Skipped \(skipped) existing. Failed \(failed)."
-        showCoverAlert = true
+        if showResult {
+            lastCoverMessage = "Downloaded \(downloaded) cover(s). Skipped \(skipped) existing. Failed \(failed)."
+            showCoverAlert = true
+        } else {
+            NSLog("[ARMSX2 iOS Covers] auto-download finished downloaded=%d skipped=%d failed=%d", downloaded, skipped, failed)
+        }
         return CoverDownloadSummary(downloaded: downloaded, skippedExisting: skipped, failed: failed)
     }
 

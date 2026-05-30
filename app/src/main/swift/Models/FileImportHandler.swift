@@ -10,6 +10,11 @@ import UIKit
 final class FileImportHandler: @unchecked Sendable {
     static let shared = FileImportHandler()
 
+    struct ImportedGame: Sendable {
+        let name: String
+        let fileURL: URL
+    }
+
     enum ImportDestination {
         case automatic
         case bios
@@ -32,19 +37,30 @@ final class FileImportHandler: @unchecked Sendable {
 
     private init() {}
 
-    func handleURL(_ url: URL) {
+    @discardableResult
+    func handleURL(_ url: URL) -> [ImportedGame] {
         handleURLs([url], preferredDestination: .automatic)
     }
 
-    func handleURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) {
+    @discardableResult
+    func handleURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) -> [ImportedGame] {
+        importURLs(urls, preferredDestination: preferredDestination)
+    }
+
+    @discardableResult
+    func importURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) -> [ImportedGame] {
         var imported: [String] = []
+        var importedGames: [ImportedGame] = []
         var rejected: [String] = []
         var failed: [String] = []
 
         for url in urls {
             switch importFile(url, preferredDestination: preferredDestination) {
-            case .success(let message):
+            case .success(let message, let importedGame):
                 imported.append(message)
+                if let importedGame {
+                    importedGames.append(importedGame)
+                }
             case .unsupported(let fileName):
                 rejected.append(fileName)
             case .failure(let message):
@@ -65,6 +81,7 @@ final class FileImportHandler: @unchecked Sendable {
 
         lastImportMessage = lines.isEmpty ? "No files imported." : lines.joined(separator: "\n")
         showImportAlert = true
+        return importedGames
     }
 
     @discardableResult
@@ -84,7 +101,7 @@ final class FileImportHandler: @unchecked Sendable {
     private func finishPNACHImport(_ results: [ImportResult]) -> String {
         let messages = results.map { result -> String in
             switch result {
-            case .success(let message):
+            case .success(let message, _):
                 return message
             case .unsupported(let fileName):
                 return "Unsupported: \(fileName)"
@@ -100,7 +117,7 @@ final class FileImportHandler: @unchecked Sendable {
     }
 
     private enum ImportResult {
-        case success(String)
+        case success(String, importedGame: ImportedGame? = nil)
         case unsupported(String)
         case failure(String)
     }
@@ -167,7 +184,8 @@ final class FileImportHandler: @unchecked Sendable {
             }
             try copyImportedFile(from: url, to: URL(fileURLWithPath: destPath))
             NSLog("[ARMSX2 iOS Import] %@ imported: %@ -> %@", category, fileName, destPath)
-            return .success("\(category) imported: \(fileName)")
+            let importedGame = category == "Game" ? ImportedGame(name: fileName, fileURL: URL(fileURLWithPath: destPath)) : nil
+            return .success("\(category) imported: \(fileName)", importedGame: importedGame)
         } catch {
             NSLog("[ARMSX2 iOS Import] failed: %@ -> %@ error=%@", fileName, destPath, error.localizedDescription)
             return .failure("\(fileName): \(error.localizedDescription)")
