@@ -439,7 +439,9 @@ int main(int argc, char* argv[]) {
 
 // ... other includes ...
 #include <unistd.h>
+#include <algorithm>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 #include <iostream>
 
@@ -1029,8 +1031,156 @@ namespace InputManager {
     std::optional<unsigned int> ConvertHostKeyboardStringToCode(std::string_view) { return std::nullopt; }
 }
 
-// ... HTTP Stubs ...
-std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent) { return nullptr; }
+// ... HTTP ...
+class IOSHTTPDownloader final : public HTTPDownloader
+{
+public:
+    explicit IOSHTTPDownloader(std::string user_agent)
+        : m_user_agent(std::move(user_agent))
+    {
+        @autoreleasepool {
+            NSURLSessionConfiguration* configuration = [NSURLSessionConfiguration ephemeralSessionConfiguration];
+            configuration.requestCachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+            configuration.URLCache = nil;
+            configuration.HTTPShouldSetCookies = NO;
+            m_session = [NSURLSession sessionWithConfiguration:configuration];
+        }
+    }
+
+    ~IOSHTTPDownloader() override
+    {
+        [m_session invalidateAndCancel];
+    }
+
+protected:
+    struct IOSRequest final : Request
+    {
+        NSURLSessionDataTask* task = nil;
+    };
+
+    Request* InternalCreateRequest() override
+    {
+        return new IOSRequest();
+    }
+
+    void InternalPollRequests() override
+    {
+    }
+
+    bool StartRequest(Request* request) override
+    {
+        IOSRequest* native_request = static_cast<IOSRequest*>(request);
+
+        @autoreleasepool {
+            NSString* url_string = [NSString stringWithUTF8String:request->url.c_str()];
+            NSURL* url = url_string ? [NSURL URLWithString:url_string] : nil;
+            if (!url)
+            {
+                request->status_code = HTTP_STATUS_ERROR;
+                request->state.store(Request::State::Complete);
+                NSLog(@"[ARMSX2 iOS HTTP] Invalid URL: %@", url_string ?: @"<nil>");
+                return true;
+            }
+
+            NSMutableURLRequest* url_request = [NSMutableURLRequest requestWithURL:url];
+            url_request.timeoutInterval = m_timeout;
+            url_request.cachePolicy = NSURLRequestReloadIgnoringLocalCacheData;
+
+            NSString* user_agent = [NSString stringWithUTF8String:m_user_agent.c_str()];
+            if (user_agent.length > 0)
+                [url_request setValue:user_agent forHTTPHeaderField:@"User-Agent"];
+
+            if (request->type == Request::Type::Post)
+            {
+                url_request.HTTPMethod = @"POST";
+                url_request.HTTPBody = [NSData dataWithBytes:request->post_data.data() length:request->post_data.size()];
+                [url_request setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
+            }
+            else
+            {
+                url_request.HTTPMethod = @"GET";
+            }
+
+            NSString* debug_url = url.absoluteString;
+            request->state.store(Request::State::Started);
+
+            native_request->task = [m_session dataTaskWithRequest:url_request completionHandler:
+                ^(NSData* data, NSURLResponse* response, NSError* error) {
+                    s32 status_code = HTTP_STATUS_ERROR;
+                    std::string content_type;
+                    Request::Data response_data;
+
+                    if (error)
+                    {
+                        if (error.code == NSURLErrorCancelled)
+                            status_code = HTTP_STATUS_CANCELLED;
+                        else if (error.code == NSURLErrorTimedOut)
+                            status_code = HTTP_STATUS_TIMEOUT;
+
+                        NSLog(@"[ARMSX2 iOS HTTP] %@ failed: %@", debug_url, error.localizedDescription);
+                    }
+                    else
+                    {
+                        NSHTTPURLResponse* http_response = [response isKindOfClass:[NSHTTPURLResponse class]] ?
+                            (NSHTTPURLResponse*)response : nil;
+                        status_code = http_response ? static_cast<s32>(http_response.statusCode) : HTTP_STATUS_ERROR;
+
+                        NSString* mime_type = response.MIMEType;
+                        if (mime_type.length > 0)
+                            content_type = mime_type.UTF8String;
+
+                        const long long expected_length = response.expectedContentLength;
+                        if (expected_length > 0)
+                            native_request->content_length = static_cast<u32>(std::min<long long>(expected_length, UINT32_MAX));
+
+                        if (data.length > 0)
+                        {
+                            response_data.resize(data.length);
+                            std::memcpy(response_data.data(), data.bytes, data.length);
+                        }
+
+                        NSLog(@"[ARMSX2 iOS HTTP] %@ -> %d (%lu bytes)", debug_url, status_code,
+                            static_cast<unsigned long>(data.length));
+                    }
+
+                    native_request->status_code = status_code;
+                    native_request->content_type = std::move(content_type);
+                    native_request->data = std::move(response_data);
+                    native_request->state.store(Request::State::Complete);
+                }];
+
+            [native_request->task resume];
+        }
+
+        return true;
+    }
+
+    void CloseRequest(Request* request) override
+    {
+        IOSRequest* native_request = static_cast<IOSRequest*>(request);
+        const Request::State state = native_request->state.load();
+
+        if (state == Request::State::Complete)
+        {
+            delete native_request;
+            return;
+        }
+
+        // NSURLSession can still deliver a completion after cancellation. Keep the tiny
+        // request object alive in that rare timeout/cancel path to avoid a use-after-free.
+        [native_request->task cancel];
+        native_request->task = nil;
+    }
+
+private:
+    std::string m_user_agent;
+    NSURLSession* m_session = nil;
+};
+
+std::unique_ptr<HTTPDownloader> HTTPDownloader::Create(std::string user_agent)
+{
+    return std::make_unique<IOSHTTPDownloader>(std::move(user_agent));
+}
 
 // Global stubs for DISCopen
 void GetValidDrive(std::string&) {  }
