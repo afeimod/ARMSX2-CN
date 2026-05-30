@@ -4,12 +4,16 @@
 import SwiftUI
 import UIKit
 
+private let runtimeMenuStateChangedNotification = Notification.Name("ARMSX2iOSRuntimeMenuStateChanged")
+
 struct GameScreenView: View {
     @State private var appState = AppState.shared
     @State private var settings = SettingsStore.shared
     @State private var fileImporter = FileImportHandler.shared
     @State private var padVisible = true
     @State private var fullScreen = false
+    @State private var vmMenuAvailable = false
+    @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
     @State private var showPNACHImporter = false
     @State private var saveStateStatus: String? = nil
@@ -70,6 +74,13 @@ struct GameScreenView: View {
         .overlay(alignment: .bottom) {
             saveStateToast
         }
+        .onAppear(perform: refreshRuntimeMenuState)
+        .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
+            refreshRuntimeMenuState()
+        }
+        .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
+            refreshRuntimeMenuState()
+        }
     }
 
     private func menuOverlay(isLandscape: Bool) -> some View {
@@ -110,7 +121,7 @@ struct GameScreenView: View {
             }
             Divider()
             compatibilityLabSection
-            if ARMSX2Bridge.hasValidSaveStateGame() {
+            if vmMenuAvailable {
                 Menu {
                     Button {
                         ejectDisc()
@@ -122,24 +133,48 @@ struct GameScreenView: View {
                     if discs.isEmpty {
                         Text("No disc images found")
                     } else {
-                        ForEach(discs, id: \.self) { discName in
-                            Button {
-                                changeDisc(to: discName)
-                            } label: {
-                                Label(discName, systemImage: "opticaldisc")
+                        Menu {
+                            ForEach(discs, id: \.self) { discName in
+                                Button {
+                                    changeDisc(to: discName)
+                                } label: {
+                                    Label(discName, systemImage: "opticaldisc")
+                                }
                             }
+                        } label: {
+                            Label("Insert Disc (No Reboot)", systemImage: "tray.and.arrow.down")
+                        }
+
+                        Menu {
+                            ForEach(discs, id: \.self) { discName in
+                                Button {
+                                    restartWithDisc(discName)
+                                } label: {
+                                    Label(discName, systemImage: "arrow.clockwise.circle")
+                                }
+                            }
+                        } label: {
+                            Label("Restart With Disc", systemImage: "arrow.clockwise.circle")
                         }
                     }
                 } label: {
                     Label("Change Disc", systemImage: "opticaldisc")
                 }
+            }
 
+            if gameMenuAvailable {
                 Button {
                     showPNACHImporter = true
                 } label: {
                     Label("Import PNACH Cheat", systemImage: "wand.and.stars")
                 }
 
+                Button {
+                    showSaveStates = true
+                } label: {
+                    Label("Save States", systemImage: "square.stack.3d.up.fill")
+                }
+            } else if vmMenuAvailable {
                 Button {
                     showSaveStates = true
                 } label: {
@@ -158,6 +193,17 @@ struct GameScreenView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(6)
                 .background(.black.opacity(0.15), in: Circle())
+        }
+    }
+
+    private func refreshRuntimeMenuState() {
+        let vmRunning = ARMSX2Bridge.isVMRunning()
+        let gameReady = ARMSX2Bridge.hasValidSaveStateGame()
+        if vmMenuAvailable != vmRunning {
+            vmMenuAvailable = vmRunning
+        }
+        if gameMenuAvailable != gameReady {
+            gameMenuAvailable = gameReady
         }
     }
 
@@ -254,9 +300,14 @@ struct GameScreenView: View {
         presentSaveStateStatus("Changing disc...")
         ARMSX2Bridge.changeDisc(toISO: discName) { success in
             Task { @MainActor in
-                presentSaveStateStatus(success ? "Disc changed to \(discName)" : "Failed to change disc")
+                presentSaveStateStatus(success ? "\(discName) inserted. Use the game's disc-swap prompt if needed." : "Failed to change disc")
             }
         }
+    }
+
+    private func restartWithDisc(_ discName: String) {
+        presentSaveStateStatus("Restarting with \(discName)...")
+        appState.shutdownAndBoot(isoName: discName)
     }
 
     private func ejectDisc() {
@@ -280,18 +331,34 @@ private struct SaveStatesPanel: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(spacing: 10) {
-                    ForEach(slots, id: \.slot) { slot in
-                        SaveStateSlotRow(
-                            info: slot,
-                            isBusy: busySlot == slot.slot,
-                            onSave: { save(slot) },
-                            onLoad: { load(slot) },
-                            onOverwrite: { pendingOverwrite = slot }
-                        )
+                if slots.isEmpty {
+                    VStack(spacing: 10) {
+                        Image(systemName: "hourglass")
+                            .font(.largeTitle)
+                            .foregroundStyle(.secondary)
+                        Text("Save states are not ready yet.")
+                            .font(.headline)
+                        Text("Wait until the game has fully identified, then try again.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
                     }
+                    .frame(maxWidth: .infinity)
+                    .padding(32)
+                } else {
+                    LazyVStack(spacing: 10) {
+                        ForEach(slots, id: \.slot) { slot in
+                            SaveStateSlotRow(
+                                info: slot,
+                                isBusy: busySlot == slot.slot,
+                                onSave: { save(slot) },
+                                onLoad: { load(slot) },
+                                onOverwrite: { pendingOverwrite = slot }
+                            )
+                        }
+                    }
+                    .padding()
                 }
-                .padding()
             }
             .navigationTitle("Save States")
             .toolbar {
@@ -302,6 +369,9 @@ private struct SaveStatesPanel: View {
                 }
             }
             .onAppear(perform: refresh)
+            .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
+                refresh()
+            }
             .confirmationDialog(
                 "Overwrite Slot \(pendingOverwrite?.slot ?? 0)?",
                 isPresented: Binding(

@@ -33,6 +33,7 @@
 
 #include "common/Error.h"
 #include "common/FileSystem.h"
+#include "common/Console.h"
 #include "common/Path.h"
 #include "common/ScopedGuard.h"
 #include "common/StringUtil.h"
@@ -338,7 +339,9 @@ void memLoadingState::FreezeMem( void* data, int size )
 }
 
 static const char* EntryFilename_StateVersion = "PCSX2 Savestate Version.id";
+#if !TARGET_OS_IPHONE && !defined(iPSX2_MACOS)
 static const char* EntryFilename_Screenshot = "Screenshot.png";
+#endif
 static const char* EntryFilename_InternalStructures = "PCSX2 Internal Structures.dat";
 static constexpr u32 STATE_PCSX2_VERSION_SIZE = 32;
 
@@ -1040,8 +1043,14 @@ static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateSc
 
 	if (screenshot)
 	{
+#if TARGET_OS_IPHONE || defined(iPSX2_MACOS)
+		// PNG screenshot writing is not available in the current iOS/macOS-lite build.
+		// The screenshot is optional metadata, so skip it instead of failing the state.
+		Console.Warning("Save state screenshot preview skipped on this platform.");
+#else
 		if (!SaveState_CompressScreenshot(screenshot, zf))
 			return false;
+#endif
 	}
 
 	return true;

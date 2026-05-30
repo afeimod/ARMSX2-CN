@@ -36,6 +36,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 // Access the global settings interface from ios_main.mm
 extern INISettingsInterface* g_p44_settings_interface;
 extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason);
+extern "C" void ARMSX2_PostRuntimeMenuStateChanged(void);
 
 static NSDate* s_lastNVMSaveDate = nil;
 
@@ -534,12 +535,34 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 
     const std::string nativePath(isoPath.UTF8String ?: "");
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool ejectResult = false;
         bool result = false;
+        Host::RunOnCPUThread([&result]() {
+            const CDVD_SourceType oldSource = CDVDsys_GetSourceType();
+            const std::string oldPathForLog = CDVDsys_GetFile(oldSource);
+            NSLog(@"[ARMSX2Bridge] ChangeDisc eject phase oldSource=%d oldPath=%@",
+                  static_cast<int>(oldSource), ARMSX2NSStringFromStdString(oldPathForLog));
+            result = VMManager::ChangeDisc(CDVD_SourceType::NoDisc, {});
+        }, true);
+        ejectResult = result;
+
+        [NSThread sleepForTimeInterval:1.25];
+
         Host::RunOnCPUThread([nativePath, &result]() {
             result = VMManager::ChangeDisc(CDVD_SourceType::Iso, nativePath);
+            NSLog(@"[ARMSX2Bridge] ChangeDisc insert phase newSource=%d newPath=%@ result=%d",
+                  static_cast<int>(CDVDsys_GetSourceType()),
+                  ARMSX2NSStringFromStdString(CDVDsys_GetFile(CDVDsys_GetSourceType())),
+                  result ? 1 : 0);
         }, true);
 
-        NSLog(@"[ARMSX2Bridge] ChangeDisc iso=%@ result=%d", isoName, result ? 1 : 0);
+        if (result && g_p44_settings_interface) {
+            g_p44_settings_interface->SetStringValue("GameISO", "BootISO", isoName.UTF8String);
+            g_p44_settings_interface->Save();
+        }
+
+        ARMSX2_PostRuntimeMenuStateChanged();
+        NSLog(@"[ARMSX2Bridge] ChangeDisc iso=%@ ejectResult=%d result=%d", isoName, ejectResult ? 1 : 0, result ? 1 : 0);
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
     });
@@ -560,6 +583,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
             result = VMManager::ChangeDisc(CDVD_SourceType::NoDisc, {});
         }, true);
 
+        ARMSX2_PostRuntimeMenuStateChanged();
         NSLog(@"[ARMSX2Bridge] EjectDisc result=%d", result ? 1 : 0);
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });

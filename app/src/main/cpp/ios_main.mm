@@ -566,6 +566,12 @@ static void ARMSX2DrainCPUThreadTasks()
 }
 
 extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void);
+extern "C" void ARMSX2_PostRuntimeMenuStateChanged(void)
+{
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRuntimeMenuStateChanged" object:nil];
+    });
+}
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
 std::atomic<bool> s_captureMode{false};
@@ -728,7 +734,10 @@ namespace Host
     void EndTextInput() {}
     bool IsFullscreen() { return true; }
     void SetMouseMode(bool, bool) {}
-    void OnGameChanged(const std::string&, const std::string&, const std::string&, const std::string&, unsigned int, unsigned int) {}
+    void OnGameChanged(const std::string&, const std::string&, const std::string&, const std::string&, unsigned int, unsigned int)
+    {
+        ARMSX2_PostRuntimeMenuStateChanged();
+    }
     void OnVMDestroyed() {}
     void SetFullscreen(bool) {}
     void BeginTextInput() {}
@@ -767,8 +776,8 @@ namespace Host
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
         Console.Error("Host::ReportErrorAsync: %s - %s", std::string(title).c_str(), std::string(msg).c_str());
     }
-    void OnSaveStateSaved(std::string_view) {}
-    void OnSaveStateLoaded(std::string_view, bool) {}
+    void OnSaveStateSaved(std::string_view) { ARMSX2_PostRuntimeMenuStateChanged(); }
+    void OnSaveStateLoaded(std::string_view, bool) { ARMSX2_PostRuntimeMenuStateChanged(); }
     void BeginPresentFrame() {}
     void OnSaveStateLoading(std::string_view) {}
     bool LocaleCircleConfirm() { return false; }
