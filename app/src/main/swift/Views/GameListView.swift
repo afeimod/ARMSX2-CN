@@ -32,6 +32,7 @@ struct GameListView: View {
     @State private var coverTemplateDraft = CoverStore.defaultCoverURLTemplate
     @State private var pendingGameName: String = ""
     @State private var pendingCoverGameName: String?
+    @AppStorage("ARMSX2iOSGameLibraryLayout") private var libraryLayout = "grid"
 
     var sortedGames: [ISOEntry] {
         games.sorted { a, b in
@@ -45,15 +46,10 @@ struct GameListView: View {
             Group {
                 if games.isEmpty && appState.runningGameName == nil {
                     emptyState
+                } else if libraryLayout == "grid" {
+                    gridLibrary
                 } else {
-                    List {
-                        if let gameName = appState.runningGameName {
-                            vmStatusSection(gameName: gameName)
-                        }
-                        ForEach(sortedGames) { game in
-                            gameRow(game)
-                        }
-                    }
+                    listLibrary
 #if targetEnvironment(macCatalyst)
                     .listStyle(.inset)
 #endif
@@ -67,6 +63,14 @@ struct GameListView: View {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Import Games")
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        libraryLayout = libraryLayout == "grid" ? "list" : "grid"
+                    } label: {
+                        Image(systemName: libraryLayout == "grid" ? "list.bullet" : "square.grid.2x2")
+                    }
+                    .accessibilityLabel(libraryLayout == "grid" ? "Show List" : "Show Grid")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -198,6 +202,38 @@ struct GameListView: View {
         .onAppear { loadGames() }
     }
 
+    private var listLibrary: some View {
+        List {
+            if let gameName = appState.runningGameName {
+                vmStatusSection(gameName: gameName)
+            }
+            ForEach(sortedGames) { game in
+                gameRow(game)
+            }
+        }
+    }
+
+    private var gridLibrary: some View {
+        ScrollView {
+            LazyVStack(spacing: 16) {
+                if let gameName = appState.runningGameName {
+                    vmStatusCard(gameName: gameName)
+                        .padding(.horizontal)
+                }
+
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 142), spacing: 14, alignment: .top)], spacing: 18) {
+                    ForEach(sortedGames) { game in
+                        gameGridCard(game)
+                    }
+                }
+                .padding(.horizontal)
+                .padding(.bottom, 20)
+            }
+            .padding(.top, 12)
+        }
+        .background(Color(.systemGroupedBackground))
+    }
+
     private func vmStatusSection(gameName: String) -> some View {
         Section {
             // Resume row — tap anywhere to return to game
@@ -253,14 +289,7 @@ struct GameListView: View {
 
     private func gameRow(_ game: ISOEntry) -> some View {
         Button {
-            if game.name == appState.runningGameName {
-                appState.returnToGame()
-            } else if appState.runningGameName != nil {
-                pendingGameName = game.name
-                showRestartAlert = true
-            } else {
-                appState.bootGame(isoName: game.name)
-            }
+            open(game)
         } label: {
             HStack(spacing: 12) {
                 coverThumbnail(for: game)
@@ -300,32 +329,70 @@ struct GameListView: View {
         }
         .foregroundStyle(.primary)
         .contextMenu {
-            Button {
-                downloadCover(for: game)
-            } label: {
-                Label("Download Cover", systemImage: "icloud.and.arrow.down")
-            }
-            .disabled(coverStore.isDownloadingCovers)
-
-            Button {
-                pendingCoverGameName = game.name
-                showCoverImporter = true
-            } label: {
-                Label("Choose Cover", systemImage: "photo")
-            }
-
-            if game.coverURL != nil {
-                Button(role: .destructive) {
-                    coverStore.removeManagedCovers(forGameNamed: game.name)
-                    loadGames()
-                } label: {
-                    Label("Remove Cover", systemImage: "trash")
-                }
-            }
+            gameContextMenu(for: game)
         }
     }
 
-    private func coverThumbnail(for game: ISOEntry) -> some View {
+    private func gameGridCard(_ game: ISOEntry) -> some View {
+        Button {
+            open(game)
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                ZStack(alignment: .topTrailing) {
+                    coverThumbnail(for: game, width: 132, height: 198)
+                        .frame(maxWidth: .infinity)
+
+                    Button {
+                        toggleFavorite(game.name)
+                    } label: {
+                        Image(systemName: game.isFavorite ? "star.fill" : "star")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(game.isFavorite ? .yellow : .white.opacity(0.86))
+                            .padding(8)
+                            .background(.black.opacity(0.48), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(6)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 5) {
+                        Text(coverStore.displayName(forGameName: game.name))
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+                        if game.name == appState.runningGameName {
+                            Image(systemName: "circle.fill")
+                                .font(.system(size: 7))
+                                .foregroundStyle(.green)
+                        }
+                    }
+                    HStack(spacing: 6) {
+                        Text(game.name.pathExtensionLabel)
+                        Text(formatSize(game.size))
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .top)
+            .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(game.name == appState.runningGameName ? .green.opacity(0.6) : .white.opacity(0.08), lineWidth: 1)
+            }
+            .shadow(color: .black.opacity(0.08), radius: 10, x: 0, y: 5)
+        }
+        .buttonStyle(.plain)
+        .contextMenu {
+            gameContextMenu(for: game)
+        }
+    }
+
+    private func coverThumbnail(for game: ISOEntry, width: CGFloat = 58, height: CGFloat = 87) -> some View {
         ZStack {
             RoundedRectangle(cornerRadius: 10, style: .continuous)
                 .fill(.thinMaterial)
@@ -336,7 +403,7 @@ struct GameListView: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-                    .frame(width: 58, height: 87)
+                    .frame(width: width, height: height)
                     .clipped()
             } else {
                 VStack(spacing: 6) {
@@ -349,9 +416,84 @@ struct GameListView: View {
                 .foregroundStyle(.secondary)
             }
         }
-        .frame(width: 58, height: 87)
+        .frame(width: width, height: height)
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
         .shadow(color: .black.opacity(0.12), radius: 6, x: 0, y: 3)
+    }
+
+    private func vmStatusCard(gameName: String) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: "play.circle.fill")
+                .font(.title2)
+                .foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Now Running")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(gameName == "BIOS" ? "BIOS Only" : gameName)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(1)
+            }
+            Spacer()
+            Button("Resume") {
+                appState.returnToGame()
+            }
+            .buttonStyle(.borderedProminent)
+            Button(role: .destructive) {
+                showStopAlert = true
+            } label: {
+                Image(systemName: "stop.circle")
+            }
+            .buttonStyle(.bordered)
+        }
+        .padding()
+        .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .alert("Stop Emulation?", isPresented: $showStopAlert) {
+            Button("Cancel", role: .cancel) { }
+            Button("Stop", role: .destructive) {
+                ARMSX2Bridge.requestVMStop()
+                appState.runningGameName = nil
+            }
+        } message: {
+            Text("This will shut down the running game. All unsaved progress will be lost.")
+        }
+    }
+
+    @ViewBuilder
+    private func gameContextMenu(for game: ISOEntry) -> some View {
+        Button {
+            downloadCover(for: game)
+        } label: {
+            Label("Download Cover", systemImage: "icloud.and.arrow.down")
+        }
+        .disabled(coverStore.isDownloadingCovers)
+
+        Button {
+            pendingCoverGameName = game.name
+            showCoverImporter = true
+        } label: {
+            Label("Choose Cover", systemImage: "photo")
+        }
+
+        if game.coverURL != nil {
+            Button(role: .destructive) {
+                coverStore.removeManagedCovers(forGameNamed: game.name)
+                loadGames()
+            } label: {
+                Label("Remove Cover", systemImage: "trash")
+            }
+        }
+    }
+
+    private func open(_ game: ISOEntry) {
+        if game.name == appState.runningGameName {
+            appState.returnToGame()
+        } else if appState.runningGameName != nil {
+            pendingGameName = game.name
+            showRestartAlert = true
+        } else {
+            appState.bootGame(isoName: game.name)
+        }
     }
 
     private var emptyState: some View {
