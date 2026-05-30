@@ -471,6 +471,8 @@ int main(int argc, char* argv[]) {
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <deque>
+#include <memory>
 #include <optional>
 #include <sys/stat.h> // For mkdir
 
@@ -522,6 +524,42 @@ static std::atomic<bool> s_requestVMBoot{false};     // signal VM thread to boot
 static std::mutex s_vmMutex;
 static std::condition_variable s_vmCV;
 static bool s_vmThreadCreated = false;               // guarded by s_vmMutex
+
+struct CPUThreadTask
+{
+    std::function<void()> function;
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool complete = false;
+};
+
+static std::thread::id s_cpuThreadId;
+static std::mutex s_cpuTaskMutex;
+static std::deque<std::shared_ptr<CPUThreadTask>> s_cpuTasks;
+
+static void ARMSX2DrainCPUThreadTasks()
+{
+    for (;;) {
+        std::shared_ptr<CPUThreadTask> task;
+        {
+            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+            if (s_cpuTasks.empty())
+                break;
+
+            task = std::move(s_cpuTasks.front());
+            s_cpuTasks.pop_front();
+        }
+
+        if (task && task->function)
+            task->function();
+
+        {
+            std::lock_guard<std::mutex> lock(task->mutex);
+            task->complete = true;
+        }
+        task->cv.notify_all();
+    }
+}
 
 // Gamepad button mapping — 16 PS2 buttons → SDL_GamepadButton
 std::atomic<bool> s_captureMode{false};
@@ -689,7 +727,36 @@ namespace Host
     void SetFullscreen(bool) {}
     void BeginTextInput() {}
     bool ConfirmMessage(std::string_view, std::string_view) { return true; }
-    void RunOnCPUThread(std::function<void()>, bool) {}
+    void RunOnCPUThread(std::function<void()> function, bool block)
+    {
+        if (!function)
+            return;
+
+        if (std::this_thread::get_id() == s_cpuThreadId) {
+            function();
+            return;
+        }
+
+        if (!s_vmThreadActive.load()) {
+            Console.Warning("[ARMSX2 iOS] CPU-thread task requested while VM is inactive; running inline");
+            function();
+            return;
+        }
+
+        auto task = std::make_shared<CPUThreadTask>();
+        task->function = std::move(function);
+
+        {
+            std::lock_guard<std::mutex> lock(s_cpuTaskMutex);
+            s_cpuTasks.push_back(task);
+        }
+
+        if (!block)
+            return;
+
+        std::unique_lock<std::mutex> lock(task->mutex);
+        task->cv.wait(lock, [&task] { return task->complete; });
+    }
     void ReportInfoAsync(std::string_view, std::string_view) {}
     void ReportErrorAsync(std::string_view title, std::string_view msg) {
         Console.Error("Host::ReportErrorAsync: %s - %s", std::string(title).c_str(), std::string(msg).c_str());
@@ -711,6 +778,8 @@ namespace Host
     void OnAchievementsRefreshed() {}
     void PumpMessagesOnCPUThread()
     {
+        ARMSX2DrainCPUThreadTasks();
+
 // Check for VM shutdown request (safe: runs on CPU thread)
         if (s_requestVMStop.load()) {
             Console.WriteLn("[UI] PumpMessages: setting VM state to Stopping");
@@ -1552,6 +1621,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
     std::thread vmThread([]() {
         // === ONE-TIME INIT (runs once per app lifetime) ===
+        s_cpuThreadId = std::this_thread::get_id();
         Console.WriteLn("[VM] VM Thread: CPUThreadInitialize (once)...");
         if (!VMManager::Internal::CPUThreadInitialize()) {
             Console.Error("VM Thread: CPUThreadInitialize failed.");
@@ -1653,6 +1723,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 VMManager::SetState(VMState::Running);
 
                 while (true) {
+                    Host::PumpMessagesOnCPUThread();
+
                     if (s_requestVMStop.load()) {
                         Console.WriteLn("[VM] VM Thread: stop requested from UI.");
                         break;

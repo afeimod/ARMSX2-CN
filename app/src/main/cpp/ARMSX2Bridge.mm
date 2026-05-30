@@ -8,9 +8,12 @@
 extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "Common.h"
 #include "CDVD/CDVD.h"
+#include "CDVD/CDVDcommon.h"
 #include "VMManager.h"
+#include "Patch.h"
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
+#include "SIO/Memcard/MemoryCardFile.h"
 #include "Counters.h"
 #include "GS/GSState.h"
 #include "GameList.h"
@@ -90,6 +93,61 @@ static BOOL ARMSX2GetCurrentSaveStateIdentity(std::string* serial, u32* crc)
     if (crc)
         *crc = currentCRC;
     return YES;
+}
+
+static NSString* ARMSX2ResolveISOPath(NSString* isoName)
+{
+    if (isoName.length == 0)
+        return nil;
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSString* isoPath = [[ARMSX2Bridge isoDirectory] stringByAppendingPathComponent:isoName];
+    if ([fm fileExistsAtPath:isoPath])
+        return isoPath;
+
+    NSString* docsPath = [[ARMSX2Bridge documentsDirectory] stringByAppendingPathComponent:isoName];
+    if ([fm fileExistsAtPath:docsPath])
+        return docsPath;
+
+    return nil;
+}
+
+static NSString* ARMSX2SanitizedMemoryCardName(NSString* name)
+{
+    NSString* trimmed = [name stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0)
+        return @"";
+
+    NSMutableString* sanitized = [NSMutableString stringWithCapacity:trimmed.length];
+    NSCharacterSet* invalid = [NSCharacterSet characterSetWithCharactersInString:@"/\\:?%*|\"<>"];
+    for (NSUInteger i = 0; i < trimmed.length; i++) {
+        unichar ch = [trimmed characterAtIndex:i];
+        [sanitized appendString:[invalid characterIsMember:ch] ? @"_" : [NSString stringWithCharacters:&ch length:1]];
+    }
+
+    while ([sanitized containsString:@".."])
+        [sanitized replaceOccurrencesOfString:@".." withString:@"_" options:0 range:NSMakeRange(0, sanitized.length)];
+
+    if (sanitized.pathExtension.length == 0)
+        [sanitized appendString:@".ps2"];
+
+    return sanitized;
+}
+
+static MemoryCardFileType ARMSX2MemoryCardFileTypeForSizeMB(NSInteger sizeMB)
+{
+    switch (sizeMB) {
+    case 8:
+        return MemoryCardFileType::PS2_8MB;
+    case 16:
+        return MemoryCardFileType::PS2_16MB;
+    case 32:
+        return MemoryCardFileType::PS2_32MB;
+    case 64:
+        return MemoryCardFileType::PS2_64MB;
+    default:
+        return MemoryCardFileType::Unknown;
+    }
 }
 
 static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
@@ -429,6 +487,50 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     return metadata;
 }
 
++ (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion {
+    ARMSX2SaveStateCompletion callback = [completion copy];
+    NSString* isoPath = ARMSX2ResolveISOPath(isoName);
+    if (!isoPath || !VMManager::HasValidVM()) {
+        NSLog(@"[ARMSX2Bridge] ChangeDisc rejected iso=%@ path=%@ validVM=%d", isoName, isoPath ?: @"", VMManager::HasValidVM() ? 1 : 0);
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
+        return;
+    }
+
+    const std::string nativePath(isoPath.UTF8String ?: "");
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool result = false;
+        Host::RunOnCPUThread([nativePath, &result]() {
+            result = VMManager::ChangeDisc(CDVD_SourceType::Iso, nativePath);
+        }, true);
+
+        NSLog(@"[ARMSX2Bridge] ChangeDisc iso=%@ result=%d", isoName, result ? 1 : 0);
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
+    });
+}
+
++ (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion {
+    ARMSX2SaveStateCompletion callback = [completion copy];
+    if (!VMManager::HasValidVM()) {
+        NSLog(@"[ARMSX2Bridge] EjectDisc rejected validVM=0");
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
+        return;
+    }
+
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        bool result = false;
+        Host::RunOnCPUThread([&result]() {
+            result = VMManager::ChangeDisc(CDVD_SourceType::NoDisc, {});
+        }, true);
+
+        NSLog(@"[ARMSX2Bridge] EjectDisc result=%d", result ? 1 : 0);
+        if (callback)
+            dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
+    });
+}
+
 // Toggle overlay visibility via position (None vs TopRight).
 // Individual OSD flags are controlled by preset in SettingsStore, not here.
 + (void)setPerformanceOverlayVisible:(BOOL)visible {
@@ -726,18 +828,33 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 + (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
     const s32 nativeSlot = static_cast<s32>(slot);
     ARMSX2SaveStateCompletion callback = [completion copy];
-    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+    std::string serial;
+    u32 crc = 0;
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || !ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) {
+        NSLog(@"[ARMSX2 iOS SaveState] save rejected slot=%d validGame=0", nativeSlot);
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
         return;
     }
 
+    const std::string targetPath = VMManager::GetSaveStateFileName(serial.c_str(), crc, nativeSlot);
+    NSLog(@"[ARMSX2 iOS SaveState] save requested slot=%d path=%@", nativeSlot, ARMSX2NSStringFromStdString(targetPath));
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         bool result = false;
         Host::RunOnCPUThread([nativeSlot, &result]() {
-            result = VMManager::SaveStateToSlot(nativeSlot, false);
-            VMManager::WaitForSaveStateFlush();
+            NSLog(@"[ARMSX2 iOS SaveState] CPU save start slot=%d", nativeSlot);
+            result = VMManager::SaveStateToSlot(nativeSlot, true);
+            NSLog(@"[ARMSX2 iOS SaveState] CPU save queued slot=%d result=%d", nativeSlot, result ? 1 : 0);
         }, true);
+
+        if (result) {
+            VMManager::WaitForSaveStateFlush();
+            result = targetPath.empty() ? result : FileSystem::FileExists(targetPath.c_str());
+        }
+
+        NSLog(@"[ARMSX2 iOS SaveState] save finished slot=%d result=%d exists=%d",
+              nativeSlot, result ? 1 : 0, (!targetPath.empty() && FileSystem::FileExists(targetPath.c_str())) ? 1 : 0);
 
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
@@ -747,21 +864,148 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 + (void)loadStateFromSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion {
     const s32 nativeSlot = static_cast<s32>(slot);
     ARMSX2SaveStateCompletion callback = [completion copy];
-    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || ![self hasValidSaveStateGame]) {
+    std::string serial;
+    u32 crc = 0;
+    if (nativeSlot < 1 || nativeSlot > VMManager::NUM_SAVE_STATE_SLOTS || !ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) {
+        NSLog(@"[ARMSX2 iOS SaveState] load rejected slot=%d validGame=0", nativeSlot);
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(NO); });
         return;
     }
 
+    const std::string targetPath = VMManager::GetSaveStateFileName(serial.c_str(), crc, nativeSlot);
+    NSLog(@"[ARMSX2 iOS SaveState] load requested slot=%d path=%@ exists=%d",
+          nativeSlot, ARMSX2NSStringFromStdString(targetPath), (!targetPath.empty() && FileSystem::FileExists(targetPath.c_str())) ? 1 : 0);
+
     dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
         bool result = false;
         Host::RunOnCPUThread([nativeSlot, &result]() {
+            NSLog(@"[ARMSX2 iOS SaveState] CPU load start slot=%d", nativeSlot);
             result = VMManager::LoadStateFromSlot(nativeSlot);
+            NSLog(@"[ARMSX2 iOS SaveState] CPU load finished slot=%d result=%d", nativeSlot, result ? 1 : 0);
         }, true);
+
+        NSLog(@"[ARMSX2 iOS SaveState] load callback slot=%d result=%d", nativeSlot, result ? 1 : 0);
 
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });
     });
+}
+
+#pragma mark - PNACH cheats/patches
+
++ (nullable NSString *)pnachPathForCurrentGameAsCheat:(BOOL)asCheat {
+    std::string serial;
+    u32 crc = 0;
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) {
+        NSLog(@"[ARMSX2Bridge] PNACH path unavailable: no current game identity");
+        return nil;
+    }
+
+    return ARMSX2NSStringFromStdString(Patch::GetPnachFilename(serial, crc, asCheat));
+}
+
++ (void)reloadPatches {
+    std::string serial;
+    u32 crc = 0;
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc))
+        return;
+
+    Host::RunOnCPUThread([serial, crc]() {
+        Patch::ReloadPatches(serial, crc, true, true, true, true);
+        Patch::UpdateActivePatches(true, true, true, true);
+    }, false);
+}
+
+#pragma mark - Memory cards
+
++ (nonnull NSString *)memoryCardDirectory {
+    FileSystem::CreateDirectoryPath(EmuFolders::MemoryCards.c_str(), false);
+    return ARMSX2NSStringFromStdString(EmuFolders::MemoryCards);
+}
+
++ (nonnull NSArray<NSString *> *)availableMemoryCards {
+    [self memoryCardDirectory];
+
+    std::vector<AvailableMcdInfo> cards = FileMcd_GetAvailableCards(true);
+    NSMutableArray<NSString *> *names = [NSMutableArray arrayWithCapacity:cards.size()];
+    for (const AvailableMcdInfo& card : cards) {
+        NSString* name = ARMSX2NSStringFromStdString(card.name);
+        if (name.length > 0)
+            [names addObject:name];
+    }
+
+    return names;
+}
+
++ (nullable NSString *)memoryCardNameForSlot:(NSInteger)slot {
+    if (slot < 1 || slot > 8)
+        return nil;
+
+    const uint nativeSlot = static_cast<uint>(slot - 1);
+    char key[32];
+    std::snprintf(key, sizeof(key), "Slot%u_Filename", nativeSlot + 1);
+
+    std::string value = EmuConfig.Mcd[nativeSlot].Filename;
+    if (g_p44_settings_interface)
+        value = g_p44_settings_interface->GetStringValue("MemoryCards", key, value.c_str());
+
+    return ARMSX2NSStringFromStdString(value);
+}
+
++ (void)setMemoryCardName:(nonnull NSString *)name forSlot:(NSInteger)slot enabled:(BOOL)enabled {
+    if (slot < 1 || slot > 8)
+        return;
+
+    const uint nativeSlot = static_cast<uint>(slot - 1);
+    const std::string nativeName(name.UTF8String ?: "");
+    char enableKey[32];
+    char fileKey[32];
+    std::snprintf(enableKey, sizeof(enableKey), "Slot%u_Enable", nativeSlot + 1);
+    std::snprintf(fileKey, sizeof(fileKey), "Slot%u_Filename", nativeSlot + 1);
+
+    if (g_p44_settings_interface) {
+        g_p44_settings_interface->SetBoolValue("MemoryCards", enableKey, enabled);
+        g_p44_settings_interface->SetStringValue("MemoryCards", fileKey, nativeName.c_str());
+        g_p44_settings_interface->Save();
+    }
+
+    EmuConfig.Mcd[nativeSlot].Enabled = enabled ? true : false;
+    EmuConfig.Mcd[nativeSlot].Filename = nativeName;
+    if (!enabled || nativeName.empty()) {
+        EmuConfig.Mcd[nativeSlot].Type = MemoryCardType::Empty;
+    } else if (const std::optional<AvailableMcdInfo> cardInfo = FileMcd_GetCardInfo(nativeName)) {
+        EmuConfig.Mcd[nativeSlot].Type = cardInfo->type;
+    } else {
+        EmuConfig.Mcd[nativeSlot].Type = MemoryCardType::File;
+    }
+
+    NSLog(@"[ARMSX2Bridge] MemoryCard slot=%ld enabled=%d name=%@", static_cast<long>(slot), enabled ? 1 : 0, name);
+}
+
++ (BOOL)createMemoryCardNamed:(nonnull NSString *)name sizeMB:(NSInteger)sizeMB folder:(BOOL)folder {
+    [self memoryCardDirectory];
+
+    NSString* sanitized = ARMSX2SanitizedMemoryCardName(name);
+    if (sanitized.length == 0)
+        return NO;
+
+    const std::string nativeName(sanitized.UTF8String ?: "");
+    const std::string fullPath(Path::Combine(EmuFolders::MemoryCards, nativeName));
+    if (FileSystem::FileExists(fullPath.c_str()) || FileSystem::DirectoryExists(fullPath.c_str())) {
+        NSLog(@"[ARMSX2Bridge] MemoryCard create refused, already exists: %@", sanitized);
+        return NO;
+    }
+
+    const MemoryCardType cardType = folder ? MemoryCardType::Folder : MemoryCardType::File;
+    const MemoryCardFileType fileType = folder ? MemoryCardFileType::Unknown : ARMSX2MemoryCardFileTypeForSizeMB(sizeMB);
+    if (!folder && fileType == MemoryCardFileType::Unknown)
+        return NO;
+
+    const bool result = FileMcd_CreateNewCard(nativeName, cardType, fileType);
+    NSLog(@"[ARMSX2Bridge] MemoryCard create name=%@ folder=%d size=%ld result=%d",
+          sanitized, folder ? 1 : 0, static_cast<long>(sizeMB), result ? 1 : 0);
+    return result ? YES : NO;
 }
 
 // Gamepad button mapping

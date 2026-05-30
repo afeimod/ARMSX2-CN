@@ -90,6 +90,8 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (nonnull NSString *)documentsDirectory;
 + (nonnull NSArray<NSString *> *)availableISOs;
 + (nonnull NSDictionary<NSString *, NSString *> *)gameMetadataForISO:(nonnull NSString *)isoName;
++ (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(changeDisc(toISO:completion:));
++ (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 
 // [P44] ISO boot
 + (void)bootISO:(nonnull NSString *)isoName;
@@ -129,6 +131,17 @@ typedef void (^ARMSX2SaveStateCompletion)(BOOL success);
 + (nonnull NSArray<ARMSX2SaveStateSlotInfo *> *)saveStateSlots;
 + (void)saveStateToSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(saveState(toSlot:completion:));
 + (void)loadStateFromSlot:(NSInteger)slot completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(loadState(fromSlot:completion:));
+
+// PNACH cheats/patches
++ (nullable NSString *)pnachPathForCurrentGameAsCheat:(BOOL)asCheat NS_SWIFT_NAME(pnachPathForCurrentGame(asCheat:));
++ (void)reloadPatches;
+
+// Memory card management
++ (nonnull NSString *)memoryCardDirectory;
++ (nonnull NSArray<NSString *> *)availableMemoryCards;
++ (nullable NSString *)memoryCardNameForSlot:(NSInteger)slot NS_SWIFT_NAME(memoryCardName(forSlot:));
++ (void)setMemoryCardName:(nonnull NSString *)name forSlot:(NSInteger)slot enabled:(BOOL)enabled NS_SWIFT_NAME(setMemoryCard(name:forSlot:enabled:));
++ (BOOL)createMemoryCardNamed:(nonnull NSString *)name sizeMB:(NSInteger)sizeMB folder:(BOOL)folder NS_SWIFT_NAME(createMemoryCard(named:sizeMB:folder:));
 
 // [P53] Gamepad button mapping
 + (void)startButtonCapture;

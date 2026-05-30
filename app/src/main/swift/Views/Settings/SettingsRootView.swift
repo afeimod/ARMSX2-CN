@@ -6,6 +6,7 @@ import SwiftUI
 private enum SettingsPane: String, CaseIterable, Identifiable {
     case emulator
     case graphics
+    case memoryCards
     case overlay
     case gameController
     case virtualPad
@@ -20,6 +21,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "Emulator"
         case .graphics:
             return "Graphics"
+        case .memoryCards:
+            return "Memory Cards"
         case .overlay:
             return "Overlay (OSD)"
         case .gameController:
@@ -39,6 +42,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
             return "cpu"
         case .graphics:
             return "paintbrush"
+        case .memoryCards:
+            return "memorychip"
         case .overlay:
             return "text.below.photo"
         case .gameController:
@@ -84,6 +89,11 @@ struct SettingsRootView: View {
                     GraphicsSettingsView()
                 } label: {
                     Label("Graphics", systemImage: "paintbrush")
+                }
+                NavigationLink {
+                    MemoryCardSettingsView()
+                } label: {
+                    Label("Memory Cards", systemImage: "memorychip")
                 }
                 NavigationLink {
                     OverlaySettingsView()
@@ -132,6 +142,8 @@ struct SettingsRootView: View {
             EmulatorSettingsView()
         case .graphics:
             GraphicsSettingsView()
+        case .memoryCards:
+            MemoryCardSettingsView()
         case .overlay:
             OverlaySettingsView()
         case .gameController:

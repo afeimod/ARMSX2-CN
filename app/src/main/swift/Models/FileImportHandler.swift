@@ -13,6 +13,7 @@ final class FileImportHandler: @unchecked Sendable {
         case automatic
         case bios
         case game
+        case pnachCheat
     }
 
     var lastImportMessage: String?
@@ -20,11 +21,13 @@ final class FileImportHandler: @unchecked Sendable {
 
     private static let biosExtensions: Set<String> = ["bin", "rom"]
     private static let gameExtensions: Set<String> = ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"]
+    private static let pnachExtensions: Set<String> = ["pnach"]
     // .bin files > 50MB are treated as game images, not BIOS
     private static let biosSizeThreshold: UInt64 = 50 * 1024 * 1024
 
     static let biosContentTypes: [UTType] = contentTypes(for: ["bin", "rom"])
     static let gameContentTypes: [UTType] = contentTypes(for: ["iso", "chd", "img", "bin", "cso", "zso", "gz", "elf"])
+    static let pnachContentTypes: [UTType] = contentTypes(for: ["pnach"])
 
     private init() {}
 
@@ -63,6 +66,26 @@ final class FileImportHandler: @unchecked Sendable {
         showImportAlert = true
     }
 
+    @discardableResult
+    func importPNACHURLs(_ urls: [URL], asCheat: Bool = true) -> String {
+        let results = urls.map { importPNACHFile($0, asCheat: asCheat) }
+        let messages = results.map { result -> String in
+            switch result {
+            case .success(let message):
+                return message
+            case .unsupported(let fileName):
+                return "Unsupported: \(fileName)"
+            case .failure(let message):
+                return message
+            }
+        }
+
+        let message = messages.isEmpty ? "No PNACH files imported." : messages.joined(separator: "\n")
+        lastImportMessage = message
+        showImportAlert = true
+        return message
+    }
+
     private enum ImportResult {
         case success(String)
         case unsupported(String)
@@ -75,6 +98,10 @@ final class FileImportHandler: @unchecked Sendable {
 
         let ext = url.pathExtension.lowercased()
         let fileName = url.lastPathComponent
+
+        if preferredDestination == .pnachCheat || (preferredDestination == .automatic && Self.pnachExtensions.contains(ext)) {
+            return importPNACHFile(url, asCheat: true)
+        }
 
         let docsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
 
@@ -134,9 +161,62 @@ final class FileImportHandler: @unchecked Sendable {
         }
     }
 
+    private func importPNACHFile(_ url: URL, asCheat: Bool) -> ImportResult {
+        let accessing = url.startAccessingSecurityScopedResource()
+        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
+
+        let fileName = url.lastPathComponent
+        guard Self.pnachExtensions.contains(url.pathExtension.lowercased()) else {
+            NSLog("[ARMSX2 iOS Import] unsupported PNACH file: %@", fileName)
+            return .unsupported(fileName)
+        }
+
+        guard let destinationPath = ARMSX2Bridge.pnachPathForCurrentGame(asCheat: asCheat), !destinationPath.isEmpty else {
+            return .failure("Boot the target game before importing \(fileName), so ARMSX2 can rename it to Serial_CRC.pnach.")
+        }
+
+        let destinationURL = URL(fileURLWithPath: destinationPath)
+        do {
+            let data = try Data(contentsOf: url)
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
+                return .failure("\(fileName): PNACH must be UTF-8 or ASCII text.")
+            }
+
+            let normalized = Self.normalizedPNACHText(text)
+            try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try FileManager.default.removeItem(at: destinationURL)
+            }
+            try normalized.write(to: destinationURL, atomically: true, encoding: .utf8)
+
+            if asCheat {
+                ARMSX2Bridge.setINIBool("EmuCore", key: "EnableCheats", value: true)
+            }
+            ARMSX2Bridge.reloadPatches()
+
+            NSLog("[ARMSX2 iOS Import] PNACH imported: %@ -> %@", fileName, destinationURL.path)
+            return .success("PNACH imported as \(destinationURL.lastPathComponent)")
+        } catch {
+            NSLog("[ARMSX2 iOS Import] PNACH failed: %@ -> %@ error=%@", fileName, destinationURL.path, error.localizedDescription)
+            return .failure("\(fileName): \(error.localizedDescription)")
+        }
+    }
+
     private static func contentTypes(for extensions: [String]) -> [UTType] {
         extensions.map { ext in
             UTType(filenameExtension: ext) ?? UTType(importedAs: "com.armsx2.\(ext)", conformingTo: .data)
         }
+    }
+
+    private static func normalizedPNACHText(_ text: String) -> String {
+        var normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+
+        if !normalized.hasSuffix("\n") {
+            normalized.append("\n")
+        }
+
+        return normalized
     }
 }

@@ -41,7 +41,10 @@ final class SettingsStore: @unchecked Sendable {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/CPU/Recompiler", key: "EnableVU1", value: vu1Recompiler) }
     }
     var fastBoot: Bool {
-        didSet { ARMSX2Bridge.setINIBool("GameISO", key: "FastBoot", value: fastBoot) }
+        didSet {
+            ARMSX2Bridge.setINIBool("GameISO", key: "FastBoot", value: fastBoot)
+            ARMSX2Bridge.setINIBool("EmuCore", key: "EnableFastBoot", value: fastBoot)
+        }
     }
     var fastmem: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/CPU/Recompiler", key: "EnableFastmem", value: fastmem) }
@@ -74,11 +77,26 @@ final class SettingsStore: @unchecked Sendable {
     var vu1Instant: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "vu1Instant", value: vu1Instant) }
     }
+    var mtvu: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "vuThread", value: mtvu) }
+    }
     var waitLoop: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "WaitLoop", value: waitLoop) }
     }
     var intcStat: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "IntcStat", value: intcStat) }
+    }
+    var enableCheats: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "EnableCheats", value: enableCheats) }
+    }
+    var enablePatches: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "EnablePatches", value: enablePatches) }
+    }
+    var enableWidescreenPatches: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "EnableWideScreenPatches", value: enableWidescreenPatches) }
+    }
+    var enableNoInterlacingPatches: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore", key: "EnableNoInterlacingPatches", value: enableNoInterlacingPatches) }
     }
 
     // ── Graphics ──
@@ -216,8 +234,13 @@ final class SettingsStore: @unchecked Sendable {
         // Advanced Speedhacks
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
         vu1Instant = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vu1Instant", defaultValue: true)
+        mtvu = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vuThread", defaultValue: false)
         waitLoop = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "WaitLoop", defaultValue: true)
         intcStat = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "IntcStat", defaultValue: true)
+        enableCheats = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableCheats", defaultValue: false)
+        enablePatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnablePatches", defaultValue: true)
+        enableWidescreenPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableWideScreenPatches", defaultValue: false)
+        enableNoInterlacingPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableNoInterlacingPatches", defaultValue: false)
         // Graphics
 #if targetEnvironment(macCatalyst)
         renderer = 17
@@ -255,8 +278,6 @@ final class SettingsStore: @unchecked Sendable {
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
         ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
-        // [P60] Force MTVU off (known buggy)
-        ARMSX2Bridge.setINIBool("EmuCore/Speedhacks", key: "vuThread", value: false)
         // Apply OSD preset
         ARMSX2Bridge.applyOsdPreset(Int32(osdPreset.rawValue))
     }
@@ -277,8 +298,13 @@ final class SettingsStore: @unchecked Sendable {
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
         vu1Instant = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vu1Instant", defaultValue: true)
+        mtvu = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vuThread", defaultValue: false)
         waitLoop = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "WaitLoop", defaultValue: true)
         intcStat = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "IntcStat", defaultValue: true)
+        enableCheats = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableCheats", defaultValue: false)
+        enablePatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnablePatches", defaultValue: true)
+        enableWidescreenPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableWideScreenPatches", defaultValue: false)
+        enableNoInterlacingPatches = ARMSX2Bridge.getINIBool("EmuCore", key: "EnableNoInterlacingPatches", defaultValue: false)
 #if targetEnvironment(macCatalyst)
         renderer = 17
         ARMSX2Bridge.setINIInt("EmuCore/GS", key: "Renderer", value: Int32(17))
@@ -365,8 +391,13 @@ final class SettingsStore: @unchecked Sendable {
         fastCDVD = false
         eeCycleRate = 0
         vu1Instant = true
+        mtvu = false
         waitLoop = true
         intcStat = true
+        enableCheats = false
+        enablePatches = true
+        enableWidescreenPatches = false
+        enableNoInterlacingPatches = false
     }
 
     /// Keep EE/IOP/VU0 fast while isolating suspected VU1 JIT regressions.
@@ -376,6 +407,7 @@ final class SettingsStore: @unchecked Sendable {
         vu0Recompiler = true
         vu1Recompiler = false
         vu1Instant = false
+        mtvu = false
         fastmem = false
     }
 
@@ -386,6 +418,7 @@ final class SettingsStore: @unchecked Sendable {
         vu0Recompiler = false
         vu1Recompiler = false
         vu1Instant = false
+        mtvu = false
         fastmem = false
     }
 

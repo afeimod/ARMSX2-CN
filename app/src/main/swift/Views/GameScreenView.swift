@@ -7,9 +7,11 @@ import UIKit
 struct GameScreenView: View {
     @State private var appState = AppState.shared
     @State private var settings = SettingsStore.shared
+    @State private var fileImporter = FileImportHandler.shared
     @State private var padVisible = true
     @State private var fullScreen = false
     @State private var showSaveStates = false
+    @State private var showPNACHImporter = false
     @State private var saveStateStatus: String? = nil
 
     var body: some View {
@@ -50,6 +52,19 @@ struct GameScreenView: View {
         .sheet(isPresented: $showSaveStates) {
             SaveStatesPanel { message in
                 presentSaveStateStatus(message)
+            }
+        }
+        .fileImporter(
+            isPresented: $showPNACHImporter,
+            allowedContentTypes: FileImportHandler.pnachContentTypes,
+            allowsMultipleSelection: true
+        ) { result in
+            switch result {
+            case .success(let urls):
+                let message = fileImporter.importPNACHURLs(urls, asCheat: true)
+                presentSaveStateStatus(message)
+            case .failure(let error):
+                presentSaveStateStatus("PNACH import failed: \(error.localizedDescription)")
             }
         }
         .overlay(alignment: .bottom) {
@@ -96,6 +111,35 @@ struct GameScreenView: View {
             Divider()
             compatibilityLabSection
             if ARMSX2Bridge.hasValidSaveStateGame() {
+                Menu {
+                    Button {
+                        ejectDisc()
+                    } label: {
+                        Label("Eject Disc", systemImage: "eject")
+                    }
+
+                    let discs = availableDiscSwapNames
+                    if discs.isEmpty {
+                        Text("No disc images found")
+                    } else {
+                        ForEach(discs, id: \.self) { discName in
+                            Button {
+                                changeDisc(to: discName)
+                            } label: {
+                                Label(discName, systemImage: "opticaldisc")
+                            }
+                        }
+                    }
+                } label: {
+                    Label("Change Disc", systemImage: "opticaldisc")
+                }
+
+                Button {
+                    showPNACHImporter = true
+                } label: {
+                    Label("Import PNACH Cheat", systemImage: "wand.and.stars")
+                }
+
                 Button {
                     showSaveStates = true
                 } label: {
@@ -198,6 +242,28 @@ struct GameScreenView: View {
             guard saveStateStatus == message else { return }
             withAnimation(.easeIn(duration: 0.18)) {
                 saveStateStatus = nil
+            }
+        }
+    }
+
+    private var availableDiscSwapNames: [String] {
+        ARMSX2Bridge.availableISOs().filter { !$0.lowercased().hasSuffix(".elf") }
+    }
+
+    private func changeDisc(to discName: String) {
+        presentSaveStateStatus("Changing disc...")
+        ARMSX2Bridge.changeDisc(toISO: discName) { success in
+            Task { @MainActor in
+                presentSaveStateStatus(success ? "Disc changed to \(discName)" : "Failed to change disc")
+            }
+        }
+    }
+
+    private func ejectDisc() {
+        presentSaveStateStatus("Ejecting disc...")
+        ARMSX2Bridge.ejectDisc { success in
+            Task { @MainActor in
+                presentSaveStateStatus(success ? "Disc ejected" : "Failed to eject disc")
             }
         }
     }

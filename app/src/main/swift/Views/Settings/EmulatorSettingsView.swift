@@ -153,6 +153,17 @@ struct EmulatorSettingsView: View {
                 Text("Changes take effect on next VM boot.")
             }
 
+            Section("Patches & Cheats") {
+                Toggle("Enable GameDB Patches", isOn: $settings.enablePatches)
+                Toggle("Enable PNACH Cheats", isOn: $settings.enableCheats)
+                Toggle("Widescreen Patches", isOn: $settings.enableWidescreenPatches)
+                Toggle("No-Interlacing Patches", isOn: $settings.enableNoInterlacingPatches)
+
+                Text("PNACH cheats imported from the in-game quick menu are renamed to the current game's Serial_CRC.pnach and automatically enable PNACH cheats.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Stepper("EE Cycle Rate: \(settings.eeCycleRate)", value: $settings.eeCycleRate, in: -3...3)
                 Text("0 = Default. Negative = underclock (stable). Positive = overclock (fast but risky).")
@@ -161,10 +172,11 @@ struct EmulatorSettingsView: View {
 
                 Toggle("Fast CDVD", isOn: $settings.fastCDVD)
                 Toggle("VU1 Instant", isOn: $settings.vu1Instant)
+                Toggle("MTVU", isOn: $settings.mtvu)
                 Toggle("Wait Loop Detection", isOn: $settings.waitLoop)
                 Toggle("INTC Stat Hack", isOn: $settings.intcStat)
 
-                Text("These are recommended compatibility defaults. Disable only if a specific game has issues.")
+                Text("VU1 Instant and MTVU are independent now. MTVU can help some games, but keep it off unless a game specifically benefits on iOS.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {

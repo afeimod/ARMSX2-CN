@@ -57,6 +57,14 @@ private let helpData: [HelpSection] = [
             answer: "Keeps gameplay near the selected FPS target. Turning it off uses the same unlimited-speed style setting as ARMSX2 Android, which is useful for testing but can make games run too fast."
         ),
         HelpItem(
+            question: "Patches and cheats",
+            answer: "Enable GameDB patches for built-in compatibility fixes. PNACH cheats can be imported from the in-game quick menu; ARMSX2 iOS renames them to the current game's Serial_CRC.pnach and keeps // comments compatible with the core parser."
+        ),
+        HelpItem(
+            question: "Memory cards",
+            answer: "The Memory Cards settings page can create 8 MB, 16 MB, 32 MB, 64 MB, or folder memory cards, then assign them to Slot 1 or Slot 2. Slot changes apply on next boot."
+        ),
+        HelpItem(
             question: "VSync Queue Size",
             answer: "Number of pre-rendered frames. Higher values reduce frame drops but increase input latency. Default: 8."
         ),
@@ -74,6 +82,7 @@ private let helpData: [HelpSection] = [
     HelpSection(title: "Supported Formats", icon: "doc.circle", items: [
         HelpItem(question: "Game formats", answer: "ISO, CHD, IMG, BIN, CSO, ZSO, GZ, ELF"),
         HelpItem(question: "BIOS formats", answer: "BIN, ROM (dumped from your own PS2)"),
+        HelpItem(question: "Disc swapping", answer: "During gameplay, open the quick menu and choose Change Disc. ARMSX2 iOS can eject the current disc or switch to any imported ISO/CHD/IMG/BIN/CSO/ZSO/GZ disc image."),
         HelpItem(
             question: "Game covers",
             answer: "Games default to a cover grid, with a toolbar button to switch back to list view. Open the Covers menu in Games to import local images, download missing covers, or edit the online Cover Source template. Templates support ${serial}, ${title}, and ${filetitle}; the default example is https://raw.githubusercontent.com/xlenore/ps2-covers/main/covers/default/${serial}.jpg. ARMSX2 iOS scans Documents/armsx2_covers, Documents/covers, the game folder, and Documents for JPG, PNG, WebP, HEIC, or HEIF images named after the game file, file stem, game title, or serial-like names such as SLUS-20312. This also works for CHD games when metadata can be resolved."
