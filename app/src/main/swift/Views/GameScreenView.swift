@@ -181,6 +181,13 @@ struct GameScreenView: View {
                     Label("Speed / FPS Target", systemImage: "speedometer")
                 }
 
+                Button {
+                    ARMSX2Bridge.testControllerRumble()
+                    presentSaveStateStatus("Controller rumble test sent")
+                } label: {
+                    Label("Test Controller Rumble", systemImage: "waveform.path")
+                }
+
                 Menu {
                     Button {
                         ejectDisc()

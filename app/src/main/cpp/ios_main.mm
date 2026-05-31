@@ -763,11 +763,15 @@ const int s_defaultMap[16] = {
     SDL_GAMEPAD_BUTTON_LEFT_STICK, SDL_GAMEPAD_BUTTON_RIGHT_STICK,
 };
 
-static SDL_Gamepad* s_gamepad = nullptr;
-static std::atomic<u32> s_pendingGamepadRumble{0};
-static u32 s_appliedGamepadRumble = 0xffffffffu;
+static constexpr u32 ARMSX2_MAX_IOS_GAMEPADS = 4;
+static SDL_Gamepad* s_gamepads[ARMSX2_MAX_IOS_GAMEPADS] = {};
+static std::atomic<u32> s_pendingGamepadRumble[ARMSX2_MAX_IOS_GAMEPADS];
+static u32 s_appliedGamepadRumble[ARMSX2_MAX_IOS_GAMEPADS] = {0xffffffffu, 0xffffffffu, 0xffffffffu, 0xffffffffu};
 static bool s_loggedGamepadRumbleFailure = false;
 static bool s_loggedSDLGamepadRumble = false;
+static std::atomic<u32> s_loggedPadRumbleCommandCount{0};
+static std::atomic<u32> s_loggedIgnoredPadRumbleCount{0};
+static bool s_loggedMultitapRestartNeeded = false;
 static constexpr u32 ARMSX2_GAMEPAD_RUMBLE_DURATION_MS = 65535;
 
 static GCController* s_nativeHapticController = nil;
@@ -776,6 +780,143 @@ static id<CHHapticAdvancedPatternPlayer> s_nativeHapticPlayer = nil;
 static u32 s_nativeAppliedGamepadRumble = 0xffffffffu;
 static bool s_loggedNativeGamepadRumbleReady = false;
 static bool s_loggedNativeGamepadRumbleUnavailable = false;
+
+enum class ARMSX2IOSMultitapMode : int
+{
+    Auto = 0,
+    Disabled = 1,
+    Port1 = 2,
+    Port2 = 3,
+    Both = 4,
+};
+
+static ARMSX2IOSMultitapMode ARMSX2GetIOSMultitapMode()
+{
+    if (!s_settings_interface)
+        return ARMSX2IOSMultitapMode::Auto;
+
+    const int value = s_settings_interface->GetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
+    switch (value)
+    {
+        case 1:
+            return ARMSX2IOSMultitapMode::Disabled;
+        case 2:
+            return ARMSX2IOSMultitapMode::Port1;
+        case 3:
+            return ARMSX2IOSMultitapMode::Port2;
+        case 4:
+            return ARMSX2IOSMultitapMode::Both;
+        default:
+            return ARMSX2IOSMultitapMode::Auto;
+    }
+}
+
+static const char* ARMSX2IOSMultitapModeName(ARMSX2IOSMultitapMode mode)
+{
+    switch (mode)
+    {
+        case ARMSX2IOSMultitapMode::Disabled:
+            return "Disabled";
+        case ARMSX2IOSMultitapMode::Port1:
+            return "Port 1";
+        case ARMSX2IOSMultitapMode::Port2:
+            return "Port 2";
+        case ARMSX2IOSMultitapMode::Both:
+            return "Port 1 + Port 2";
+        case ARMSX2IOSMultitapMode::Auto:
+        default:
+            return "Auto";
+    }
+}
+
+static bool ARMSX2IOSMultitapUsesPort1(ARMSX2IOSMultitapMode mode, u32 detected_controllers)
+{
+    switch (mode)
+    {
+        case ARMSX2IOSMultitapMode::Auto:
+            return detected_controllers > 2;
+        case ARMSX2IOSMultitapMode::Port1:
+        case ARMSX2IOSMultitapMode::Both:
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool ARMSX2IOSMultitapUsesPort2(ARMSX2IOSMultitapMode mode)
+{
+    return mode == ARMSX2IOSMultitapMode::Port2 || mode == ARMSX2IOSMultitapMode::Both;
+}
+
+static bool ARMSX2IOSMapsPort1Multitap(ARMSX2IOSMultitapMode mode)
+{
+    if (mode == ARMSX2IOSMultitapMode::Auto)
+        return EmuConfig.Pad.MultitapPort0_Enabled;
+
+    return mode == ARMSX2IOSMultitapMode::Port1 || mode == ARMSX2IOSMultitapMode::Both;
+}
+
+static bool ARMSX2IOSMapsPort2Multitap(ARMSX2IOSMultitapMode mode)
+{
+    if (mode == ARMSX2IOSMultitapMode::Auto)
+        return false;
+
+    return ARMSX2IOSMultitapUsesPort2(mode);
+}
+
+static void ARMSX2EnsureIOSPadType(u32 unified_slot)
+{
+    if (!s_settings_interface || unified_slot >= Pad::NUM_CONTROLLER_PORTS)
+        return;
+
+    const std::string section = Pad::GetConfigSection(unified_slot);
+    const std::string type = s_settings_interface->GetStringValue(section.c_str(), "Type", "");
+    if (type.empty() || type == "None" || type == "NotConnected")
+        s_settings_interface->SetStringValue(section.c_str(), "Type", "DualShock2");
+}
+
+static u32 ARMSX2DetectedSDLGamepadCount()
+{
+    SDL_UpdateGamepads();
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    SDL_free(ids);
+    return static_cast<u32>(std::max(count, 0));
+}
+
+static void ARMSX2ApplyIOSMultitapConfig(const char* reason)
+{
+    if (!s_settings_interface)
+        return;
+
+    const ARMSX2IOSMultitapMode mode = ARMSX2GetIOSMultitapMode();
+    const u32 detected = ARMSX2DetectedSDLGamepadCount();
+    const bool port1 = ARMSX2IOSMultitapUsesPort1(mode, detected);
+    const bool port2 = ARMSX2IOSMultitapUsesPort2(mode);
+
+    s_settings_interface->SetBoolValue("Pad", "MultitapPort1", port1);
+    s_settings_interface->SetBoolValue("Pad", "MultitapPort2", port2);
+    EmuConfig.Pad.MultitapPort0_Enabled = port1;
+    EmuConfig.Pad.MultitapPort1_Enabled = port2;
+    s_loggedMultitapRestartNeeded = false;
+
+    for (u32 controller = 0; controller < std::min<u32>(detected, ARMSX2_MAX_IOS_GAMEPADS); controller++) {
+        u32 unified_slot = controller;
+        if (port1) {
+            unified_slot = (controller == 0) ? 0 : controller + 1;
+        } else if (port2) {
+            unified_slot = (controller <= 1) ? controller : controller + 3;
+        } else if (controller > 1) {
+            continue;
+        }
+
+        ARMSX2EnsureIOSPadType(unified_slot);
+    }
+
+    s_settings_interface->Save();
+    Console.WriteLn("[ARMSX2 iOS Gamepad] Multitap mode=%s detected=%u port1=%d port2=%d reason=%s",
+        ARMSX2IOSMultitapModeName(mode), detected, port1 ? 1 : 0, port2 ? 1 : 0, reason ? reason : "unknown");
+}
 
 static u32 ARMSX2PackGamepadRumble(float large_intensity, float small_intensity)
 {
@@ -794,12 +935,82 @@ static float ARMSX2RumbleSmallIntensity(u32 packed)
     return static_cast<float>(packed & 0xffffu) / 65535.0f;
 }
 
+static u32 ARMSX2ConnectedGamepadCount()
+{
+    u32 count = 0;
+    for (SDL_Gamepad* gamepad : s_gamepads)
+    {
+        if (gamepad && SDL_GamepadConnected(gamepad))
+            count++;
+    }
+    return count;
+}
+
+static u32 ARMSX2PadSlotForGamepadIndex(u32 gamepad_index)
+{
+    if (gamepad_index == 0)
+        return 0;
+
+    const ARMSX2IOSMultitapMode mode = ARMSX2GetIOSMultitapMode();
+
+    // Two controllers should behave like normal PS2 ports 1/2. Three or four
+    // controllers default to Port 1 multitap, which maps to 1A/1B/1C/1D.
+    if (ARMSX2IOSMapsPort1Multitap(mode))
+        return gamepad_index + 1;
+
+    // Port 2 multitap is an escape hatch for games that look there instead:
+    // controller 2 remains 2A, controller 3/4 become 2B/2C.
+    if (ARMSX2IOSMapsPort2Multitap(mode)) {
+        if (gamepad_index == 1)
+            return 1;
+        return gamepad_index + 3;
+    }
+
+    return (gamepad_index <= 1) ? gamepad_index : 0xffffffffu;
+}
+
+static int ARMSX2GamepadIndexForPadSlot(u32 pad_index)
+{
+    if (pad_index == 0)
+        return 0;
+
+    const ARMSX2IOSMultitapMode mode = ARMSX2GetIOSMultitapMode();
+    if (ARMSX2IOSMapsPort1Multitap(mode)) {
+        if (pad_index >= 2 && pad_index <= 4)
+            return static_cast<int>(pad_index - 1);
+        return -1;
+    }
+
+    if (ARMSX2IOSMapsPort2Multitap(mode)) {
+        if (pad_index == 1)
+            return 1;
+        if (pad_index >= 5 && pad_index <= 6)
+            return static_cast<int>(pad_index - 3);
+        return -1;
+    }
+
+    return (pad_index == 1) ? 1 : -1;
+}
+
 extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity)
 {
-    if (pad_index != 0)
+    const int gamepad_index = ARMSX2GamepadIndexForPadSlot(pad_index);
+    if (gamepad_index < 0 || static_cast<u32>(gamepad_index) >= ARMSX2_MAX_IOS_GAMEPADS) {
+        const u32 count = s_loggedIgnoredPadRumbleCount.fetch_add(1, std::memory_order_relaxed);
+        if (count < 4)
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Ignoring rumble for unmapped pad=%u large=%.3f small=%.3f", pad_index, large_intensity, small_intensity);
         return;
+    }
 
-    s_pendingGamepadRumble.store(ARMSX2PackGamepadRumble(large_intensity, small_intensity), std::memory_order_relaxed);
+    const u32 packed = ARMSX2PackGamepadRumble(large_intensity, small_intensity);
+    if (packed != 0) {
+        const u32 count = s_loggedPadRumbleCommandCount.fetch_add(1, std::memory_order_relaxed);
+        if (count < 12)
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Queued rumble pad=%u controller=%d large=%.3f small=%.3f",
+                pad_index, gamepad_index + 1, large_intensity, small_intensity);
+    }
+
+    s_pendingGamepadRumble[gamepad_index].store(packed, std::memory_order_relaxed);
 }
 
 static void ARMSX2StopNativeGamepadRumbleOnMain()
@@ -858,7 +1069,7 @@ static bool ARMSX2EnsureNativeGamepadRumbleOnMain(float intensity, float sharpne
     }
 
     if (!s_nativeHapticEngine) {
-        s_nativeHapticEngine = [controller.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+        s_nativeHapticEngine = [controller.haptics createEngineWithLocality:GCHapticsLocalityAll];
         if (!s_nativeHapticEngine) {
             if (!s_loggedNativeGamepadRumbleUnavailable) {
                 Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine creation failed");
@@ -957,32 +1168,245 @@ static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
         s_nativeAppliedGamepadRumble = packed;
 }
 
-static void ARMSX2ApplyPendingGamepadRumble()
+static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
 {
-    const u32 packed = s_pendingGamepadRumble.load(std::memory_order_relaxed);
-    if (packed == s_appliedGamepadRumble)
+    if (gamepad_index >= ARMSX2_MAX_IOS_GAMEPADS)
+        return;
+
+    const u32 packed = s_pendingGamepadRumble[gamepad_index].load(std::memory_order_relaxed);
+    if (packed == s_appliedGamepadRumble[gamepad_index])
         return;
 
     const u16 large = static_cast<u16>((packed >> 16) & 0xffffu);
     const u16 small = static_cast<u16>(packed & 0xffffu);
 
-    if (s_gamepad) {
-        if (SDL_RumbleGamepad(s_gamepad, large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS)) {
+    if (s_gamepads[gamepad_index]) {
+        if (SDL_RumbleGamepad(s_gamepads[gamepad_index], large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS)) {
             if (!s_loggedSDLGamepadRumble) {
                 Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble accepted");
                 s_loggedSDLGamepadRumble = true;
             }
         } else if (!s_loggedGamepadRumbleFailure) {
-            Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble unavailable: %s", SDL_GetError());
+            Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller %u rumble unavailable: %s", gamepad_index + 1, SDL_GetError());
             s_loggedGamepadRumbleFailure = true;
         }
     }
 
+    if (gamepad_index == 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
+        });
+    }
+
+    s_appliedGamepadRumble[gamepad_index] = packed;
+}
+
+extern "C" void ARMSX2_iOSTestGamepadRumble(void)
+{
+    Console.WriteLn("[ARMSX2 iOS Gamepad] Test controller rumble requested");
+
+    SDL_UpdateGamepads();
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    if (ids) {
+        for (int id_index = 0; id_index < count; id_index++) {
+            bool already_open = false;
+            for (SDL_Gamepad* gamepad : s_gamepads) {
+                if (gamepad && SDL_GetGamepadID(gamepad) == ids[id_index]) {
+                    already_open = true;
+                    break;
+                }
+            }
+            if (already_open)
+                continue;
+
+            for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+                if (!s_gamepads[slot]) {
+                    s_gamepads[slot] = SDL_OpenGamepad(ids[id_index]);
+                    break;
+                }
+            }
+        }
+        SDL_free(ids);
+    }
+
+    bool anySDLGamepad = false;
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+        if (!s_gamepads[slot])
+            continue;
+
+        anySDLGamepad = true;
+        const bool ok = SDL_RumbleGamepad(s_gamepads[slot], 0xffff, 0xffff, 500);
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL controller %u rumble %s%s%s",
+            slot + 1, ok ? "accepted" : "failed", ok ? "" : ": ", ok ? "" : SDL_GetError());
+    }
+    if (!anySDLGamepad)
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL rumble skipped: no SDL gamepad open");
+
+    const u32 packed = ARMSX2PackGamepadRumble(1.0f, 1.0f);
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+        s_pendingGamepadRumble[slot].store(packed, std::memory_order_relaxed);
+        s_appliedGamepadRumble[slot] = 0xffffffffu;
+    }
+
     dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<GCController*>* controllers = [GCController controllers];
+        NSUInteger hapticCount = 0;
+        for (GCController* controller in controllers) {
+            if (controller.haptics)
+                hapticCount++;
+        }
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Test native controllers=%lu haptics=%lu",
+            static_cast<unsigned long>(controllers.count), static_cast<unsigned long>(hapticCount));
+        s_nativeAppliedGamepadRumble = 0xffffffffu;
         ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
     });
 
-    s_appliedGamepadRumble = packed;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(0.55 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+            if (s_gamepads[slot])
+                SDL_RumbleGamepad(s_gamepads[slot], 0, 0, 0);
+            s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
+            s_appliedGamepadRumble[slot] = 0xffffffffu;
+        }
+        s_nativeAppliedGamepadRumble = 0xffffffffu;
+        ARMSX2ApplyNativeGamepadRumbleOnMain(0);
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Test controller rumble stopped");
+    });
+}
+
+static void ARMSX2RefreshIOSGamepads()
+{
+    SDL_UpdateGamepads();
+
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+        SDL_Gamepad* gamepad = s_gamepads[slot];
+        if (!gamepad)
+            continue;
+
+        if (!SDL_GamepadConnected(gamepad)) {
+            Console.WriteLn("[Files] MFi gamepad %u disconnected", slot + 1);
+            s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
+            s_appliedGamepadRumble[slot] = 0xffffffffu;
+            if (slot == 0) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ARMSX2ResetNativeGamepadRumbleOnMain();
+                });
+            }
+            SDL_CloseGamepad(gamepad);
+            s_gamepads[slot] = nullptr;
+        }
+    }
+
+    int count = 0;
+    SDL_JoystickID* ids = SDL_GetGamepads(&count);
+    if (!ids)
+        return;
+
+    for (int id_index = 0; id_index < count; id_index++) {
+        bool already_open = false;
+        for (SDL_Gamepad* gamepad : s_gamepads) {
+            if (gamepad && SDL_GetGamepadID(gamepad) == ids[id_index]) {
+                already_open = true;
+                break;
+            }
+        }
+        if (already_open)
+            continue;
+
+        for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+            if (s_gamepads[slot])
+                continue;
+
+            s_gamepads[slot] = SDL_OpenGamepad(ids[id_index]);
+            if (s_gamepads[slot]) {
+                const u32 pad_slot = ARMSX2PadSlotForGamepadIndex(slot);
+                if (pad_slot == 0xffffffffu || pad_slot >= Pad::NUM_CONTROLLER_PORTS) {
+                    Console.WriteLn("[Files] MFi gamepad %u connected but ignored by current multitap mode: %s",
+                        slot + 1, SDL_GetGamepadName(s_gamepads[slot]));
+                } else {
+                    Console.WriteLn("[Files] MFi gamepad %u connected to PS2 pad slot %u: %s",
+                        slot + 1, pad_slot + 1, SDL_GetGamepadName(s_gamepads[slot]));
+                }
+                if (!s_loggedMultitapRestartNeeded && s_vmThreadActive.load() &&
+                    ARMSX2GetIOSMultitapMode() == ARMSX2IOSMultitapMode::Auto &&
+                    ARMSX2ConnectedGamepadCount() > 2 && !EmuConfig.Pad.MultitapPort0_Enabled) {
+                    Console.Warning("[ARMSX2 iOS Gamepad] 3+ controllers connected after boot; restart/reset with controllers connected to enable multitap.");
+                    s_loggedMultitapRestartNeeded = true;
+                }
+            }
+            break;
+        }
+    }
+
+    SDL_free(ids);
+}
+
+static bool ARMSX2ShouldPreserveTouchState(u32 ps2_button, bool preserve_touch)
+{
+    return preserve_touch && ps2_button < (sizeof(g_touchPadState) / sizeof(g_touchPadState[0])) && g_touchPadState[ps2_button];
+}
+
+static void ARMSX2ApplyIOSGamepadInput(SDL_Gamepad* gamepad, PadBase* pad, bool preserve_touch)
+{
+    if (!gamepad || !pad)
+        return;
+
+    if (s_captureMode.load()) {
+        for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++) {
+            if (SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(b))) {
+                s_capturedButton.store(b);
+                break;
+            }
+        }
+    }
+
+    static const u32 ps2Buttons[] = {
+        PadDualshock2::Inputs::PAD_UP, PadDualshock2::Inputs::PAD_DOWN,
+        PadDualshock2::Inputs::PAD_LEFT, PadDualshock2::Inputs::PAD_RIGHT,
+        PadDualshock2::Inputs::PAD_CROSS, PadDualshock2::Inputs::PAD_CIRCLE,
+        PadDualshock2::Inputs::PAD_SQUARE, PadDualshock2::Inputs::PAD_TRIANGLE,
+        PadDualshock2::Inputs::PAD_L1, PadDualshock2::Inputs::PAD_R1,
+        0, 0, // L2/R2 handled as analog
+        PadDualshock2::Inputs::PAD_START, PadDualshock2::Inputs::PAD_SELECT,
+        PadDualshock2::Inputs::PAD_L3, PadDualshock2::Inputs::PAD_R3,
+    };
+
+    for (int i = 0; i < 16; i++) {
+        const int sdlBtn = s_buttonMap[i];
+        if (sdlBtn < 0)
+            continue;
+
+        const bool pressed = SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(sdlBtn));
+        if (pressed)
+            pad->Set(ps2Buttons[i], 1.0f);
+        else if (!ARMSX2ShouldPreserveTouchState(ps2Buttons[i], preserve_touch))
+            pad->Set(ps2Buttons[i], 0.0f);
+    }
+
+    const float l2 = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0f;
+    const float r2 = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 32767.0f;
+    if (l2 > 0.1f || !ARMSX2ShouldPreserveTouchState(PadDualshock2::Inputs::PAD_L2, preserve_touch))
+        pad->Set(PadDualshock2::Inputs::PAD_L2, l2 > 0.1f ? l2 : 0.0f);
+    if (r2 > 0.1f || !ARMSX2ShouldPreserveTouchState(PadDualshock2::Inputs::PAD_R2, preserve_touch))
+        pad->Set(PadDualshock2::Inputs::PAD_R2, r2 > 0.1f ? r2 : 0.0f);
+
+    auto axis = [&](SDL_GamepadAxis a) -> float {
+        const float v = SDL_GetGamepadAxis(gamepad, a) / 32767.0f;
+        return (v > 0.15f || v < -0.15f) ? v : 0.0f;
+    };
+    const float lx = axis(SDL_GAMEPAD_AXIS_LEFTX);
+    const float ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
+    const float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX);
+    const float ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
+    pad->Set(PadDualshock2::Inputs::PAD_L_RIGHT, lx > 0 ? lx : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_L_LEFT,  lx < 0 ? -lx : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_L_DOWN,  ly > 0 ? ly : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_L_UP,    ly < 0 ? -ly : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_R_RIGHT, rx > 0 ? rx : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_R_LEFT,  rx < 0 ? -rx : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_R_DOWN,  ry > 0 ? ry : 0.0f);
+    pad->Set(PadDualshock2::Inputs::PAD_R_UP,    ry < 0 ? -ry : 0.0f);
 }
 
 // View controller references for background color switching
@@ -1219,84 +1643,22 @@ namespace Host
 
         // MFi / External gamepad support via SDL3
         {
-            // Auto-detect: open first available gamepad if not already open
-            if (!s_gamepad) {
-                int count = 0;
-                SDL_JoystickID* ids = SDL_GetGamepads(&count);
-                if (ids && count > 0) {
-                    s_gamepad = SDL_OpenGamepad(ids[0]);
-                    if (s_gamepad)
-                        Console.WriteLn("[Files] MFi gamepad connected: %s", SDL_GetGamepadName(s_gamepad));
-                }
-                SDL_free(ids);
-            }
-            // Handle disconnect
-            if (s_gamepad && !SDL_GamepadConnected(s_gamepad)) {
-                Console.WriteLn("[Files] MFi gamepad disconnected");
-                s_pendingGamepadRumble.store(0, std::memory_order_relaxed);
-                s_appliedGamepadRumble = 0xffffffffu;
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    ARMSX2ResetNativeGamepadRumbleOnMain();
-                });
-                SDL_CloseGamepad(s_gamepad);
-                s_gamepad = nullptr;
-            }
-            if (s_gamepad) {
-                SDL_UpdateGamepads();
-                ARMSX2ApplyPendingGamepadRumble();
-                // Capture mode: detect any pressed button for remapping UI
-                if (s_captureMode.load()) {
-                    for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT; b++) {
-                        if (SDL_GetGamepadButton(s_gamepad, (SDL_GamepadButton)b)) {
-                            s_capturedButton.store(b);
-                            break;
-                        }
-                    }
-                }
-// Use configurable mapping table
-                static const u32 ps2Buttons[] = {
-                    PadDualshock2::Inputs::PAD_UP, PadDualshock2::Inputs::PAD_DOWN,
-                    PadDualshock2::Inputs::PAD_LEFT, PadDualshock2::Inputs::PAD_RIGHT,
-                    PadDualshock2::Inputs::PAD_CROSS, PadDualshock2::Inputs::PAD_CIRCLE,
-                    PadDualshock2::Inputs::PAD_SQUARE, PadDualshock2::Inputs::PAD_TRIANGLE,
-                    PadDualshock2::Inputs::PAD_L1, PadDualshock2::Inputs::PAD_R1,
-                    0, 0, // L2/R2 handled as analog
-                    PadDualshock2::Inputs::PAD_START, PadDualshock2::Inputs::PAD_SELECT,
-                    PadDualshock2::Inputs::PAD_L3, PadDualshock2::Inputs::PAD_R3,
-                };
-                for (int i = 0; i < 16; i++) {
-                    int sdlBtn = s_buttonMap[i];
-                    if (sdlBtn < 0) continue; // analog trigger
-                    bool pressed = SDL_GetGamepadButton(s_gamepad, (SDL_GamepadButton)sdlBtn);
-                    if (pressed)
-                        pad->Set(ps2Buttons[i], 1.0f);
-                    else if (!g_touchPadState[ps2Buttons[i]])
-                        pad->Set(ps2Buttons[i], 0.0f);
-                }
-                // L2/R2 triggers (analog)
-                float l2 = SDL_GetGamepadAxis(s_gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0f;
-                float r2 = SDL_GetGamepadAxis(s_gamepad, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER) / 32767.0f;
-                if (l2 > 0.1f || !g_touchPadState[PadDualshock2::Inputs::PAD_L2])
-                    pad->Set(PadDualshock2::Inputs::PAD_L2, l2 > 0.1f ? l2 : 0.0f);
-                if (r2 > 0.1f || !g_touchPadState[PadDualshock2::Inputs::PAD_R2])
-                    pad->Set(PadDualshock2::Inputs::PAD_R2, r2 > 0.1f ? r2 : 0.0f);
-                // Analog sticks
-                auto axis = [&](SDL_GamepadAxis a) -> float {
-                    float v = SDL_GetGamepadAxis(s_gamepad, a) / 32767.0f;
-                    return (v > 0.15f || v < -0.15f) ? v : 0.0f; // deadzone
-                };
-                float lx = axis(SDL_GAMEPAD_AXIS_LEFTX);
-                float ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
-                float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX);
-                float ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
-                pad->Set(PadDualshock2::Inputs::PAD_L_RIGHT, lx > 0 ? lx : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_L_LEFT,  lx < 0 ? -lx : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_L_DOWN,  ly > 0 ? ly : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_L_UP,    ly < 0 ? -ly : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_R_RIGHT, rx > 0 ? rx : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_R_LEFT,  rx < 0 ? -rx : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_R_DOWN,  ry > 0 ? ry : 0.0f);
-                pad->Set(PadDualshock2::Inputs::PAD_R_UP,    ry < 0 ? -ry : 0.0f);
+            ARMSX2RefreshIOSGamepads();
+            for (u32 gamepad_index = 0; gamepad_index < ARMSX2_MAX_IOS_GAMEPADS; gamepad_index++) {
+                SDL_Gamepad* gamepad = s_gamepads[gamepad_index];
+                if (!gamepad)
+                    continue;
+
+                const u32 pad_slot = ARMSX2PadSlotForGamepadIndex(gamepad_index);
+                if (pad_slot == 0xffffffffu || pad_slot >= Pad::NUM_CONTROLLER_PORTS)
+                    continue;
+
+                PadBase* gamepad_pad = Pad::GetPad(static_cast<u8>(pad_slot));
+                if (!gamepad_pad)
+                    continue;
+
+                ARMSX2ApplyPendingGamepadRumble(gamepad_index);
+                ARMSX2ApplyIOSGamepadInput(gamepad, gamepad_pad, gamepad_index == 0);
             }
         }
 
@@ -1779,6 +2141,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             // RetroAchievements
             s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
             s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
+
+            // iOS controller defaults.
+            s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
             
             Console.WriteLn("@@CFG_DEFAULTS@@ created=1 CoreType=0 UseArm64Dynarec=false EnableEE=1");
             s_settings_interface->Save();
@@ -1805,7 +2170,11 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode")) {
         s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
     }
+    if (!s_settings_interface->ContainsValue("ARMSX2iOS/Gamepad", "MultitapMode")) {
+        s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
+    }
     ARMSX2SanitizeFrameLimiterConfig("scene-connect");
+    ARMSX2ApplyIOSMultitapConfig("scene-connect");
     s_settings_interface->Save();
     [self checkAndConfigureBIOS];
 
@@ -1908,6 +2277,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                                                        queue:nil
                                                   usingBlock:^(NSNotification * _Nonnull note) {
         Console.WriteLn("[UI] VM boot requested from UI (rootVC=%p)", s_rootVC);
+        ARMSX2ApplyIOSMultitapConfig("boot-request");
         if (s_rootVC) s_rootVC.view.backgroundColor = [UIColor blackColor];
 #if TARGET_OS_SIMULATOR
         [self startVMThread];

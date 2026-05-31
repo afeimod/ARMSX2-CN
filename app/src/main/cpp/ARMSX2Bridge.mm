@@ -43,6 +43,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 extern INISettingsInterface* g_p44_settings_interface;
 extern "C" void ARMSX2_PrepareGameRenderViewForCurrentRenderer(const char* reason);
 extern "C" void ARMSX2_PostRuntimeMenuStateChanged(void);
+extern "C" void ARMSX2_iOSTestGamepadRumble(void);
 
 static NSDate* s_lastNVMSaveDate = nil;
 
@@ -1496,6 +1497,10 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         NSLog(@"[ARMSX2Bridge] Reset VM requested");
         VMManager::Reset();
     }, false);
+}
+
++ (void)testControllerRumble {
+    ARMSX2_iOSTestGamepadRumble();
 }
 
 #pragma mark - Save states

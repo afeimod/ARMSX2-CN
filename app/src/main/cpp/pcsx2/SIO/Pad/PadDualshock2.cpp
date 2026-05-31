@@ -265,6 +265,14 @@ u8 PadDualshock2::Poll(u8 commandByte)
 #endif
 #if defined(__APPLE__) && TARGET_OS_IOS
 			ARMSX2_iOSUpdatePadVibration(this->unifiedSlot, large_intensity, small_intensity);
+			static u32 s_ios_rumble_log_count = 0;
+			if ((large_intensity > 0.01f || small_intensity > 0.01f) && s_ios_rumble_log_count < 12)
+			{
+				Console.WriteLn("[ARMSX2 iOS Gamepad] DS2 rumble command pad=%u large=%.3f small=%.3f rawLarge=%u rawSmall=%u",
+					this->unifiedSlot, large_intensity, small_intensity, static_cast<unsigned>(largeMotor),
+					static_cast<unsigned>(smallMotor));
+				s_ios_rumble_log_count++;
+			}
 #endif
 
 			// PS1 mode: If the controller is still in digital mode, it is time to stop acknowledging.

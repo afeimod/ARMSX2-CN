@@ -25,6 +25,14 @@ private let ps2Buttons: [PS2Button] = [
     PS2Button(id: 15, name: "R3"),
 ]
 
+private let multitapModes: [(id: Int, title: String)] = [
+    (0, "Auto (3+ Controllers)"),
+    (1, "Disabled"),
+    (2, "Port 1 Multitap"),
+    (3, "Port 2 Multitap"),
+    (4, "Port 1 + Port 2 Multitap"),
+]
+
 // SDL_GamepadButton → display name (matches SDL3 enum order)
 private func sdlButtonName(_ idx: Int) -> String {
     switch idx {
@@ -57,6 +65,25 @@ struct GamepadSettingsView: View {
 
     var body: some View {
         Form {
+            Section {
+                Picker("Multitap Mode", selection: $settings.controllerMultitapMode) {
+                    ForEach(multitapModes, id: \.id) { mode in
+                        Text(mode.title).tag(mode.id)
+                    }
+                }
+
+                HStack {
+                    Text("Current Mode")
+                    Spacer()
+                    Text(multitapModes.first(where: { $0.id == settings.controllerMultitapMode })?.title ?? "Auto")
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("Local Multiplayer")
+            } footer: {
+                Text("Auto enables Console Port 1 multitap only when 3 or more controllers are detected before boot. Manual modes take effect on the next boot/reset.")
+            }
+
             Section {
                 ForEach(ps2Buttons) { btn in
                     mappingRow(btn)
