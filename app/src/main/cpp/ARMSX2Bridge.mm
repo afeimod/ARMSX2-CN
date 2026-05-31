@@ -865,6 +865,20 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     return result;
 }
 
++ (nullable NSString *)currentGameISOName {
+    if (VMManager::HasValidVM()) {
+        const std::string discPath = VMManager::GetDiscPath();
+        if (!discPath.empty()) {
+            NSString *fileName = ARMSX2NSStringFromStringView(Path::GetFileName(discPath));
+            if (fileName.length > 0)
+                return fileName;
+        }
+    }
+
+    NSString *currentPath = [self currentISOPath];
+    return currentPath.length > 0 ? currentPath.lastPathComponent : nil;
+}
+
 + (nonnull NSString *)isoDirectory {
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *isoDir = [docsPath stringByAppendingPathComponent:@"iso"];

@@ -341,12 +341,20 @@ struct GameScreenView: View {
             return gameName
         }
 
+        if let gameName = normalizedRuntimeGameName(ARMSX2Bridge.currentGameISOName()) {
+            return gameName
+        }
+
         if let gameName = normalizedRuntimeGameName(ARMSX2Bridge.currentISOPath()) {
             return gameName
         }
 
         let bootISO = ARMSX2Bridge.getINIString("GameISO", key: "BootISO", defaultValue: "")
-        return normalizedRuntimeGameName(bootISO)
+        if let gameName = normalizedRuntimeGameName(bootISO) {
+            return gameName
+        }
+
+        return gameNameMatchingRuntimeIdentity()
     }
 
     private func normalizedRuntimeGameName(_ value: String?) -> String? {
@@ -364,6 +372,36 @@ struct GameScreenView: View {
         }
 
         return fileName
+    }
+
+    private func gameNameMatchingRuntimeIdentity() -> String? {
+        let identity = normalizedRuntimeIdentity(ARMSX2Bridge.compatibilityIdentityForCurrentGame())
+        guard !identity.isEmpty else {
+            return nil
+        }
+
+        for gameName in ARMSX2Bridge.availableISOs() {
+            let metadata = ARMSX2Bridge.gameMetadata(forISO: gameName)
+            let serial = normalizedRuntimeIdentity(metadata["serial"])
+            if !serial.isEmpty && serial == identity {
+                return gameName
+            }
+
+            if let crc = metadata["crc"]?.trimmingCharacters(in: .whitespacesAndNewlines).uppercased(),
+               !crc.isEmpty,
+               (identity == crc || identity == "CRC-\(crc)") {
+                return gameName
+            }
+        }
+
+        return nil
+    }
+
+    private func normalizedRuntimeIdentity(_ value: String?) -> String {
+        (value ?? "")
+            .replacingOccurrences(of: "_", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .uppercased()
     }
 
     private var compatibilityLabPanel: some View {

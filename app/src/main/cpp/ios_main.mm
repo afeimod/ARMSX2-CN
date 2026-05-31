@@ -485,6 +485,8 @@ struct rc_client_t;
 
 // iOS specific headers
 #import <UIKit/UIKit.h>
+#import <GameController/GameController.h>
+#import <CoreHaptics/CoreHaptics.h>
 #include <mach-o/dyld.h>
 #include "common/Darwin/DarwinMisc.h"
 
@@ -765,13 +767,31 @@ static SDL_Gamepad* s_gamepad = nullptr;
 static std::atomic<u32> s_pendingGamepadRumble{0};
 static u32 s_appliedGamepadRumble = 0xffffffffu;
 static bool s_loggedGamepadRumbleFailure = false;
+static bool s_loggedSDLGamepadRumble = false;
 static constexpr u32 ARMSX2_GAMEPAD_RUMBLE_DURATION_MS = 65535;
+
+static GCController* s_nativeHapticController = nil;
+static CHHapticEngine* s_nativeHapticEngine = nil;
+static id<CHHapticAdvancedPatternPlayer> s_nativeHapticPlayer = nil;
+static u32 s_nativeAppliedGamepadRumble = 0xffffffffu;
+static bool s_loggedNativeGamepadRumbleReady = false;
+static bool s_loggedNativeGamepadRumbleUnavailable = false;
 
 static u32 ARMSX2PackGamepadRumble(float large_intensity, float small_intensity)
 {
     const u32 large = static_cast<u32>(std::clamp(large_intensity, 0.0f, 1.0f) * 65535.0f);
     const u32 small = static_cast<u32>(std::clamp(small_intensity, 0.0f, 1.0f) * 65535.0f);
     return ((large & 0xffffu) << 16) | (small & 0xffffu);
+}
+
+static float ARMSX2RumbleLargeIntensity(u32 packed)
+{
+    return static_cast<float>((packed >> 16) & 0xffffu) / 65535.0f;
+}
+
+static float ARMSX2RumbleSmallIntensity(u32 packed)
+{
+    return static_cast<float>(packed & 0xffffu) / 65535.0f;
 }
 
 extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensity, float small_intensity)
@@ -782,21 +802,186 @@ extern "C" void ARMSX2_iOSUpdatePadVibration(u32 pad_index, float large_intensit
     s_pendingGamepadRumble.store(ARMSX2PackGamepadRumble(large_intensity, small_intensity), std::memory_order_relaxed);
 }
 
-static void ARMSX2ApplyPendingGamepadRumble()
+static void ARMSX2StopNativeGamepadRumbleOnMain()
 {
-    if (!s_gamepad)
+    if (s_nativeHapticPlayer) {
+        NSError* error = nil;
+        [s_nativeHapticPlayer stopAtTime:CHHapticTimeImmediate error:&error];
+        if (error)
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native rumble stop failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+        s_nativeHapticPlayer = nil;
+    }
+}
+
+static void ARMSX2ResetNativeGamepadRumbleOnMain()
+{
+    ARMSX2StopNativeGamepadRumbleOnMain();
+    if (s_nativeHapticEngine) {
+        [s_nativeHapticEngine stopWithCompletionHandler:nil];
+        s_nativeHapticEngine = nil;
+    }
+    s_nativeHapticController = nil;
+    s_nativeAppliedGamepadRumble = 0xffffffffu;
+    s_loggedNativeGamepadRumbleReady = false;
+}
+
+static GCController* ARMSX2FindNativeHapticController()
+{
+    for (GCController* controller in [GCController controllers]) {
+        if (controller.haptics)
+            return controller;
+    }
+
+    return nil;
+}
+
+static bool ARMSX2EnsureNativeGamepadRumbleOnMain(float intensity, float sharpness)
+{
+    if (@available(iOS 14.0, *)) {
+    } else {
+        return false;
+    }
+
+    GCController* controller = ARMSX2FindNativeHapticController();
+    if (!controller) {
+        if (!s_loggedNativeGamepadRumbleUnavailable) {
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native controller haptics unavailable");
+            s_loggedNativeGamepadRumbleUnavailable = true;
+        }
+        ARMSX2ResetNativeGamepadRumbleOnMain();
+        return false;
+    }
+
+    if (s_nativeHapticController != controller) {
+        ARMSX2ResetNativeGamepadRumbleOnMain();
+        s_nativeHapticController = controller;
+    }
+
+    if (!s_nativeHapticEngine) {
+        s_nativeHapticEngine = [controller.haptics createEngineWithLocality:GCHapticsLocalityDefault];
+        if (!s_nativeHapticEngine) {
+            if (!s_loggedNativeGamepadRumbleUnavailable) {
+                Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine creation failed");
+                s_loggedNativeGamepadRumbleUnavailable = true;
+            }
+            return false;
+        }
+
+        s_nativeHapticEngine.playsHapticsOnly = YES;
+        s_nativeHapticEngine.autoShutdownEnabled = YES;
+        s_nativeHapticEngine.stoppedHandler = ^(CHHapticEngineStoppedReason reason) {
+            s_nativeHapticPlayer = nil;
+            s_nativeAppliedGamepadRumble = 0xffffffffu;
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine stopped reason=%ld", static_cast<long>(reason));
+        };
+        s_nativeHapticEngine.resetHandler = ^{
+            s_nativeHapticPlayer = nil;
+            s_nativeAppliedGamepadRumble = 0xffffffffu;
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine reset");
+        };
+    }
+
+    NSError* error = nil;
+    if (![s_nativeHapticEngine startAndReturnError:&error]) {
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic engine start failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+        return false;
+    }
+
+    if (!s_nativeHapticPlayer) {
+        NSArray<CHHapticEventParameter*>* params = @[
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:intensity],
+            [[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:sharpness]
+        ];
+        CHHapticEvent* event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+                                                              parameters:params
+                                                            relativeTime:0.0
+                                                                 duration:1.0];
+        CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
+        if (!pattern) {
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pattern failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+            return false;
+        }
+
+        s_nativeHapticPlayer = [s_nativeHapticEngine createAdvancedPlayerWithPattern:pattern error:&error];
+        if (!s_nativeHapticPlayer) {
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic player failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+            return false;
+        }
+
+        s_nativeHapticPlayer.loopEnabled = YES;
+        s_nativeHapticPlayer.loopEnd = 1.0;
+        if (![s_nativeHapticPlayer startAtTime:CHHapticTimeImmediate error:&error]) {
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic player start failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+            s_nativeHapticPlayer = nil;
+            return false;
+        }
+
+        if (!s_loggedNativeGamepadRumbleReady) {
+            NSString* vendor = controller.vendorName ?: @"unknown controller";
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Native controller rumble active: %s", vendor.UTF8String);
+            s_loggedNativeGamepadRumbleReady = true;
+        }
+    }
+
+    const float sharpnessControl = std::clamp((sharpness * 2.0f) - 1.0f, -1.0f, 1.0f);
+    NSArray<CHHapticDynamicParameter*>* dynamicParams = @[
+        [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticIntensityControl value:intensity relativeTime:0.0],
+        [[CHHapticDynamicParameter alloc] initWithParameterID:CHHapticDynamicParameterIDHapticSharpnessControl value:sharpnessControl relativeTime:0.0]
+    ];
+
+    if (![s_nativeHapticPlayer sendParameters:dynamicParams atTime:CHHapticTimeImmediate error:&error]) {
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic update failed: %s", error.localizedDescription.UTF8String ?: "unknown");
+        ARMSX2StopNativeGamepadRumbleOnMain();
+        return false;
+    }
+
+    return true;
+}
+
+static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
+{
+    if (packed == s_nativeAppliedGamepadRumble)
         return;
 
+    const float large = ARMSX2RumbleLargeIntensity(packed);
+    const float small = ARMSX2RumbleSmallIntensity(packed);
+    const float intensity = std::clamp(std::max(large, small), 0.0f, 1.0f);
+    if (intensity <= 0.01f) {
+        ARMSX2StopNativeGamepadRumbleOnMain();
+        s_nativeAppliedGamepadRumble = packed;
+        return;
+    }
+
+    const float sharpness = std::clamp(0.20f + (small * 0.65f) - (large * 0.10f), 0.0f, 1.0f);
+    if (ARMSX2EnsureNativeGamepadRumbleOnMain(intensity, sharpness))
+        s_nativeAppliedGamepadRumble = packed;
+}
+
+static void ARMSX2ApplyPendingGamepadRumble()
+{
     const u32 packed = s_pendingGamepadRumble.load(std::memory_order_relaxed);
     if (packed == s_appliedGamepadRumble)
         return;
 
     const u16 large = static_cast<u16>((packed >> 16) & 0xffffu);
     const u16 small = static_cast<u16>(packed & 0xffffu);
-    if (!SDL_RumbleGamepad(s_gamepad, large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS) && !s_loggedGamepadRumbleFailure) {
-        Console.WriteLn("[ARMSX2 iOS Gamepad] Controller rumble unavailable: %s", SDL_GetError());
-        s_loggedGamepadRumbleFailure = true;
+
+    if (s_gamepad) {
+        if (SDL_RumbleGamepad(s_gamepad, large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS)) {
+            if (!s_loggedSDLGamepadRumble) {
+                Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble accepted");
+                s_loggedSDLGamepadRumble = true;
+            }
+        } else if (!s_loggedGamepadRumbleFailure) {
+            Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble unavailable: %s", SDL_GetError());
+            s_loggedGamepadRumbleFailure = true;
+        }
     }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ARMSX2ApplyNativeGamepadRumbleOnMain(packed);
+    });
+
     s_appliedGamepadRumble = packed;
 }
 
@@ -1050,6 +1235,9 @@ namespace Host
                 Console.WriteLn("[Files] MFi gamepad disconnected");
                 s_pendingGamepadRumble.store(0, std::memory_order_relaxed);
                 s_appliedGamepadRumble = 0xffffffffu;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ARMSX2ResetNativeGamepadRumbleOnMain();
+                });
                 SDL_CloseGamepad(s_gamepad);
                 s_gamepad = nullptr;
             }
