@@ -27,6 +27,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "common/Error.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -64,6 +65,36 @@ static NSString* const ARMSX2CompatibilityProfileBranches = @"branches";
 static NSString* const ARMSX2CompatibilityProfileCustom = @"custom";
 
 static NSString* ARMSX2NSStringFromStdString(const std::string& value);
+
+static NSString* ARMSX2RegionFallbackForSerial(const std::string& serial)
+{
+    std::string normalized;
+    normalized.reserve(serial.size());
+    for (const char ch : serial)
+    {
+        if (ch != '-' && ch != '_' && ch != ' ')
+            normalized.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+    }
+
+    auto startsWith = [&normalized](const char* prefix) {
+        return normalized.rfind(prefix, 0) == 0;
+    };
+
+    if (startsWith("SLUS") || startsWith("SCUS") || startsWith("PBPX"))
+        return @"NTSC-U";
+    if (startsWith("SLES") || startsWith("SCES") || startsWith("SLED") || startsWith("SCED"))
+        return @"PAL";
+    if (startsWith("SLPS") || startsWith("SLPM") || startsWith("SCPS") || startsWith("PCPX") || startsWith("SCAJ"))
+        return @"NTSC-J";
+    if (startsWith("SLKA") || startsWith("SCKA"))
+        return @"NTSC-K";
+    if (startsWith("SCCS"))
+        return @"NTSC-C";
+    if (startsWith("SLAJ"))
+        return @"NTSC-HK";
+
+    return nil;
+}
 
 static NSString* ARMSX2BIOSDisplayRegionForZone(NSString* zone)
 {
@@ -903,13 +934,19 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         NSString *title = ARMSX2NSStringFromStdString(entry.GetTitle(false));
         NSString *serial = ARMSX2NSStringFromStdString(entry.serial);
         const char *regionText = GameList::RegionToString(entry.region, false);
+        NSString *region = (regionText && *regionText) ? @(regionText) : nil;
+        if (!region || [region isEqualToString:@"Other"]) {
+            NSString *fallbackRegion = ARMSX2RegionFallbackForSerial(entry.serial);
+            if (fallbackRegion.length > 0)
+                region = fallbackRegion;
+        }
 
         if (title.length > 0)
             metadata[@"title"] = title;
         if (serial.length > 0)
             metadata[@"serial"] = serial;
-        if (regionText && *regionText)
-            metadata[@"region"] = @(regionText);
+        if (region.length > 0)
+            metadata[@"region"] = region;
         if (entry.crc != 0)
             metadata[@"crc"] = [NSString stringWithFormat:@"%08X", entry.crc];
 

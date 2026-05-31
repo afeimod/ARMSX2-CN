@@ -53,6 +53,21 @@ private enum ControllerAsset {
             return ""
         }
     }
+
+    static func image(named fileName: String) -> UIImage? {
+        guard !fileName.isEmpty else { return nil }
+
+        let baseName = (fileName as NSString).deletingPathExtension
+        if let image = UIImage(named: baseName) ?? UIImage(named: fileName) {
+            return image
+        }
+
+        guard let path = Bundle.main.path(forResource: baseName, ofType: "png") else {
+            return nil
+        }
+
+        return UIImage(contentsOfFile: path)
+    }
 }
 
 private struct ControllerAssetImage: View {
@@ -62,12 +77,18 @@ private struct ControllerAssetImage: View {
     let fallbackFontSize: CGFloat
 
     var body: some View {
-        ControllerVectorGlyph(
-            fileName: fileName,
-            fallback: fallback,
-            fallbackColor: fallbackColor,
-            fallbackFontSize: fallbackFontSize
-        )
+        if let image = ControllerAsset.image(named: fileName) {
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFit()
+        } else {
+            Text(fallback)
+                .font(.system(size: fallbackFontSize, weight: .semibold))
+                .foregroundStyle(fallbackColor)
+                .minimumScaleFactor(0.5)
+        }
     }
 }
 

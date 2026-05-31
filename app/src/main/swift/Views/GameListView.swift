@@ -726,11 +726,14 @@ private struct GameInfoPanel: View {
         if value.contains("europe") || value.contains("pal") {
             return "🇪🇺"
         }
-        if value.contains("korea") {
+        if value.contains("korea") || value.contains("ntsc-k") {
             return "🇰🇷"
         }
-        if value.contains("china") {
+        if value.contains("china") || value.contains("ntsc-c") {
             return "🇨🇳"
+        }
+        if value.contains("hong kong") || value.contains("ntsc-hk") {
+            return "🇭🇰"
         }
         if value.contains("australia") {
             return "🇦🇺"
