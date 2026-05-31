@@ -1514,6 +1514,7 @@ void VMManager::ShowGameDatabaseStatusOSD(const std::string& title, const std::s
 	const size_t entry_count = GameDatabase::entryCount();
 	if (entry_count == 0)
 	{
+		Console.Warning("@@GAMEDB_OSD@@ status=missing entries=0");
 		Host::AddIconOSDMessage("GameDBStatus", ICON_FA_EXCLAMATION_TRIANGLE,
 			TRANSLATE_SV("VMManager", "Warning: GameDB missing.\nAutomatic game fixes unavailable."),
 			Host::OSD_WARNING_DURATION);
@@ -1523,6 +1524,8 @@ void VMManager::ShowGameDatabaseStatusOSD(const std::string& title, const std::s
 	const std::string crc_text = fmt::format("{:08X}", crc);
 	if (!game_found)
 	{
+		Console.WriteLn("@@GAMEDB_OSD@@ status=no_entry entries=%zu serial=%s crc=%08X",
+			entry_count, serial.c_str(), crc);
 		Host::AddIconOSDMessage("GameDBStatus", ICON_FA_DATABASE,
 			fmt::format(TRANSLATE_FS("VMManager",
 				"GameDB loaded: {} entries\nNo entry found for this game\n{} / CRC {}"),
@@ -1534,6 +1537,9 @@ void VMManager::ShowGameDatabaseStatusOSD(const std::string& title, const std::s
 	const size_t compatibility_fix_count = gamefix_count + gs_fix_count;
 	const size_t available_patch_group_count = patch_group_count + dynamic_patch_count;
 	const u32 applied_gamedb_patch_count = Patch::GetActiveGameDBPatchCount();
+	Console.WriteLn("@@GAMEDB_OSD@@ status=entry_found entries=%zu serial=%s crc=%08X gamefixes=%zu gsfixes=%zu patch_groups=%zu dynamic_patches=%zu active_patches=%u",
+		entry_count, serial.c_str(), crc, gamefix_count, gs_fix_count, patch_group_count, dynamic_patch_count,
+		applied_gamedb_patch_count);
 
 	SmallString status;
 	if (compatibility_fix_count > 0)
@@ -1582,6 +1588,14 @@ void VMManager::HandleELFChange(bool verbose_patches_if_changed)
 	ConsoleLogWriter<LOGLEVEL_INFO>::WriteLn(Color_StrongOrange, fmt::format("ELF changed, active CRC {:08X} ({})", crc_to_report, s_elf_path));
 	Patch::ReloadPatches(s_disc_serial, crc_to_report, false, false, false, verbose_patches_if_changed);
 	ApplyCoreSettings();
+
+	if (!s_disc_serial.empty() && !GSDumpReplayer::IsReplayingDump())
+	{
+		const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(s_disc_serial);
+		ShowGameDatabaseStatusOSD(GetTitle(true), s_disc_serial, crc_to_report != 0 ? crc_to_report : s_disc_crc,
+			game != nullptr, game ? game->gameFixes.size() : 0, game ? game->gsHWFixes.size() : 0,
+			game ? game->patches.size() : 0, game ? game->dynaPatches.size() : 0);
+	}
 }
 
 void VMManager::UpdateELFInfo(std::string elf_path)

@@ -6,6 +6,10 @@
 #include <cmath>
 #include <sys/time.h> // [TEMP_DIAG] gettimeofday for @@WALLCLOCK_PC@@
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include "Common.h"
 #include "R3000A.h"
 #include "Counters.h"
@@ -576,9 +580,18 @@ static __fi void DoFMVSwitch()
 
 	if (EmuConfig.Gamefixes.SoftwareRendererFMVHack && EmuConfig.GS.UseHardwareRenderer())
 	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		static bool s_warned_ios_software_fmv_skip = false;
+		if (!s_warned_ios_software_fmv_skip)
+		{
+			s_warned_ios_software_fmv_skip = true;
+			Console.Warning("@@IOS_SW_FMV_SKIP@@ SoftwareRendererFMV requested; keeping Metal renderer active to avoid iOS renderer-reopen crashes.");
+		}
+#else
 		DevCon.Warning("FMV Switch");
 		// we don't use the sw toggle here, because it'll change back to auto if set to sw
 		MTGS::SetSoftwareRendering(new_fmv_state, new_fmv_state ? GSInterlaceMode::AdaptiveTFF : EmuConfig.GS.InterlaceMode, false);
+#endif
 	}
 }
 
