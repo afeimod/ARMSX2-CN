@@ -354,6 +354,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 	file(GLOB METAL_SHADERS "${CMAKE_SOURCE_DIR}/pcsx2/GS/Renderers/Metal/*.metal")
 	file(GLOB FONTS "${CMAKE_SOURCE_DIR}/../assets/resources/fonts/*.ttf" "${CMAKE_SOURCE_DIR}/../assets/resources/fonts/*.otf")
 	file(GLOB_RECURSE IOS_SHADER_RESOURCES "${CMAKE_SOURCE_DIR}/../assets/resources/shaders/*")
+	set(IOS_TOP_LEVEL_RESOURCES
+		"${CMAKE_SOURCE_DIR}/../assets/resources/GameIndex.yaml"
+		"${CMAKE_SOURCE_DIR}/../assets/resources/RedumpDatabase.yaml"
+		"${CMAKE_SOURCE_DIR}/../assets/resources/patches.zip"
+		"${CMAKE_SOURCE_DIR}/../assets/resources/game_controller_db.txt"
+	)
 
 	target_sources(ARMSX2iOS PRIVATE ${METAL_SHADERS} ${FONTS} ${IOS_SHADER_RESOURCES})
 	set_source_files_properties(${METAL_SHADERS} PROPERTIES
@@ -361,6 +367,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		MACOSX_PACKAGE_LOCATION Resources
 	)
 	set_source_files_properties(${FONTS} PROPERTIES MACOSX_PACKAGE_LOCATION Resources/fonts)
+	foreach(IOS_TOP_LEVEL_RESOURCE IN LISTS IOS_TOP_LEVEL_RESOURCES)
+		if(EXISTS "${IOS_TOP_LEVEL_RESOURCE}")
+			target_sources(ARMSX2iOS PRIVATE "${IOS_TOP_LEVEL_RESOURCE}")
+			set_source_files_properties("${IOS_TOP_LEVEL_RESOURCE}" PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+		endif()
+	endforeach()
 	foreach(IOS_SHADER_RESOURCE IN LISTS IOS_SHADER_RESOURCES)
 		get_filename_component(IOS_SHADER_DIR "${IOS_SHADER_RESOURCE}" DIRECTORY)
 		file(RELATIVE_PATH IOS_SHADER_SUBDIR "${CMAKE_SOURCE_DIR}/../assets/resources" "${IOS_SHADER_DIR}")

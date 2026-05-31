@@ -460,6 +460,7 @@ int main(int argc, char* argv[]) {
 #include "pcsx2/Config.h"
 #include "pcsx2/CDVD/CDVD.h"
 #include "pcsx2/CDVD/CDVDcommon.h"
+#include "pcsx2/ps2/BiosTools.h"
 
 #include "pcsx2/DEV9/pcap_io.h"
 #include "pcsx2/DEV9/net.h"
@@ -2791,8 +2792,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
 - (void)sceneWillResignActive:(UIScene *)scene {
 // NVM save when app loses focus
-    extern void cdvdSaveNVRAM();
-    cdvdSaveNVRAM();
+    if (s_vmThreadActive.load(std::memory_order_relaxed) && !BiosPath.empty()) {
+        extern void cdvdSaveNVRAM();
+        cdvdSaveNVRAM();
+        Console.WriteLn("[NVM] NVM saved on sceneWillResignActive");
+    } else {
+        Console.WriteLn("[NVM] Skipped save on sceneWillResignActive active=%d biosPath=%d",
+            s_vmThreadActive.load(std::memory_order_relaxed) ? 1 : 0, BiosPath.empty() ? 0 : 1);
+    }
 }
 
 - (void)sceneWillEnterForeground:(UIScene *)scene {
@@ -2803,9 +2810,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     // Without this, BIOS settings (language/date) are lost on every restart
     // because cdvdSaveNVRAM() is only called at VM shutdown, which never
     // happens when iOS terminates the app via SIGTERM.
-    extern void cdvdSaveNVRAM();
-    cdvdSaveNVRAM();
-    Console.WriteLn("[NVM] NVM saved on sceneDidEnterBackground");
+    if (s_vmThreadActive.load(std::memory_order_relaxed) && !BiosPath.empty()) {
+        extern void cdvdSaveNVRAM();
+        cdvdSaveNVRAM();
+        Console.WriteLn("[NVM] NVM saved on sceneDidEnterBackground");
+    } else {
+        Console.WriteLn("[NVM] Skipped save on sceneDidEnterBackground active=%d biosPath=%d",
+            s_vmThreadActive.load(std::memory_order_relaxed) ? 1 : 0, BiosPath.empty() ? 0 : 1);
+    }
 }
 
 @end
