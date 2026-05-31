@@ -517,6 +517,8 @@ static inline ShaderConvertSelector GetConvertShader(GSTexture::Format src, GSTe
 							break;
 					}
 					break;
+				default:
+					pxAssert(false);
 			}
 			break;
 		default:
