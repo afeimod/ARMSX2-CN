@@ -442,6 +442,71 @@ bool GameDatabaseSchema::isUserHackHWFix(GSHWFixId id)
 	}
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+static void ClearIOSMetalCompatLabOffGSHWFixes(Pcsx2Config::GSOptions& config)
+{
+	auto clear_int = [](auto& field, auto default_value, const char* name) {
+		if (field != default_value)
+		{
+			Console.Warning("iOS Metal CompatLabOff: cleared manual GS HW fix %s", name);
+			field = default_value;
+		}
+	};
+
+#define CLEAR_IOS_METAL_BOOL(field, name) \
+	do \
+	{ \
+		if (config.field) \
+		{ \
+			Console.Warning("iOS Metal CompatLabOff: cleared manual GS HW fix %s", name); \
+			config.field = false; \
+		} \
+	} while (false)
+
+	clear_int(config.UserHacks_AutoFlush, GSHWAutoFlushLevel::Disabled, "autoFlush");
+	CLEAR_IOS_METAL_BOOL(UserHacks_CPUFBConversion, "cpuFramebufferConversion");
+	CLEAR_IOS_METAL_BOOL(UserHacks_ReadTCOnClose, "readTCOnClose");
+	CLEAR_IOS_METAL_BOOL(UserHacks_DisableDepthSupport, "disableDepthSupport");
+	CLEAR_IOS_METAL_BOOL(PreloadFrameWithGSData, "preloadFrameData");
+	CLEAR_IOS_METAL_BOOL(UserHacks_DisablePartialInvalidation, "disablePartialInvalidation");
+	clear_int(config.UserHacks_TextureInsideRt, GSTextureInRtMode::Disabled, "textureInsideRT");
+	CLEAR_IOS_METAL_BOOL(UserHacks_AlignSpriteX, "alignSprite");
+	CLEAR_IOS_METAL_BOOL(UserHacks_MergePPSprite, "mergeSprite");
+	CLEAR_IOS_METAL_BOOL(UserHacks_ForceEvenSpritePosition, "forceEvenSpritePosition");
+	clear_int(config.UserHacks_BilinearHack, GSBilinearDirtyMode::Automatic, "bilinearUpscale");
+	CLEAR_IOS_METAL_BOOL(UserHacks_NativePaletteDraw, "nativePaletteDraw");
+	CLEAR_IOS_METAL_BOOL(UserHacks_EstimateTextureRegion, "estimateTextureRegion");
+	clear_int(config.SkipDrawStart, 0, "skipDrawStart");
+	clear_int(config.SkipDrawEnd, 0, "skipDrawEnd");
+	clear_int(config.UserHacks_HalfPixelOffset, GSHalfPixelOffset::Off, "halfPixelOffset");
+	clear_int(config.UserHacks_RoundSprite, static_cast<s8>(0), "roundSprite");
+	clear_int(config.UserHacks_NativeScaling, GSNativeScaling::Off, "nativeScaling");
+	clear_int(config.UserHacks_TCOffsetX, static_cast<s32>(0), "tcOffsetX");
+	clear_int(config.UserHacks_TCOffsetY, static_cast<s32>(0), "tcOffsetY");
+	clear_int(config.UserHacks_CPUSpriteRenderBW, static_cast<u8>(0), "cpuSpriteRenderBW");
+	clear_int(config.UserHacks_CPUSpriteRenderLevel, static_cast<u8>(0), "cpuSpriteRenderLevel");
+	clear_int(config.UserHacks_CPUCLUTRender, static_cast<u8>(0), "cpuCLUTRender");
+	clear_int(config.UserHacks_GPUTargetCLUTMode, GSGPUTargetCLUTMode::Disabled, "gpuTargetCLUT");
+	clear_int(config.GetSkipCountFunctionId, static_cast<s16>(-1), "getSkipCount");
+	clear_int(config.BeforeDrawFunctionId, static_cast<s16>(-1), "beforeDraw");
+	clear_int(config.MoveHandlerFunctionId, static_cast<s16>(-1), "moveHandler");
+	config.ManualUserHacks = false;
+
+#undef CLEAR_IOS_METAL_BOOL
+}
+
+static bool ShouldBlockIOSMetalGSHardwareFixes(const Pcsx2Config::GSOptions& config)
+{
+	if (config.Renderer != GSRendererType::Metal)
+		return false;
+
+	// ARMSX2 iOS exposes GameDB Core Fixes and Graphics Fixes separately. When either
+	// compatibility path is off, do not allow GameDB/manual hardware hacks to survive
+	// and break strict Metal rendering.
+	return !EmuConfig.EnableGameFixes || config.ManualUserHacks;
+}
+#endif
+
 void GameDatabaseSchema::GameEntry::applyGameFixes(Pcsx2Config& config, bool applyAuto) const
 {
 	// Only apply core game fixes if the user has enabled them.
@@ -693,6 +758,21 @@ bool GameDatabaseSchema::GameEntry::configMatchesHWFix(const Pcsx2Config::GSOpti
 void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions& config) const
 {
 	std::string disabled_fixes;
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (ShouldBlockIOSMetalGSHardwareFixes(config))
+	{
+		Console.Warning("iOS Metal CompatLabOff: ignoring GameDB/manual GS HW fixes");
+		for (const auto& [id, value] : gsHWFixes)
+		{
+			Console.Warning("iOS Metal CompatLabOff: ignoring GameDB/manual GS HW fix %s to [mode=%d]",
+				getHWFixName(id), value);
+		}
+		ClearIOSMetalCompatLabOffGSHWFixes(config);
+		Host::RemoveKeyedOSDMessage("HWFixesWarning");
+		return;
+	}
+#endif
 
 	// Only apply GS HW fixes if the user hasn't manually enabled HW fixes.
 	const bool apply_auto_fixes = !config.ManualUserHacks;
