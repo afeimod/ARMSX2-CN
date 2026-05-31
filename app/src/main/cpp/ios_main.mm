@@ -74,7 +74,8 @@ std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window) {
 static void SetupDirectories(const std::string& dataRoot) {
     const char* dirs[] = {"bios", "iso", "logs", "memcards", "savestates",
                           "snaps", "cheats", "patches", "cache", "covers",
-                          "gamesettings", "textures", "inputprofiles", "videos"};
+                          "gamesettings", "textures", "inputprofiles", "videos",
+                          "inis", "resources"};
     mkdir(dataRoot.c_str(), 0755);
     for (auto d : dirs)
         mkdir((dataRoot + "/" + d).c_str(), 0755);
@@ -82,6 +83,7 @@ static void SetupDirectories(const std::string& dataRoot) {
     EmuFolders::DataRoot = dataRoot;
     EmuFolders::AppRoot = dataRoot;
     EmuFolders::Resources = dataRoot;
+    EmuFolders::Settings = dataRoot + "/inis";
     EmuFolders::Bios = dataRoot + "/bios";
     EmuFolders::Logs = dataRoot + "/logs";
     EmuFolders::Savestates = dataRoot + "/savestates";
@@ -95,6 +97,7 @@ static void SetupDirectories(const std::string& dataRoot) {
     EmuFolders::Textures = dataRoot + "/textures";
     EmuFolders::InputProfiles = dataRoot + "/inputprofiles";
     EmuFolders::Videos = dataRoot + "/videos";
+    EmuFolders::UserResources = dataRoot + "/resources";
 }
 
 // --- Helper: find BIOS in bios/ directory ---
@@ -2822,6 +2825,34 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
 @end
 
+static void SetupIOSDirectories(const std::string& dataRoot)
+{
+    const char* dirs[] = {"bios", "iso", "logs", "memcards", "savestates",
+                          "snaps", "cheats", "patches", "cache", "covers",
+                          "gamesettings", "textures", "inputprofiles", "videos",
+                          "inis", "resources"};
+    mkdir(dataRoot.c_str(), 0755);
+    for (auto d : dirs)
+        mkdir((dataRoot + "/" + d).c_str(), 0755);
+
+    EmuFolders::DataRoot = dataRoot;
+    EmuFolders::Settings = dataRoot + "/inis";
+    EmuFolders::Bios = dataRoot + "/bios";
+    EmuFolders::Logs = dataRoot + "/logs";
+    EmuFolders::Savestates = dataRoot + "/savestates";
+    EmuFolders::MemoryCards = dataRoot + "/memcards";
+    EmuFolders::Snapshots = dataRoot + "/snaps";
+    EmuFolders::Cheats = dataRoot + "/cheats";
+    EmuFolders::Patches = dataRoot + "/patches";
+    EmuFolders::Cache = dataRoot + "/cache";
+    EmuFolders::Covers = dataRoot + "/covers";
+    EmuFolders::GameSettings = dataRoot + "/gamesettings";
+    EmuFolders::Textures = dataRoot + "/textures";
+    EmuFolders::InputProfiles = dataRoot + "/inputprofiles";
+    EmuFolders::Videos = dataRoot + "/videos";
+    EmuFolders::UserResources = dataRoot + "/resources";
+}
+
 
 @interface PCSX2AppDelegate : UIResponder <UIApplicationDelegate>
 @end
@@ -2837,12 +2868,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     NSString *resourcePath = [[NSBundle mainBundle] resourcePath];
     
     std::string dataRoot = [documentsDirectory UTF8String];
-    EmuFolders::DataRoot = dataRoot;
+    SetupIOSDirectories(dataRoot);
     EmuFolders::AppRoot = [resourcePath UTF8String];
     EmuFolders::Resources = [resourcePath UTF8String];
-    EmuFolders::Bios = dataRoot + "/bios";
-    // ... [Init other folders if needed, but DataRoot is key] ...
-    EmuFolders::Logs = dataRoot + "/logs";
 
     // --- Unified Logging Redirection ---
     // Force stderr and stdout to pcsx2_log.txt

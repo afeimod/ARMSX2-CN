@@ -8,17 +8,19 @@
 
 #ifdef __APPLE__
 
-static id<MTLLibrary> loadMainLibrary(id<MTLDevice> dev, NSString* name)
+static id<MTLLibrary> loadMainLibrary(id<MTLDevice> dev, NSString* name, bool optional = false)
 {
     NSString* path = [[NSBundle mainBundle] pathForResource:name ofType:@"metallib"];
     NSError *error = nil;
     id<MTLLibrary> lib = path ? [dev newLibraryWithFile:path error:&error] : nil;
     if (lib) {
-        Console.WriteLn("Debug: Metal Library '%s' loaded successfully.", [name UTF8String]);
+        Console.WriteLn("@@MTL_LIBRARY@@ loaded=%s", [name UTF8String]);
+    } else if (optional && !path) {
+        Console.WriteLn("@@MTL_LIBRARY_MISS@@ name=%s optional=1 path=null", [name UTF8String]);
     } else {
-        Console.Error("Debug: Failed to load Metal Library '%s'. Path: %s", [name UTF8String], path ? [path UTF8String] : "null");
+        Console.Error("@@MTL_LIBRARY_ERROR@@ name=%s path=%s", [name UTF8String], path ? [path UTF8String] : "null");
         if (error) {
-            Console.Error("Debug: Metal Error: %s", [[error localizedDescription] UTF8String]);
+            Console.Error("@@MTL_LIBRARY_ERROR_DETAIL@@ %s", [[error localizedDescription] UTF8String]);
         }
     }
     return lib;
@@ -29,15 +31,15 @@ static MRCOwned<id<MTLLibrary>> loadMainLibrary(id<MTLDevice> dev)
     Console.WriteLn("Debug: loadMainLibrary called.");
     if (@available(macOS 11.0, iOS 14.0, *)) {
         Console.WriteLn("Debug: Trying Metal23");
-        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal23")) return MRCTransfer(lib);
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal23", true)) return MRCTransfer(lib);
     }
     if (@available(macOS 10.15, iOS 13.0, *)) {
         Console.WriteLn("Debug: Trying Metal22");
-        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal22")) return MRCTransfer(lib);
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal22", true)) return MRCTransfer(lib);
     }
     if (@available(macOS 10.14, iOS 12.0, *)) {
         Console.WriteLn("Debug: Trying Metal21");
-        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal21")) return MRCTransfer(lib);
+        if (id<MTLLibrary> lib = loadMainLibrary(dev, @"Metal21", true)) return MRCTransfer(lib);
     }
     Console.WriteLn("Debug: Trying default");
     if (id<MTLLibrary> lib = loadMainLibrary(dev, @"default")) return MRCTransfer(lib);
@@ -238,4 +240,3 @@ const char* to_string(GSMTLDevice::MetalVersion ver)
 }
 
 #endif // __APPLE__
-

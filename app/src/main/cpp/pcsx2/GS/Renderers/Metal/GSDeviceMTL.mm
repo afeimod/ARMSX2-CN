@@ -1339,7 +1339,7 @@ static bool s_capture_next = false;
 GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 { @autoreleasepool {
 	static int p_log = 0;
-	if ((p_log % 60) == 0) Console.WriteLn("Debug: BeginPresent called (count: %d, sk: %d)", p_log, frame_skip);
+	if ((p_log % 600) == 0) Console.WriteLn("@@MTL_PRESENT_HEARTBEAT@@ frames=%d frame_skip=%d", p_log, frame_skip);
 	p_log++;
 
 	if (m_capture_start_frame && FrameNo() == m_capture_start_frame)

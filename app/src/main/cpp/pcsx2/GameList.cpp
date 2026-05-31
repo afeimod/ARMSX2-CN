@@ -926,7 +926,9 @@ bool GameList::GetSerialAndCRCForFilename(const char* filename, std::string* ser
 
 std::string GameList::GetPlayedTimeFile()
 {
-	return Path::Combine(EmuFolders::Settings, "playtime.dat");
+	const std::string base_path = EmuFolders::Settings.empty() ?
+		Path::Combine(EmuFolders::DataRoot, "inis") : EmuFolders::Settings;
+	return Path::Combine(base_path, "playtime.dat");
 }
 
 bool GameList::ParsePlayedTimeLine(char* line, std::string& serial, PlayedTimeEntry& entry)
