@@ -103,6 +103,7 @@ private let helpData: [HelpSection] = [
 ]
 
 struct HelpView: View {
+    @State private var settings = SettingsStore.shared
 #if targetEnvironment(macCatalyst)
     @State private var selectedTopic: HelpTopic? = .item(section: 0, item: 0)
 #endif
@@ -116,22 +117,22 @@ struct HelpView: View {
                     Section {
                         ForEach(section.items.indices, id: \.self) { itemIndex in
                             let item = section.items[itemIndex]
-                            Text(item.question)
+                            Text(settings.localized(item.question))
                                 .tag(HelpTopic.item(section: sectionIndex, item: itemIndex))
                         }
                     } header: {
-                        Label(section.title, systemImage: section.icon)
+                        Label(settings.localized(section.title), systemImage: section.icon)
                     }
                 }
 
                 Section {
-                    Label("Version", systemImage: "info.circle")
+                    Label(settings.localized("Version"), systemImage: "info.circle")
                         .tag(HelpTopic.about)
                 } header: {
-                    Text("About")
+                    Text(settings.localized("About"))
                 }
             }
-            .navigationTitle("Help")
+            .navigationTitle(settings.localized("Help"))
             .listStyle(.sidebar)
         } detail: {
             helpDetail(for: selectedTopic)
@@ -145,33 +146,33 @@ struct HelpView: View {
                     Section {
                         ForEach(section.items) { item in
                             DisclosureGroup {
-                                Text(item.answer)
+                                Text(settings.localized(item.answer))
                                     .font(.body)
                                     .foregroundStyle(.secondary)
                                     .padding(.vertical, 4)
                             } label: {
-                                Text(item.question)
+                                Text(settings.localized(item.question))
                                     .font(.body)
                             }
                         }
                     } header: {
-                        Label(section.title, systemImage: section.icon)
+                        Label(settings.localized(section.title), systemImage: section.icon)
                     }
                 }
 
                 Section {
                     HStack {
-                        Text("Version")
+                        Text(settings.localized("Version"))
                         Spacer()
                         Text(ARMSX2Bridge.buildVersion())
                             .foregroundStyle(.secondary)
                             .font(.caption)
                     }
                 } header: {
-                    Label("About", systemImage: "info.circle")
+                    Label(settings.localized("About"), systemImage: "info.circle")
                 }
             }
-            .navigationTitle("Help")
+            .navigationTitle(settings.localized("Help"))
         }
 #endif
     }
@@ -185,13 +186,13 @@ struct HelpView: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    Label(section.title, systemImage: section.icon)
+                    Label(settings.localized(section.title), systemImage: section.icon)
                         .font(.headline)
                         .foregroundStyle(.secondary)
-                    Text(item.question)
+                    Text(settings.localized(item.question))
                         .font(.largeTitle)
                         .fontWeight(.bold)
-                    Text(item.answer)
+                    Text(settings.localized(item.answer))
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -199,13 +200,13 @@ struct HelpView: View {
                 .padding(32)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
             }
-            .navigationTitle(item.question)
+            .navigationTitle(settings.localized(item.question))
 
         case .about:
             Form {
-                Section("App") {
+                Section(settings.localized("App")) {
                     HStack {
-                        Text("Version")
+                        Text(settings.localized("Version"))
                         Spacer()
                         Text(ARMSX2Bridge.buildVersion())
                             .foregroundStyle(.secondary)
@@ -213,14 +214,14 @@ struct HelpView: View {
                     }
                 }
             }
-            .navigationTitle("About")
+            .navigationTitle(settings.localized("About"))
 
         case .none:
             VStack(spacing: 12) {
                 Image(systemName: "questionmark.circle")
                     .font(.system(size: 42))
                     .foregroundStyle(.secondary)
-                Text("Select a help topic")
+                Text(settings.localized("Select a help topic"))
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.secondary)

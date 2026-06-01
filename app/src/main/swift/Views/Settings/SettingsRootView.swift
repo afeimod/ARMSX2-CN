@@ -4,6 +4,7 @@
 import SwiftUI
 
 private enum SettingsPane: String, CaseIterable, Identifiable {
+    case language
     case emulator
     case graphics
     case network
@@ -21,6 +22,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 
     var title: String {
         switch self {
+        case .language:
+            return "Language"
         case .emulator:
             return "Emulator"
         case .graphics:
@@ -50,6 +53,8 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 
     var icon: String {
         switch self {
+        case .language:
+            return "globe"
         case .emulator:
             return "cpu"
         case .graphics:
@@ -79,6 +84,7 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 }
 
 struct SettingsRootView: View {
+    @State private var settings = SettingsStore.shared
 #if targetEnvironment(macCatalyst)
     @State private var selectedPane: SettingsPane? = .emulator
 #endif
@@ -87,10 +93,10 @@ struct SettingsRootView: View {
 #if targetEnvironment(macCatalyst)
         NavigationSplitView {
             List(SettingsPane.allCases, selection: $selectedPane) { pane in
-                Label(pane.title, systemImage: pane.icon)
+                Label(settings.localized(pane.title), systemImage: pane.icon)
                     .tag(pane)
             }
-            .navigationTitle("Settings")
+            .navigationTitle(settings.localized("Settings"))
             .listStyle(.sidebar)
         } detail: {
             settingsDetail(for: selectedPane)
@@ -101,54 +107,59 @@ struct SettingsRootView: View {
         List {
             Section {
                 NavigationLink {
+                    LanguageSettingsView()
+                } label: {
+                    Label(settings.localized("Language"), systemImage: "globe")
+                }
+                NavigationLink {
                     EmulatorSettingsView()
                 } label: {
-                    Label("Emulator", systemImage: "cpu")
+                    Label(settings.localized("Emulator"), systemImage: "cpu")
                 }
                 NavigationLink {
                     GraphicsSettingsView()
                 } label: {
-                    Label("Graphics", systemImage: "paintbrush")
+                    Label(settings.localized("Graphics"), systemImage: "paintbrush")
                 }
                 NavigationLink {
                     NetworkSettingsView()
                 } label: {
-                    Label("Network", systemImage: "network")
+                    Label(settings.localized("Network"), systemImage: "network")
                 }
                 NavigationLink {
                     MemoryCardSettingsView()
                 } label: {
-                    Label("Memory Cards", systemImage: "memorychip")
+                    Label(settings.localized("Memory Cards"), systemImage: "memorychip")
                 }
                 NavigationLink {
                     StorageSettingsView()
                 } label: {
-                    Label("Storage", systemImage: "internaldrive")
+                    Label(settings.localized("Storage"), systemImage: "internaldrive")
                 }
                 NavigationLink {
                     RetroAchievementsSettingsView()
                 } label: {
-                    Label("RetroAchievements", systemImage: "trophy")
+                    Label(settings.localized("RetroAchievements"), systemImage: "trophy")
                 }
                 NavigationLink {
                     OverlaySettingsView()
                 } label: {
-                    Label("Overlay (OSD)", systemImage: "text.below.photo")
+                    Label(settings.localized("Overlay (OSD)"), systemImage: "text.below.photo")
                 }
                 NavigationLink {
                     GamepadSettingsView()
                 } label: {
-                    Label("Game Controller", systemImage: "gamecontroller")
+                    Label(settings.localized("Game Controller"), systemImage: "gamecontroller")
                 }
                 NavigationLink {
                     LocalMultiplayerSettingsView()
                 } label: {
-                    Label("Local Multiplayer", systemImage: "person.3")
+                    Label(settings.localized("Local Multiplayer"), systemImage: "person.3")
                 }
                 NavigationLink {
                     VirtualPadSettingsView()
                 } label: {
-                    Label("Virtual Pad", systemImage: "hand.draw")
+                    Label(settings.localized("Virtual Pad"), systemImage: "hand.draw")
                 }
             }
 
@@ -156,13 +167,13 @@ struct SettingsRootView: View {
                 NavigationLink {
                     LicenseView()
                 } label: {
-                    Label("Licenses & Credits", systemImage: "doc.text")
+                    Label(settings.localized("Licenses & Credits"), systemImage: "doc.text")
                 }
             }
 
-            Section("About") {
+            Section(settings.localized("About")) {
                 HStack {
-                    Text("Version")
+                    Text(settings.localized("Version"))
                     Spacer()
                     Text(ARMSX2Bridge.buildVersion())
                         .foregroundStyle(.secondary)
@@ -170,7 +181,7 @@ struct SettingsRootView: View {
                 }
             }
         }
-        .navigationTitle("Settings")
+        .navigationTitle(settings.localized("Settings"))
         .navigationBarTitleDisplayMode(.inline)
 #endif
     }
@@ -178,6 +189,8 @@ struct SettingsRootView: View {
     @ViewBuilder
     private func settingsDetail(for pane: SettingsPane?) -> some View {
         switch pane {
+        case .language:
+            LanguageSettingsView()
         case .emulator:
             EmulatorSettingsView()
         case .graphics:
@@ -207,7 +220,7 @@ struct SettingsRootView: View {
                 Image(systemName: "gearshape")
                     .font(.system(size: 42))
                     .foregroundStyle(.secondary)
-                Text("Select a setting")
+                Text(settings.localized("Select a setting"))
                     .font(.title2)
                     .fontWeight(.semibold)
                     .foregroundStyle(.secondary)
@@ -217,12 +230,34 @@ struct SettingsRootView: View {
     }
 }
 
-private struct SettingsAboutView: View {
+private struct LanguageSettingsView: View {
+    @State private var settings = SettingsStore.shared
+
     var body: some View {
         Form {
-            Section("App") {
+            Section(settings.localized("Interface Language")) {
+                Picker(settings.localized("App Language"), selection: $settings.appLanguage) {
+                    ForEach(AppLanguage.allCases) { language in
+                        Text(settings.localized(language.label)).tag(language)
+                    }
+                }
+                Text(settings.localized("ARMSX2 iOS menus will use this language where available. Some emulator terms and debug messages may still appear in English."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .navigationTitle(settings.localized("Language"))
+    }
+}
+
+private struct SettingsAboutView: View {
+    @State private var settings = SettingsStore.shared
+
+    var body: some View {
+        Form {
+            Section(settings.localized("App")) {
                 HStack {
-                    Text("Version")
+                    Text(settings.localized("Version"))
                     Spacer()
                     Text(ARMSX2Bridge.buildVersion())
                         .foregroundStyle(.secondary)
@@ -230,7 +265,7 @@ private struct SettingsAboutView: View {
                 }
             }
         }
-        .navigationTitle("About")
+        .navigationTitle(settings.localized("About"))
     }
 }
 

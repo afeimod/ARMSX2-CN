@@ -447,6 +447,7 @@ int main(int argc, char* argv[]) {
 #include <cstring>
 #include <string>
 #include <iostream>
+#include <chrono>
 
 #include "common/ProgressCallback.h"
 #include "pcsx2/Input/InputManager.h"
@@ -491,6 +492,7 @@ struct rc_client_t;
 #import <UIKit/UIKit.h>
 #import <GameController/GameController.h>
 #import <CoreHaptics/CoreHaptics.h>
+#include <mach/mach.h>
 #include <mach-o/dyld.h>
 #include "common/Darwin/DarwinMisc.h"
 
@@ -549,6 +551,83 @@ extern void GSResizeDisplayWindow(int width, int height, float scale);
 @end
 ARMSX2GameView* g_gameRenderView = nil;  // non-static: accessed from ARMSX2Bridge.mm
 static INISettingsInterface* s_settings_interface = nullptr;
+
+static double ARMSX2IOSGetAppRAMGB()
+{
+    task_vm_info_data_t vm_info = {};
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(mach_task_self(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&vm_info), &count) != KERN_SUCCESS)
+        return 0.0;
+
+    return static_cast<double>(vm_info.phys_footprint) / (1024.0 * 1024.0 * 1024.0);
+}
+
+static const char* ARMSX2IOSHeatStateName(NSProcessInfoThermalState state)
+{
+    switch (state) {
+    case NSProcessInfoThermalStateNominal:
+        return "OK";
+    case NSProcessInfoThermalStateFair:
+        return "Warm";
+    case NSProcessInfoThermalStateSerious:
+        return "Hot";
+    case NSProcessInfoThermalStateCritical:
+        return "Critical";
+    default:
+        return "Unknown";
+    }
+}
+
+extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay()
+{
+    return s_settings_interface ?
+        s_settings_interface->GetBoolValue("ARMSX2iOS/UI", "OsdShowDeviceStats", true) : true;
+}
+
+extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity()
+{
+    const NSProcessInfoThermalState thermal_state = [[NSProcessInfo processInfo] thermalState];
+    const float battery = [[UIDevice currentDevice] batteryLevel];
+    if (thermal_state >= NSProcessInfoThermalStateSerious || (battery >= 0.0f && battery <= 0.15f))
+        return 2;
+    if (thermal_state == NSProcessInfoThermalStateFair || (battery >= 0.0f && battery <= 0.30f))
+        return 1;
+    return 0;
+}
+
+extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine()
+{
+    static std::mutex s_stats_mutex;
+    static std::string s_cached_line;
+    static std::chrono::steady_clock::time_point s_last_update;
+
+    const auto now = std::chrono::steady_clock::now();
+    std::lock_guard<std::mutex> lock(s_stats_mutex);
+    if (!s_cached_line.empty() && (now - s_last_update) < std::chrono::seconds(1))
+        return s_cached_line.c_str();
+
+    @autoreleasepool {
+        UIDevice* device = [UIDevice currentDevice];
+        const float battery = [device batteryLevel];
+        const int battery_percent = (battery >= 0.0f) ? static_cast<int>(std::round(battery * 100.0f)) : -1;
+        const NSProcessInfoThermalState thermal_state = [[NSProcessInfo processInfo] thermalState];
+        const double app_ram_gb = ARMSX2IOSGetAppRAMGB();
+        const bool low_power = [[NSProcessInfo processInfo] isLowPowerModeEnabled];
+
+        char buffer[192];
+        if (battery_percent >= 0) {
+            std::snprintf(buffer, sizeof(buffer), "Battery: %d%% | Heat: %s | RAM: %.1f GB%s",
+                battery_percent, ARMSX2IOSHeatStateName(thermal_state), app_ram_gb, low_power ? " | Low Power" : "");
+        } else {
+            std::snprintf(buffer, sizeof(buffer), "Battery: -- | Heat: %s | RAM: %.1f GB%s",
+                ARMSX2IOSHeatStateName(thermal_state), app_ram_gb, low_power ? " | Low Power" : "");
+        }
+
+        s_cached_line = buffer;
+        s_last_update = now;
+        return s_cached_line.c_str();
+    }
+}
 
 static float ARMSX2SanitizedNominalScalar(float scalar)
 {
@@ -644,7 +723,7 @@ static void ARMSX2ApplyIOSOsdPresetFromConfig(const char* reason)
 
     switch (preset) {
     case 1:
-        ARMSX2SetIOSOsdFlags(true, false, true, true, false, false, false, true, false, false, false, false, false);
+        ARMSX2SetIOSOsdFlags(true, false, true, true, true, false, false, true, false, false, false, false, false);
         break;
     case 2:
         ARMSX2SetIOSOsdFlags(true, true, true, true, true, true, false, true, false, false, false, false, false);
@@ -668,11 +747,13 @@ static void ARMSX2ApplyIOSOsdPresetFromConfig(const char* reason)
     s_settings_interface->SetIntValue("EmuCore/GS", "OsdPerformancePos", position);
     s_settings_interface->Save();
 
-    Console.WriteLn("@@OSD@@ preset=%d position=%d reason=%s fps=%d vps=%d speed=%d frame_times=%d version=%d hardware=%d",
+    Console.WriteLn("@@OSD@@ preset=%d position=%d reason=%s fps=%d vps=%d speed=%d gpu=%d device_stats=%d frame_times=%d version=%d hardware=%d",
         preset, position, reason ? reason : "unknown",
         EmuConfig.GS.OsdShowFPS ? 1 : 0,
         EmuConfig.GS.OsdShowVPS ? 1 : 0,
         EmuConfig.GS.OsdShowSpeed ? 1 : 0,
+        EmuConfig.GS.OsdShowGPU ? 1 : 0,
+        ARMSX2_iOSShouldShowDeviceStatsOverlay() ? 1 : 0,
         EmuConfig.GS.OsdShowFrameTimes ? 1 : 0,
         EmuConfig.GS.OsdShowVersion ? 1 : 0,
         EmuConfig.GS.OsdShowHardwareInfo ? 1 : 0);
@@ -2861,6 +2942,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     // Override point for customization after application launch.
+    [UIDevice currentDevice].batteryMonitoringEnabled = YES;
     
     // --- Setup PCSX2 Environment (Moved from SceneDelegate) ---
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);

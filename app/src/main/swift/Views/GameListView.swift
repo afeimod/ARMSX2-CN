@@ -24,6 +24,7 @@ struct ISOEntry: Identifiable {
 struct GameListView: View {
     @State private var games: [ISOEntry] = []
     @State private var appState = AppState.shared
+    @State private var settings = SettingsStore.shared
     @State private var fileImporter = FileImportHandler.shared
     @State private var coverStore = CoverStore.shared
     @State private var showGameImporter = false
@@ -55,13 +56,13 @@ struct GameListView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle("Games")
+            .navigationTitle(settings.localized("Games"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { showGameImporter = true } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Import Games")
+                    .accessibilityLabel(settings.localized("Import Games"))
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -77,13 +78,13 @@ struct GameListView: View {
                             pendingCoverGameName = nil
                             showCoverImporter = true
                         } label: {
-                            Label("Import Local Covers", systemImage: "photo.badge.plus")
+                            Label(settings.localized("Import Local Covers"), systemImage: "photo.badge.plus")
                         }
 
                         Button {
                             downloadMissingCovers()
                         } label: {
-                            Label("Download Missing Covers", systemImage: "icloud.and.arrow.down")
+                            Label(settings.localized("Download Missing Covers"), systemImage: "icloud.and.arrow.down")
                         }
                         .disabled(coverStore.isDownloadingCovers || games.isEmpty)
 
@@ -91,7 +92,7 @@ struct GameListView: View {
                             coverTemplateDraft = coverStore.coverURLTemplate
                             showCoverTemplateEditor = true
                         } label: {
-                            Label("Cover Source", systemImage: "link")
+                            Label(settings.localized("Cover Source"), systemImage: "link")
                         }
 
                         Button {
@@ -99,12 +100,12 @@ struct GameListView: View {
                             coverStore.lastCoverMessage = "Cover URL template reset to the ARMSX2 Android default."
                             coverStore.showCoverAlert = true
                         } label: {
-                            Label("Reset Cover Template", systemImage: "arrow.counterclockwise")
+                            Label(settings.localized("Reset Cover Template"), systemImage: "arrow.counterclockwise")
                         }
                     } label: {
                         Image(systemName: coverStore.isDownloadingCovers ? "icloud.and.arrow.down" : "photo.stack")
                     }
-                    .accessibilityLabel("Covers")
+                    .accessibilityLabel(settings.localized("Covers"))
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { loadGames() } label: {
@@ -113,7 +114,7 @@ struct GameListView: View {
                 }
                 ToolbarItem(placement: .topBarLeading) {
                     if ARMSX2Bridge.hasBIOS() {
-                        Button("BIOS Only") {
+                        Button(settings.localized("BIOS Only")) {
                             if appState.runningGameName == "BIOS" {
                                 appState.returnToGame()
                             } else if appState.runningGameName != nil {
@@ -127,22 +128,22 @@ struct GameListView: View {
                     }
                 }
             }
-            .alert("Import Result", isPresented: $fileImporter.showImportAlert) {
-                Button("OK") {}
+            .alert(settings.localized("Import Result"), isPresented: $fileImporter.showImportAlert) {
+                Button(settings.localized("OK")) {}
             } message: {
                 Text(fileImporter.lastImportMessage ?? "")
             }
-            .alert("Cover Result", isPresented: $coverStore.showCoverAlert) {
-                Button("OK") {}
+            .alert(settings.localized("Cover Result"), isPresented: $coverStore.showCoverAlert) {
+                Button(settings.localized("OK")) {}
             } message: {
                 Text(coverStore.lastCoverMessage ?? "")
             }
-            .alert("Cover Source", isPresented: $showCoverTemplateEditor) {
+            .alert(settings.localized("Cover Source"), isPresented: $showCoverTemplateEditor) {
                 TextField("https://.../${serial}.jpg", text: $coverTemplateDraft)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
-                Button("Cancel", role: .cancel) {}
-                Button("Save") {
+                Button(settings.localized("Cancel"), role: .cancel) {}
+                Button(settings.localized("Save")) {
                     coverStore.coverURLTemplate = coverTemplateDraft
                     if games.isEmpty {
                         coverStore.lastCoverMessage = "Cover URL template saved."
@@ -154,9 +155,9 @@ struct GameListView: View {
             } message: {
                 Text("Use ${serial}, ${title}, or ${filetitle}. Default: \(CoverStore.defaultCoverURLTemplate)")
             }
-            .alert("Restart VM?", isPresented: $showRestartAlert) {
-                Button("Cancel", role: .cancel) {}
-                Button("Restart", role: .destructive) {
+            .alert(settings.localized("Restart VM?"), isPresented: $showRestartAlert) {
+                Button(settings.localized("Cancel"), role: .cancel) {}
+                Button(settings.localized("Restart"), role: .destructive) {
                     if pendingGameName.isEmpty {
                         appState.shutdownAndBootBIOS()
                     } else {
@@ -284,15 +285,15 @@ struct GameListView: View {
                         .foregroundStyle(.green)
                         .font(.title)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Now Running")
+                        Text(settings.localized("Now Running"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(gameName == "BIOS" ? "BIOS Only" : gameName)
+                        Text(gameName == "BIOS" ? settings.localized("BIOS Only") : gameName)
                             .font(.body)
                             .fontWeight(.semibold)
                     }
                     Spacer()
-                    Text("Resume")
+                    Text(settings.localized("Resume"))
                         .font(.subheadline)
                         .fontWeight(.medium)
                     Image(systemName: "chevron.right")
@@ -309,20 +310,20 @@ struct GameListView: View {
             } label: {
                 HStack {
                     Spacer()
-                    Label("Stop Emulation", systemImage: "stop.circle")
+                    Label(settings.localized("Stop Emulation"), systemImage: "stop.circle")
                         .font(.subheadline)
                     Spacer()
                 }
             }
         }
-        .alert("Stop Emulation?", isPresented: $showStopAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Stop", role: .destructive) {
+        .alert(settings.localized("Stop Emulation?"), isPresented: $showStopAlert) {
+            Button(settings.localized("Cancel"), role: .cancel) { }
+            Button(settings.localized("Stop"), role: .destructive) {
                 ARMSX2Bridge.requestVMStop()
                 appState.runningGameName = nil
             }
         } message: {
-            Text("This will shut down the running game. All unsaved progress will be lost.")
+            Text(settings.localized("This will shut down the running game. All unsaved progress will be lost."))
         }
     }
 
@@ -446,15 +447,15 @@ struct GameListView: View {
                 .font(.title2)
                 .foregroundStyle(.green)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Now Running")
+                Text(settings.localized("Now Running"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(gameName == "BIOS" ? "BIOS Only" : gameName)
+                Text(gameName == "BIOS" ? settings.localized("BIOS Only") : gameName)
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
             }
             Spacer()
-            Button("Resume") {
+            Button(settings.localized("Resume")) {
                 appState.returnToGame()
             }
             .buttonStyle(.borderedProminent)
@@ -467,14 +468,14 @@ struct GameListView: View {
         }
         .padding()
         .background(.background, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .alert("Stop Emulation?", isPresented: $showStopAlert) {
-            Button("Cancel", role: .cancel) { }
-            Button("Stop", role: .destructive) {
+        .alert(settings.localized("Stop Emulation?"), isPresented: $showStopAlert) {
+            Button(settings.localized("Cancel"), role: .cancel) { }
+            Button(settings.localized("Stop"), role: .destructive) {
                 ARMSX2Bridge.requestVMStop()
                 appState.runningGameName = nil
             }
         } message: {
-            Text("This will shut down the running game. All unsaved progress will be lost.")
+            Text(settings.localized("This will shut down the running game. All unsaved progress will be lost."))
         }
     }
 
@@ -483,26 +484,26 @@ struct GameListView: View {
         Button {
             gameInfoTarget = game
         } label: {
-            Label("Game Info", systemImage: "info.circle")
+            Label(settings.localized("Game Info"), systemImage: "info.circle")
         }
 
         Button {
             gameSettingsTarget = game
         } label: {
-            Label("Per-Game Settings", systemImage: "slider.horizontal.3")
+            Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
         }
 
         Button {
             pendingPNACHGameName = game.name
             showPNACHImporter = true
         } label: {
-            Label("Import PNACH / 60 FPS Patch", systemImage: "wand.and.stars")
+            Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
         }
 
         Button {
             downloadCover(for: game)
         } label: {
-            Label("Download Cover", systemImage: "icloud.and.arrow.down")
+            Label(settings.localized("Download Cover"), systemImage: "icloud.and.arrow.down")
         }
         .disabled(coverStore.isDownloadingCovers)
 
@@ -510,7 +511,7 @@ struct GameListView: View {
             pendingCoverGameName = game.name
             showCoverImporter = true
         } label: {
-            Label("Choose Cover", systemImage: "photo")
+            Label(settings.localized("Choose Cover"), systemImage: "photo")
         }
 
         if game.coverURL != nil {
@@ -518,7 +519,7 @@ struct GameListView: View {
                 coverStore.removeManagedCovers(forGameNamed: game.name)
                 loadGames()
             } label: {
-                Label("Remove Cover", systemImage: "trash")
+                Label(settings.localized("Remove Cover"), systemImage: "trash")
             }
         }
     }
@@ -539,17 +540,17 @@ struct GameListView: View {
             Image(systemName: "opticaldisc")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("No Games Found")
+            Text(settings.localized("No Games Found"))
                 .font(.title2)
                 .fontWeight(.semibold)
-            Text("Import PS2 disc images to add them here.")
+            Text(settings.localized("Import PS2 disc images to add them here."))
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button {
                 showGameImporter = true
             } label: {
-                Label("Import Games", systemImage: "plus")
+                Label(settings.localized("Import Games"), systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
         }
@@ -754,6 +755,7 @@ struct PerGameSettingsPanel: View {
     @State private var upscaleMultiplier: Float
     @State private var aspectRatio: String
     @State private var textureFiltering: Int
+    @State private var hardwareMipmapping: Bool
     @State private var blendingAccuracy: Int
     @State private var enableCheats: Bool
     @State private var enablePatches: Bool
@@ -769,6 +771,7 @@ struct PerGameSettingsPanel: View {
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
         _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
         _textureFiltering = State(initialValue: Self.intValue(info["textureFiltering"], defaultValue: 2))
+        _hardwareMipmapping = State(initialValue: Self.boolValue(info["hardwareMipmapping"], defaultValue: true))
         _blendingAccuracy = State(initialValue: Self.intValue(info["blendingAccuracy"], defaultValue: 1))
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
         _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
@@ -814,6 +817,12 @@ struct PerGameSettingsPanel: View {
                         Text("Bilinear excl. Sprite").tag(3)
                     }
                     .disabled(!enabled)
+
+                    Toggle("Hardware Mipmapping", isOn: $hardwareMipmapping)
+                        .disabled(!enabled)
+                    Text("Turn this off only for games with mipmap-related texture stripes, shimmer, or bad LOD. Reset/relaunch the game after changing it.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
 
                     Picker("Blending Accuracy", selection: $blendingAccuracy) {
                         Text("Minimum").tag(0)
@@ -875,6 +884,7 @@ struct PerGameSettingsPanel: View {
             upscaleMultiplier: upscaleMultiplier,
             aspectRatio: aspectRatio,
             textureFiltering: Int32(textureFiltering),
+            hardwareMipmapping: hardwareMipmapping,
             blendingAccuracy: Int32(blendingAccuracy),
             enableCheats: enableCheats,
             enablePatches: enablePatches,

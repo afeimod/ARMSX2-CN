@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct BIOSListView: View {
     @State private var bioses: [ARMSX2BIOSInfo] = []
     @State private var defaultBIOS: String = ""
+    @State private var settings = SettingsStore.shared
     @State private var fileImporter = FileImportHandler.shared
     @State private var showBIOSImporter = false
     @State private var showBIOSCompatibilityImporter = false
@@ -28,7 +29,7 @@ struct BIOSListView: View {
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .navigationTitle("BIOS")
+            .navigationTitle(settings.localized("BIOS"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
@@ -36,18 +37,18 @@ struct BIOSListView: View {
                             NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker")
                             showBIOSImporter = true
                         } label: {
-                            Label("Import BIOS", systemImage: "doc.badge.plus")
+                            Label(settings.localized("Import BIOS"), systemImage: "doc.badge.plus")
                         }
                         Button {
                             NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker")
                             showBIOSCompatibilityImporter = true
                         } label: {
-                            Label("Compatibility Picker", systemImage: "folder.badge.plus")
+                            Label(settings.localized("Compatibility Picker"), systemImage: "folder.badge.plus")
                         }
                     } label: {
                         Image(systemName: "plus")
                     }
-                    .accessibilityLabel("Import BIOS")
+                    .accessibilityLabel(settings.localized("Import BIOS"))
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { loadBIOSes() } label: {
@@ -55,8 +56,8 @@ struct BIOSListView: View {
                     }
                 }
             }
-            .alert("Import Result", isPresented: $fileImporter.showImportAlert) {
-                Button("OK") {}
+            .alert(settings.localized("Import Result"), isPresented: $fileImporter.showImportAlert) {
+                Button(settings.localized("OK")) {}
             } message: {
                 Text(fileImporter.lastImportMessage ?? "")
             }
@@ -95,7 +96,7 @@ struct BIOSListView: View {
                     Text(bios.fileName)
                         .font(.body)
                         .foregroundStyle(.primary)
-                    Text(bios.valid ? "\(bios.regionName) BIOS" : "Unknown BIOS Region")
+                    Text(bios.valid ? "\(bios.regionName) BIOS" : settings.localized("Unknown BIOS Region"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     if bios.valid && !bios.descriptionText.isEmpty {
@@ -120,10 +121,10 @@ struct BIOSListView: View {
             Image(systemName: "cpu")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("No BIOS Found")
+            Text(settings.localized("No BIOS Found"))
                 .font(.title2)
                 .fontWeight(.semibold)
-            Text("Import a PS2 BIOS dump to enable booting.")
+            Text(settings.localized("Import a PS2 BIOS dump to enable booting."))
                 .font(.body)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -131,17 +132,17 @@ struct BIOSListView: View {
                 NSLog("[ARMSX2 iOS BIOS] opening primary BIOS picker from empty state")
                 showBIOSImporter = true
             } label: {
-                Label("Import BIOS", systemImage: "plus")
+                Label(settings.localized("Import BIOS"), systemImage: "plus")
             }
             .buttonStyle(.borderedProminent)
             Button {
                 NSLog("[ARMSX2 iOS BIOS] opening compatibility BIOS picker from empty state")
                 showBIOSCompatibilityImporter = true
             } label: {
-                Label("Compatibility Picker", systemImage: "folder.badge.plus")
+                Label(settings.localized("Compatibility Picker"), systemImage: "folder.badge.plus")
             }
             .buttonStyle(.bordered)
-            Text("If one picker refuses to select your .bin/.rom file, try the other.")
+            Text(settings.localized("If one picker refuses to select your .bin/.rom file, try the other."))
                 .font(.caption)
                 .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)

@@ -8,10 +8,28 @@ private struct PadOpacityKey: EnvironmentKey {
     static let defaultValue: Double = 1.0
 }
 
+private struct PadSkinKey: EnvironmentKey {
+    static let defaultValue: VirtualPadSkin = .armsx2Refresh
+}
+
+private struct PadUsesFullSkinKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
 extension EnvironmentValues {
     var padOpacity: Double {
         get { self[PadOpacityKey.self] }
         set { self[PadOpacityKey.self] = newValue }
+    }
+
+    var padSkin: VirtualPadSkin {
+        get { self[PadSkinKey.self] }
+        set { self[PadSkinKey.self] = newValue }
+    }
+
+    var padUsesFullSkin: Bool {
+        get { self[PadUsesFullSkinKey.self] }
+        set { self[PadUsesFullSkinKey.self] = newValue }
     }
 }
 
@@ -30,7 +48,9 @@ enum HapticManager {
     }()
 }
 
-private enum ControllerAsset {
+enum ControllerAsset {
+    private static let edgeToEdgePortraitAspectRatio: CGFloat = 1.55
+
     static func fileName(for button: ARMSX2PadButton) -> String {
         switch button {
         case .up:       return "ic_controller_up_button.png"
@@ -54,10 +74,16 @@ private enum ControllerAsset {
         }
     }
 
-    static func image(named fileName: String) -> UIImage? {
+    static func image(named fileName: String, skin: VirtualPadSkin) -> UIImage? {
         guard !fileName.isEmpty else { return nil }
 
         let baseName = (fileName as NSString).deletingPathExtension
+        if skin == .custom,
+           let directory = VirtualPadSkin.customSkinDirectory(),
+           let customImage = customImage(named: fileName, baseName: baseName, directory: directory) {
+            return customImage
+        }
+
         if let image = UIImage(named: baseName) ?? UIImage(named: fileName) {
             return image
         }
@@ -68,6 +94,95 @@ private enum ControllerAsset {
 
         return UIImage(contentsOfFile: path)
     }
+
+    static func fullSkinImage(skin: VirtualPadSkin, isLandscape: Bool) -> UIImage? {
+        guard skin == .custom, let directory = VirtualPadSkin.customSkinDirectory() else {
+            return nil
+        }
+
+        let orientationCandidates = isLandscape
+            ? ["controller_edgetoedge_landscape", "iphone_edgetoedge_landscape", "controller_landscape", "iphone_landscape", "skin_landscape", "background_landscape", "gamepad_landscape", "landscape"]
+            : ["controller_edgetoedge_portrait", "iphone_edgetoedge_portrait", "controller_portrait", "iphone_portrait", "skin_portrait", "background_portrait", "gamepad_portrait", "portrait"]
+        let sharedCandidates = ["controller", "skin", "background", "gamepad", "full", "layout"]
+
+        for baseName in orientationCandidates + sharedCandidates {
+            if let image = customImage(named: "\(baseName).png", baseName: baseName, directory: directory) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    static func gameplayFullSkinImage(skin: VirtualPadSkin, isLandscape: Bool) -> UIImage? {
+        guard skin == .custom, let directory = VirtualPadSkin.customSkinDirectory() else {
+            return nil
+        }
+
+        // Manic/Delta-style full-phone skins include their own game viewport and
+        // need info.json coordinates before we can place them accurately. For
+        // gameplay, only use simple pad-area skins; otherwise fall back to the
+        // built-in ARMSX2 controls so inputs never become visually misleading.
+        guard !isLandscape else {
+            return nil
+        }
+
+        let candidates = [
+            "controller_portrait",
+            "skin_portrait",
+            "background_portrait",
+            "gamepad_portrait",
+            "portrait",
+            "controller",
+            "skin",
+            "background",
+            "gamepad",
+            "full",
+            "layout"
+        ]
+
+        for baseName in candidates {
+            if let image = customImage(named: "\(baseName).png", baseName: baseName, directory: directory),
+               !looksLikeEdgeToEdgePortrait(image) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    static func edgeToEdgePortraitSkinImage(skin: VirtualPadSkin) -> UIImage? {
+        guard let image = fullSkinImage(skin: skin, isLandscape: false) else {
+            return nil
+        }
+
+        return looksLikeEdgeToEdgePortrait(image) ? image : nil
+    }
+
+    private static func looksLikeEdgeToEdgePortrait(_ image: UIImage) -> Bool {
+        let aspect = image.size.height / max(image.size.width, 1)
+        return aspect >= edgeToEdgePortraitAspectRatio
+    }
+
+    private static func customImage(named fileName: String, baseName: String, directory: URL) -> UIImage? {
+        let candidates = [
+            fileName,
+            "\(baseName).png",
+            "\(baseName).jpg",
+            "\(baseName).jpeg",
+            "\(baseName).webp"
+        ]
+
+        for candidate in candidates {
+            let url = directory.appendingPathComponent(candidate)
+            if FileManager.default.fileExists(atPath: url.path),
+               let image = UIImage(contentsOfFile: url.path) {
+                return image
+            }
+        }
+
+        return nil
+    }
 }
 
 private struct ControllerAssetImage: View {
@@ -75,9 +190,17 @@ private struct ControllerAssetImage: View {
     let fallback: String
     let fallbackColor: Color
     let fallbackFontSize: CGFloat
+    let skin: VirtualPadSkin
 
     var body: some View {
-        if let image = ControllerAsset.image(named: fileName) {
+        if skin == .crispVector {
+            ControllerVectorGlyph(
+                fileName: fileName,
+                fallback: fallback,
+                fallbackColor: fallbackColor,
+                fallbackFontSize: fallbackFontSize
+            )
+        } else if let image = ControllerAsset.image(named: fileName, skin: skin) {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -405,6 +528,7 @@ struct VirtualControllerView: View {
     @State private var settings = SettingsStore.shared
     @State private var layout = PadLayoutStore.shared
     var isLandscape: Bool = false
+    var drawFullSkinBackground: Bool = true
 
     // A004: Scale buttons based on screen width (baseline: iPhone 15 = 393pt width)
     private func deviceScale(_ geo: GeometryProxy) -> CGFloat {
@@ -415,12 +539,19 @@ struct VirtualControllerView: View {
 
     var body: some View {
         GeometryReader { geo in
+            let skin = settings.virtualPadSkin
+            let usesFullSkin = ControllerAsset.gameplayFullSkinImage(skin: skin, isLandscape: isLandscape) != nil
+
             if isLandscape {
                 landscapeLayout(w: geo.size.width, h: geo.size.height)
                     .environment(\.padOpacity, Double(settings.padOpacity))
+                    .environment(\.padSkin, skin)
+                    .environment(\.padUsesFullSkin, usesFullSkin)
             } else {
                 portraitLayout(w: geo.size.width, h: geo.size.height)
                     .environment(\.padOpacity, Double(settings.padOpacity))
+                    .environment(\.padSkin, skin)
+                    .environment(\.padUsesFullSkin, usesFullSkin)
             }
         }
     }
@@ -433,6 +564,18 @@ struct VirtualControllerView: View {
     @ViewBuilder
     func landscapeLayout(w: CGFloat, h: CGFloat) -> some View {
         ZStack {
+            if drawFullSkinBackground,
+               let fullSkin = ControllerAsset.gameplayFullSkinImage(skin: settings.virtualPadSkin, isLandscape: true) {
+                Image(uiImage: fullSkin)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .scaledToFill()
+                    .frame(width: w, height: h)
+                    .clipped()
+                    .allowsHitTesting(false)
+            }
+
             DPadView(size: 110)
                 .scaleEffect(pos("dpad", landscape: true).scale)
                 .position(x: pos("dpad", landscape: true).x * w, y: pos("dpad", landscape: true).y * h)
@@ -470,7 +613,19 @@ struct VirtualControllerView: View {
     @ViewBuilder
     func portraitLayout(w: CGFloat, h: CGFloat) -> some View {
         ZStack {
-            Color(white: 0.10).opacity(Double(settings.padOpacity))  // A002: apply opacity to background too
+            if drawFullSkinBackground,
+               let fullSkin = ControllerAsset.gameplayFullSkinImage(skin: settings.virtualPadSkin, isLandscape: false) {
+                Image(uiImage: fullSkin)
+                    .resizable()
+                    .interpolation(.high)
+                    .antialiased(true)
+                    .scaledToFill()
+                    .frame(width: w, height: h)
+                    .clipped()
+                    .allowsHitTesting(false)
+            } else {
+                Color(white: 0.10).opacity(Double(settings.padOpacity))  // A002: apply opacity to background too
+            }
 
             GeometryReader { cGeo in
                 let cW = cGeo.size.width
@@ -546,25 +701,61 @@ struct ActionButtonsView: View {
     }
 }
 
+private struct ControllerPressEffect<S: InsettableShape>: View {
+    let shape: S
+    let color: Color
+    let isPressed: Bool
+    let opacity: Double
+
+    var body: some View {
+        shape
+            .inset(by: 1)
+            .fill(color.opacity(isPressed ? 0.34 * opacity : 0.06 * opacity))
+            .overlay {
+                shape
+                    .inset(by: 1)
+                    .stroke(color.opacity(isPressed ? 0.72 * opacity : 0.20 * opacity), lineWidth: isPressed ? 2.2 : 1.0)
+            }
+            .shadow(color: color.opacity(isPressed ? 0.42 * opacity : 0.08 * opacity), radius: isPressed ? 9 : 3)
+            .scaleEffect(isPressed ? 0.92 : 1.0)
+            .animation(.easeOut(duration: 0.06), value: isPressed)
+    }
+}
+
 struct PSBtn: View {
     let sym: String; let clr: Color; let sz: CGFloat; let btn: ARMSX2PadButton
     @State private var on = false
     @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padSkin) private var padSkin
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
-        ControllerAssetImage(
-            fileName: ControllerAsset.fileName(for: btn),
-            fallback: sym,
-            fallbackColor: on ? .white : clr,
-            fallbackFontSize: sz * 0.42
-        )
-            .frame(width: sz, height: sz)
-            .opacity(padOpacity)
-            .brightness(on ? 0.16 : 0)
-            .shadow(color: clr.opacity((on ? 0.55 : 0.18) * padOpacity), radius: on ? 8 : 3)
-            .scaleEffect(on ? 0.88 : 1.0)
-            .animation(.easeOut(duration: 0.06), value: on)
-            .contentShape(Circle())
+        ZStack {
+            Circle()
+                .fill(.white.opacity(0.001))
+
+            if !padUsesFullSkin || on {
+                ControllerPressEffect(shape: Circle(), color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+            }
+
+            if !padUsesFullSkin {
+                ControllerAssetImage(
+                    fileName: ControllerAsset.fileName(for: btn),
+                    fallback: sym,
+                    fallbackColor: on ? .white : clr,
+                    fallbackFontSize: sz * 0.42,
+                    skin: padSkin
+                )
+                    .padding(padSkin == .crispVector ? 0 : max(1, sz * 0.03))
+                    .brightness(on ? 0.18 : 0)
+                    .saturation(on ? 1.16 : 1.0)
+                    .scaleEffect(on ? 0.90 : 1.0)
+            }
+        }
+        .frame(width: sz, height: sz)
+        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+        .animation(.easeOut(duration: 0.06), value: on)
+        .contentShape(Circle())
             .simultaneousGesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in guard !on else { return }; on = true
                     EmulatorBridge.shared.setPadButton(btn, pressed: true)
@@ -580,21 +771,36 @@ struct PadBtn: View {
     let label: String; let w: CGFloat; let h: CGFloat; let btn: ARMSX2PadButton
     @State private var on = false
     @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padSkin) private var padSkin
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
-        ControllerAssetImage(
-            fileName: ControllerAsset.fileName(for: btn),
-            fallback: label,
-            fallbackColor: on ? .black : .white,
-            fallbackFontSize: min(w, h) * 0.38
-        )
-            .frame(width: w, height: h)
-            .opacity(padOpacity)
-            .brightness(on ? 0.18 : 0)
-            .shadow(color: .white.opacity((on ? 0.45 : 0.10) * padOpacity), radius: on ? 6 : 2)
-            .scaleEffect(on ? 0.9 : 1.0)
-            .animation(.easeOut(duration: 0.06), value: on)
-            .contentShape(Rectangle())
+        let shape = RoundedRectangle(cornerRadius: min(w, h) * 0.28, style: .continuous)
+        ZStack {
+            shape
+                .fill(.white.opacity(0.001))
+
+            if !padUsesFullSkin || on {
+                ControllerPressEffect(shape: shape, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+            }
+
+            if !padUsesFullSkin {
+                ControllerAssetImage(
+                    fileName: ControllerAsset.fileName(for: btn),
+                    fallback: label,
+                    fallbackColor: on ? .black : .white,
+                    fallbackFontSize: min(w, h) * 0.38,
+                    skin: padSkin
+                )
+                    .padding(padSkin == .crispVector ? 0 : max(1, min(w, h) * 0.03))
+                    .brightness(on ? 0.18 : 0)
+                    .scaleEffect(on ? 0.91 : 1.0)
+            }
+        }
+        .frame(width: w, height: h)
+        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+        .animation(.easeOut(duration: 0.06), value: on)
+        .contentShape(Rectangle())
             .simultaneousGesture(DragGesture(minimumDistance: 0)
                 .onChanged { _ in guard !on else { return }; on = true
                     EmulatorBridge.shared.setPadButton(btn, pressed: true)
@@ -613,39 +819,62 @@ struct StickView: View {
     @State private var off: CGSize = .zero
     @State private var isDragging = false
     @Environment(\.padOpacity) private var padOpacity
+    @Environment(\.padSkin) private var padSkin
+    @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
         ZStack {
             Circle()
-                .fill(.black.opacity(0.18 * padOpacity))
-                .stroke(.white.opacity(0.18 * padOpacity), lineWidth: 1)
+                .fill(.white.opacity(0.001))
                 .frame(width: sz, height: sz)
-            ControllerAssetImage(
-                fileName: "ic_controller_analog_base.png",
-                fallback: "",
-                fallbackColor: .white,
-                fallbackFontSize: 1
-            )
-                .frame(width: sz, height: sz)
-                .opacity(padOpacity)
-            ControllerAssetImage(
-                fileName: "ic_controller_analog_stick.png",
-                fallback: "",
-                fallbackColor: .white,
-                fallbackFontSize: 1
-            )
-                .frame(width: knob, height: knob)
-                .opacity(padOpacity)
-                .offset(off)
-            ControllerAssetImage(
-                fileName: isLeft ? "ic_controller_l3_button.png" : "ic_controller_r3_button.png",
-                fallback: isLeft ? "L3" : "R3",
-                fallbackColor: .white.opacity(0.35),
-                fallbackFontSize: 9
-            )
-                .frame(width: 18, height: 18)
-                .opacity(0.45 * padOpacity)
-                .offset(y: sz / 2 + 9)
+
+            if !padUsesFullSkin || isDragging {
+                Circle()
+                    .fill(.black.opacity((isDragging ? 0.26 : 0.18) * padOpacity))
+                    .stroke(.white.opacity((isDragging ? 0.34 : 0.18) * padOpacity), lineWidth: isDragging ? 1.8 : 1)
+                    .shadow(color: .white.opacity(isDragging ? 0.22 * padOpacity : 0.05 * padOpacity), radius: isDragging ? 8 : 2)
+                    .frame(width: sz, height: sz)
+            }
+
+            if !padUsesFullSkin {
+                ControllerAssetImage(
+                    fileName: "ic_controller_analog_base.png",
+                    fallback: "",
+                    fallbackColor: .white,
+                    fallbackFontSize: 1,
+                    skin: padSkin
+                )
+                    .frame(width: sz, height: sz)
+                    .opacity(padOpacity)
+                ControllerAssetImage(
+                    fileName: "ic_controller_analog_stick.png",
+                    fallback: "",
+                    fallbackColor: .white,
+                    fallbackFontSize: 1,
+                    skin: padSkin
+                )
+                    .frame(width: knob, height: knob)
+                    .opacity(padOpacity)
+                    .brightness(isDragging ? 0.18 : 0)
+                    .scaleEffect(isDragging ? 1.08 : 1.0)
+                    .offset(off)
+                ControllerAssetImage(
+                    fileName: isLeft ? "ic_controller_l3_button.png" : "ic_controller_r3_button.png",
+                    fallback: isLeft ? "L3" : "R3",
+                    fallbackColor: .white.opacity(0.35),
+                    fallbackFontSize: 9,
+                    skin: padSkin
+                )
+                    .frame(width: 18, height: 18)
+                    .opacity(0.45 * padOpacity)
+                    .offset(y: sz / 2 + 9)
+            } else if isDragging {
+                Circle()
+                    .fill(.white.opacity(0.22 * padOpacity))
+                    .stroke(.white.opacity(0.34 * padOpacity), lineWidth: 1.4)
+                    .frame(width: knob, height: knob)
+                    .offset(off)
+            }
         }
         .contentShape(Circle())
         .simultaneousGesture(DragGesture(minimumDistance: 0)

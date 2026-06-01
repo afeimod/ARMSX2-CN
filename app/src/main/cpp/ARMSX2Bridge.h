@@ -90,6 +90,9 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 // Info
 + (nonnull NSString *)biosName;
 + (nonnull NSString *)buildVersion;
++ (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
+                                                    toDirectory:(nonnull NSURL *)destinationDirectory
+    NS_SWIFT_NAME(extractControllerSkinArchive(at:to:));
 
 // OSD overlay
 + (void)setPerformanceOverlayVisible:(BOOL)visible;
@@ -109,12 +112,13 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
              upscaleMultiplier:(float)upscaleMultiplier
                    aspectRatio:(nonnull NSString *)aspectRatio
               textureFiltering:(int)textureFiltering
+            hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
     enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
-    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:blendingAccuracy:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(changeDisc(toISO:completion:));
 + (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 

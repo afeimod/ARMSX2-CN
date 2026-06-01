@@ -599,6 +599,29 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
     return [NSData dataWithBytes:data->data() length:data->size()];
 }
 
+static BOOL ARMSX2IsControllerSkinImageName(NSString* name)
+{
+    NSString* ext = name.pathExtension.lowercaseString;
+    return [ext isEqualToString:@"png"] || [ext isEqualToString:@"jpg"] ||
+           [ext isEqualToString:@"jpeg"] || [ext isEqualToString:@"webp"];
+}
+
+static NSString* ARMSX2SanitizedSkinFileName(NSString* name)
+{
+    NSString* last = name.lastPathComponent;
+    if (last.length == 0)
+        return nil;
+
+    NSMutableString* sanitized = [NSMutableString stringWithCapacity:last.length];
+    NSCharacterSet* allowed = [NSCharacterSet characterSetWithCharactersInString:
+        @"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"];
+    for (NSUInteger i = 0; i < last.length; i++) {
+        unichar ch = [last characterAtIndex:i];
+        [sanitized appendString:[allowed characterIsMember:ch] ? [NSString stringWithCharacters:&ch length:1] : @"_"];
+    }
+    return sanitized;
+}
+
 static void ARMSX2ApplyLiveGSBoolSetting(const char* section, const char* key, bool value)
 {
     if (std::strcmp(section, "EmuCore/GS") != 0)
@@ -636,6 +659,12 @@ static void ARMSX2ApplyLiveGSBoolSetting(const char* section, const char* key, b
     APPLY_OSD_BOOL(LoadTextureReplacements);
     APPLY_OSD_BOOL(LoadTextureReplacementsAsync);
     APPLY_OSD_BOOL(PrecacheTextureReplacements);
+
+    if (std::strcmp(key, "hw_mipmap") == 0) {
+        EmuConfig.GS.HWMipmap = value;
+        GSConfig.HWMipmap = value;
+        return;
+    }
 
 #undef APPLY_OSD_BOOL
 }
@@ -855,6 +884,63 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     return [NSString stringWithFormat:@"ARMSX2 iOS v%@", ver];
 }
 
++ (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
+                                                    toDirectory:(nonnull NSURL *)destinationDirectory {
+    NSMutableArray<NSURL *> *extracted = [NSMutableArray array];
+    if (!archiveURL.isFileURL || !destinationDirectory.isFileURL)
+        return extracted;
+
+    NSError *directoryError = nil;
+    if (![[NSFileManager defaultManager] createDirectoryAtURL:destinationDirectory
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:&directoryError]) {
+        NSLog(@"[ARMSX2 iOS Skins] Could not create extraction directory %@: %@",
+              destinationDirectory.path, directoryError.localizedDescription);
+        return extracted;
+    }
+
+    zip_error_t ze = {};
+    auto zf = zip_open_managed(archiveURL.path.UTF8String, ZIP_RDONLY, &ze);
+    if (!zf) {
+        NSLog(@"[ARMSX2 iOS Skins] Could not open skin archive %@: %s",
+              archiveURL.lastPathComponent, zip_error_strerror(&ze));
+        return extracted;
+    }
+
+    const zip_int64_t count = zip_get_num_entries(zf.get(), 0);
+    for (zip_uint64_t i = 0; i < static_cast<zip_uint64_t>(std::max<zip_int64_t>(count, 0)); i++) {
+        zip_stat_t stat = {};
+        if (zip_stat_index(zf.get(), i, ZIP_FL_ENC_GUESS, &stat) != 0 || !stat.name)
+            continue;
+
+        NSString *entryName = [NSString stringWithUTF8String:stat.name];
+        if (entryName.length == 0 || [entryName hasSuffix:@"/"] || !ARMSX2IsControllerSkinImageName(entryName))
+            continue;
+
+        auto file = zip_fopen_index_managed(zf.get(), i, ZIP_FL_ENC_GUESS);
+        if (!file)
+            continue;
+
+        std::optional<std::vector<u8>> data = ReadBinaryFileInZip(file.get());
+        if (!data.has_value() || data->empty())
+            continue;
+
+        NSString *safeName = ARMSX2SanitizedSkinFileName(entryName);
+        if (safeName.length == 0)
+            continue;
+
+        NSURL *destinationURL = [destinationDirectory URLByAppendingPathComponent:safeName];
+        NSData *imageData = [NSData dataWithBytes:data->data() length:data->size()];
+        if ([imageData writeToURL:destinationURL atomically:YES])
+            [extracted addObject:destinationURL];
+    }
+
+    NSLog(@"[ARMSX2 iOS Skins] Extracted %lu image(s) from %@",
+          static_cast<unsigned long>(extracted.count), archiveURL.lastPathComponent);
+    return extracted;
+}
+
 + (nullable NSString *)currentISOPath {
     NSString *docsPath = [NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES) firstObject];
     NSString *iniPath = [docsPath stringByAppendingPathComponent:@"ARMSX2-iOS.ini"];
@@ -999,6 +1085,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     const float globalUpscale = g_p44_settings_interface ? g_p44_settings_interface->GetFloatValue("EmuCore/GS", "upscale_multiplier", 1.0f) : 1.0f;
     const std::string globalAspect = g_p44_settings_interface ? g_p44_settings_interface->GetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2") : std::string("Auto 4:3/3:2");
     const int globalTextureFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "filter", 2) : 2;
+    const bool globalHardwareMipmapping = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "hw_mipmap", true) : true;
     const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
     const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
     const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
@@ -1012,6 +1099,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         @"upscaleMultiplier": @(globalUpscale),
         @"aspectRatio": ARMSX2NSStringFromStdString(globalAspect),
         @"textureFiltering": @(globalTextureFiltering),
+        @"hardwareMipmapping": @(globalHardwareMipmapping),
         @"blendingAccuracy": @(globalBlendingAccuracy),
         @"enableCheats": @(globalEnableCheats),
         @"enablePatches": @(globalEnablePatches),
@@ -1038,6 +1126,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.ContainsValue("EmuCore/GS", "upscale_multiplier") ||
         si.ContainsValue("EmuCore/GS", "AspectRatio") ||
         si.ContainsValue("EmuCore/GS", "filter") ||
+        si.ContainsValue("EmuCore/GS", "hw_mipmap") ||
         si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
         si.ContainsValue("EmuCore", "EnableCheats") ||
         si.ContainsValue("EmuCore", "EnablePatches") ||
@@ -1049,6 +1138,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     result[@"upscaleMultiplier"] = @(si.GetFloatValue("EmuCore/GS", "upscale_multiplier", [result[@"upscaleMultiplier"] floatValue]));
     result[@"aspectRatio"] = ARMSX2NSStringFromStdString(si.GetStringValue("EmuCore/GS", "AspectRatio", currentAspect.UTF8String));
     result[@"textureFiltering"] = @(si.GetIntValue("EmuCore/GS", "filter", [result[@"textureFiltering"] intValue]));
+    result[@"hardwareMipmapping"] = @(si.GetBoolValue("EmuCore/GS", "hw_mipmap", [result[@"hardwareMipmapping"] boolValue]));
     result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
     result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
     result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
@@ -1062,6 +1152,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
              upscaleMultiplier:(float)upscaleMultiplier
                    aspectRatio:(nonnull NSString *)aspectRatio
               textureFiltering:(int)textureFiltering
+            hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
@@ -1085,6 +1176,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.SetFloatValue("EmuCore/GS", "upscale_multiplier", upscaleMultiplier);
         si.SetStringValue("EmuCore/GS", "AspectRatio", aspectRatio.UTF8String ?: "Auto 4:3/3:2");
         si.SetIntValue("EmuCore/GS", "filter", textureFiltering);
+        si.SetBoolValue("EmuCore/GS", "hw_mipmap", hardwareMipmapping);
         si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
         si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
         si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
@@ -1095,6 +1187,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
         si.DeleteValue("EmuCore/GS", "AspectRatio");
         si.DeleteValue("EmuCore/GS", "filter");
+        si.DeleteValue("EmuCore/GS", "hw_mipmap");
         si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
         si.DeleteValue("EmuCore", "EnableCheats");
         si.DeleteValue("EmuCore", "EnablePatches");
@@ -1220,6 +1313,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         GSConfig.OsdShowFPS = true;
         GSConfig.OsdShowSpeed = true;
         GSConfig.OsdShowCPU = true;
+        GSConfig.OsdShowGPU = true;
         GSConfig.OsdShowIndicators = true;
         break;
     case 2: // detail: performance and renderer diagnostics

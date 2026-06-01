@@ -40,6 +40,15 @@
 #include "fmt/format.h"
 #include "imgui.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay();
+extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity();
+extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine();
+#endif
+#endif
+
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -197,6 +206,20 @@ __ri void ImGuiManager::DrawPerformanceOverlay(float& position_y, float scale, f
 
 			DRAW_LINE(fixed_font, text.c_str(), color);
 		}
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+		if (ARMSX2_iOSShouldShowDeviceStatsOverlay())
+		{
+			const char* device_stats = ARMSX2_iOSGetDeviceStatsOverlayLine();
+			if (device_stats && device_stats[0] != '\0')
+			{
+				const int severity = ARMSX2_iOSGetDeviceStatsOverlaySeverity();
+				const ImU32 color = (severity >= 2) ? IM_COL32(255, 100, 100, 255) :
+					((severity == 1) ? IM_COL32(255, 200, 100, 255) : IM_COL32(255, 255, 255, 255));
+				DRAW_LINE(fixed_font, device_stats, color);
+			}
+		}
+#endif
 
 		// CPU mode: separate line, actual runtime state (not INI)
 		if (!first)

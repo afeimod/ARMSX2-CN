@@ -61,19 +61,24 @@ struct GameScreenView: View {
                 }
                 .ignoresSafeArea()  // Always fullscreen layout in landscape
             } else {
-                // Portrait: Metal top half, pad bottom half, within safe area
-                VStack(spacing: 0) {
-                    MetalGameView()
-                        .frame(height: geo.size.height / 2)
-                    if padVisible {
-                        VirtualControllerView()
+                // Portrait: Metal top half, pad bottom half. Full-phone Manic
+                // skins are intentionally not drawn here until their info.json
+                // viewport metadata is parsed, otherwise they crop/stretch over
+                // gameplay and make the touch zones look wrong.
+                ZStack {
+                    VStack(spacing: 0) {
+                        MetalGameView()
                             .frame(height: geo.size.height / 2)
-                    } else {
-                        Spacer()
+                        if padVisible {
+                            VirtualControllerView()
+                                .frame(height: geo.size.height / 2)
+                        } else {
+                            Spacer()
+                        }
                     }
-                }
-                .overlay(alignment: .topTrailing) {
-                    menuOverlay(isLandscape: false)
+                    .overlay(alignment: .topTrailing) {
+                        menuOverlay(isLandscape: false)
+                    }
                 }
             }
         }
@@ -159,14 +164,14 @@ struct GameScreenView: View {
                     }
                 }
             )) {
-                Label("OSD", systemImage: "speedometer")
+                Label(settings.localized("OSD"), systemImage: "speedometer")
             }
             Toggle(isOn: $padVisible) {
-                Label("Virtual Pad", systemImage: "gamecontroller")
+                Label(settings.localized("Virtual Pad"), systemImage: "gamecontroller")
             }
             if isLandscape {
                 Toggle(isOn: $fullScreen) {
-                    Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                    Label(settings.localized("Full Screen"), systemImage: "arrow.up.left.and.arrow.down.right")
                 }
             }
             Divider()
@@ -174,38 +179,38 @@ struct GameScreenView: View {
                 refreshCompatibilityState()
                 showCompatibilityLab = true
             } label: {
-                Label("Compatibility Lab", systemImage: "wand.and.stars")
+                Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
             }
             if vmMenuAvailable {
                 Button {
                     resetCurrentROM()
                 } label: {
-                    Label("Reset ROM", systemImage: "arrow.counterclockwise.circle")
+                    Label(settings.localized("Reset ROM"), systemImage: "arrow.counterclockwise.circle")
                 }
 
                 Button {
                     showSpeedControl = true
                 } label: {
-                    Label("Speed / FPS Target", systemImage: "speedometer")
+                    Label(settings.localized("Speed / FPS Target"), systemImage: "speedometer")
                 }
 
                 Button {
                     ARMSX2Bridge.testControllerRumble()
                     presentSaveStateStatus("Controller rumble test sent")
                 } label: {
-                    Label("Test Controller Rumble", systemImage: "waveform.path")
+                    Label(settings.localized("Test Controller Rumble"), systemImage: "waveform.path")
                 }
 
                 Menu {
                     Button {
                         ejectDisc()
                     } label: {
-                        Label("Eject Disc", systemImage: "eject")
+                        Label(settings.localized("Eject Disc"), systemImage: "eject")
                     }
 
                     let discs = availableDiscSwapNames
                     if discs.isEmpty {
-                        Text("No disc images found")
+                        Text(settings.localized("No disc images found"))
                     } else {
                         Menu {
                             ForEach(discs, id: \.self) { discName in
@@ -216,7 +221,7 @@ struct GameScreenView: View {
                                 }
                             }
                         } label: {
-                            Label("Insert Disc (No Reboot)", systemImage: "tray.and.arrow.down")
+                            Label(settings.localized("Insert Disc (No Reboot)"), systemImage: "tray.and.arrow.down")
                         }
 
                         Menu {
@@ -228,11 +233,11 @@ struct GameScreenView: View {
                                 }
                             }
                         } label: {
-                            Label("Restart With Disc", systemImage: "arrow.clockwise.circle")
+                            Label(settings.localized("Restart With Disc"), systemImage: "arrow.clockwise.circle")
                         }
                     }
                 } label: {
-                    Label("Change Disc", systemImage: "opticaldisc")
+                    Label(settings.localized("Change Disc"), systemImage: "opticaldisc")
                 }
             }
 
@@ -240,32 +245,32 @@ struct GameScreenView: View {
                 Button {
                     openPerGameSettingsForCurrentGame()
                 } label: {
-                    Label("Per-Game Settings", systemImage: "slider.horizontal.3")
+                    Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
                 }
 
                 Button {
                     showPNACHImporter = true
                 } label: {
-                    Label("Import PNACH / 60 FPS Patch", systemImage: "wand.and.stars")
+                    Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
                 }
 
                 Button {
                     showSaveStates = true
                 } label: {
-                    Label("Save / Load States", systemImage: "square.stack.3d.up.fill")
+                    Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
                 }
             } else if vmMenuAvailable {
                 Button {
                     showSaveStates = true
                 } label: {
-                    Label("Save / Load States", systemImage: "square.stack.3d.up.fill")
+                    Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
                 }
             }
             Divider()
             Button {
                 appState.returnToMenu()
             } label: {
-                Label("Back to Menu", systemImage: "list.bullet")
+                Label(settings.localized("Back to Menu"), systemImage: "list.bullet")
             }
         } label: {
             Image(systemName: "ellipsis.circle.fill")
@@ -827,13 +832,13 @@ private struct SpeedControlPanel: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Frame Limiter") {
-                    Toggle("Enable Limiter", isOn: $settings.frameLimiterEnabled)
+                Section(settings.localized("Frame Limiter")) {
+                    Toggle(settings.localized("Enable Limiter"), isOn: $settings.frameLimiterEnabled)
 
                     if settings.frameLimiterEnabled {
                         VStack(alignment: .leading, spacing: 10) {
                             HStack {
-                                Text("FPS Target")
+                                Text(settings.localized("FPS Target"))
                                 Spacer()
                                 Text(Self.formatFPS(settings.targetFPS))
                                     .foregroundStyle(.secondary)
@@ -855,19 +860,19 @@ private struct SpeedControlPanel: View {
                             }
                         }
                     } else {
-                        Text("Limiter is OFF. Games can run above normal speed and may draw more power.")
+                        Text(settings.localized("Limiter is OFF. Games can run above normal speed and may draw more power."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                Section("How It Works") {
-                    Text("This controls PCSX2 Normal Speed. On NTSC games, 60 FPS is normal speed and 30 FPS is about 50% speed. It is safe to change while a game is running.")
+                Section(settings.localized("How It Works")) {
+                    Text(settings.localized("This controls PCSX2 Normal Speed. On NTSC games, 60 FPS is normal speed and 30 FPS is about 50% speed. It is safe to change while a game is running."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
 
                     HStack {
-                        Text("Normal Speed")
+                        Text(settings.localized("Normal Speed"))
                         Spacer()
                         Text(Self.formatPercent(settings.targetFPS / max(settings.ntscFramerate, 1.0)))
                             .foregroundStyle(.secondary)
@@ -875,10 +880,10 @@ private struct SpeedControlPanel: View {
                     }
                 }
             }
-            .navigationTitle("Speed / FPS Target")
+            .navigationTitle(settings.localized("Speed / FPS Target"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(settings.localized("Done")) {
                         dismiss()
                     }
                 }

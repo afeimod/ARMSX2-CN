@@ -5,6 +5,7 @@ import SwiftUI
 
 struct RootView: View {
     @State private var appState = AppState.shared
+    @State private var settings = SettingsStore.shared
     @State private var fileImporter = FileImportHandler.shared
     @State private var showBootSplash = true
 
@@ -29,12 +30,13 @@ struct RootView: View {
                 .zIndex(100)
             }
         }
+        .environment(\.layoutDirection, settings.localizedLayoutDirection)
         .statusBarHidden(showBootSplash)
         .onOpenURL { url in
             fileImporter.handleURL(url)
         }
-        .alert("File Import", isPresented: $fileImporter.showImportAlert) {
-            Button("OK") {}
+        .alert(settings.localized("File Import"), isPresented: $fileImporter.showImportAlert) {
+            Button(settings.localized("OK")) {}
         } message: {
             Text(fileImporter.lastImportMessage ?? "")
         }
@@ -43,6 +45,7 @@ struct RootView: View {
 
 struct MenuTabView: View {
     @State private var appState = AppState.shared
+    @State private var settings = SettingsStore.shared
     @State private var selectedTab = 0
 
     var body: some View {
@@ -72,19 +75,19 @@ struct MenuTabView: View {
         TabView(selection: $selectedTab) {
             GameListView()
                 .tabItem {
-                    Label("Games", systemImage: "gamecontroller")
+                    Label(settings.localized("Games"), systemImage: "gamecontroller")
                 }
                 .tag(0)
 
             BIOSListView()
                 .tabItem {
-                    Label("BIOS", systemImage: "cpu")
+                    Label(settings.localized("BIOS"), systemImage: "cpu")
                 }
                 .tag(1)
 
             HelpView()
                 .tabItem {
-                    Label("Help", systemImage: "questionmark.circle")
+                    Label(settings.localized("Help"), systemImage: "questionmark.circle")
                 }
                 .tag(2)
 
@@ -92,7 +95,7 @@ struct MenuTabView: View {
                 SettingsRootView()
             }
             .tabItem {
-                Label("Settings", systemImage: "gearshape")
+                Label(settings.localized("Settings"), systemImage: "gearshape")
             }
             .tag(3)
         }
@@ -104,6 +107,7 @@ struct MenuTabView: View {
 #if targetEnvironment(macCatalyst)
 private struct CatalystMenuTabBar: View {
     @Binding var selectedTab: Int
+    @State private var settings = SettingsStore.shared
 
     private let tabs = [
         (0, "Games"),
@@ -118,7 +122,7 @@ private struct CatalystMenuTabBar: View {
                 Button {
                     selectedTab = tab.0
                 } label: {
-                    Text(tab.1)
+                    Text(settings.localized(tab.1))
                         .font(.callout)
                         .fontWeight(selectedTab == tab.0 ? .semibold : .regular)
                         .foregroundStyle(.primary)

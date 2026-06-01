@@ -4,6 +4,7 @@
 import SwiftUI
 
 struct PadLayoutEditView: View {
+    @State private var settings = SettingsStore.shared
     @State private var layout = PadLayoutStore.shared
     @State private var editLandscape = false
     @Environment(\.dismiss) private var dismiss
@@ -29,6 +30,8 @@ struct PadLayoutEditView: View {
                             .foregroundStyle(.yellow.opacity(0.3))
                             .frame(width: guideRect.width, height: guideRect.height)
                             .position(x: guideRect.midX, y: guideRect.midY)
+
+                        customSkinPreview(isLandscape: true, width: geo.size.width, height: geo.size.height)
 
                         Text("Safe Zone")
                             .font(.caption2)
@@ -64,6 +67,7 @@ struct PadLayoutEditView: View {
 
                             ZStack {
                                 Color(white: 0.10)
+                                customSkinPreview(isLandscape: false, width: geo.size.width, height: geo.size.height / 2)
 
                                 // Safe zone guide for portrait pad area
                                 let padH = geo.size.height / 2
@@ -150,6 +154,21 @@ struct PadLayoutEditView: View {
         }
         .padding(.horizontal)
         .padding(.top, 4)
+    }
+
+    @ViewBuilder
+    private func customSkinPreview(isLandscape: Bool, width: CGFloat, height: CGFloat) -> some View {
+        if let fullSkin = ControllerAsset.gameplayFullSkinImage(skin: settings.virtualPadSkin, isLandscape: isLandscape) {
+            Image(uiImage: fullSkin)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFill()
+                .frame(width: width, height: height)
+                .clipped()
+                .opacity(0.42)
+                .allowsHitTesting(false)
+        }
     }
 
     @ViewBuilder

@@ -53,6 +53,11 @@ struct GraphicsSettingsView: View {
                     Text("Bilinear (Forced excl. Sprite)").tag(3)
                 }
 
+                Toggle("Hardware Mipmapping", isOn: $settings.hardwareMipmapping)
+                Text("Emulates PS2 texture mipmaps in the hardware renderer. Leave on by default; turn off only if a game has mipmap shimmer, stripes, or bad texture LOD behavior. Requires reset/relaunch for safest results.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle("FXAA", isOn: $settings.fxaa)
                 Text("Fast anti-aliasing. Smooths edges but may blur textures slightly.")
                     .font(.caption)
