@@ -100,16 +100,7 @@ private enum StorageClearAction: Identifiable, Sendable {
 private enum StorageCleaner {
     static func report(paths: StoragePaths) async -> StorageReport {
         await Task.detached(priority: .utility) {
-            StorageReport(
-                appCacheBytes: directorySize(paths.emulatorCacheURL) + directorySize(paths.systemCachesURL) + directorySize(paths.temporaryURL),
-                textureDumpBytes: textureDumpDirectories(in: paths.textureRootURL).reduce(Int64(0)) { partial, url in
-                    partial + directorySize(url)
-                },
-                diagnosticLogBytes: directorySize(paths.logsURL) + paths.rootLogURLs.reduce(Int64(0)) { partial, url in
-                    partial + directorySize(url)
-                },
-                stateSafetyBackupBytes: directorySize(paths.stateSafetyBackupsURL)
-            )
+            awaitableReport(paths: paths)
         }.value
     }
 

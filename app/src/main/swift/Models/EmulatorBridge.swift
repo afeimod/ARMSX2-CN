@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
-import Combine
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -11,6 +10,9 @@ import UIKit
 enum StikDebugLauncher {
     private static let lastAutoOpenKey = "ARMSX2iOSLastStikDebugAutoOpenTime"
     private static let autoOpenCooldown: TimeInterval = 120
+    private static func log(_ message: String) {
+        print("[ARMSX2 iOS] StikDebug \(message)")
+    }
 
     static func open(reason: String = "manual", completion: ((Bool) -> Void)? = nil) {
 #if canImport(UIKit)
@@ -23,14 +25,14 @@ enum StikDebugLauncher {
         ].compactMap(URL.init(string:))
 
         guard !candidates.isEmpty else {
-            print("[ARMSX2 iOS] StikDebug open failed: no valid launch URLs")
+            log("open failed: no valid launch URLs")
             completion?(false)
             return
         }
 
         openFirstAvailableURL(candidates, reason: reason, completion: completion)
 #else
-        print("[ARMSX2 iOS] StikDebug open skipped: UIKit unavailable reason=\(reason)")
+        log("open skipped: UIKit unavailable reason=\(reason)")
         completion?(false)
 #endif
     }
@@ -38,13 +40,13 @@ enum StikDebugLauncher {
 #if canImport(UIKit)
     private static func openFirstAvailableURL(_ urls: [URL], reason: String, completion: ((Bool) -> Void)?) {
         guard let url = urls.first else {
-            print("[ARMSX2 iOS] StikDebug open failed reason=\(reason): no URL scheme accepted")
+            log("open failed reason=\(reason): no URL scheme accepted")
             completion?(false)
             return
         }
 
         UIApplication.shared.open(url, options: [:]) { success in
-            print("[ARMSX2 iOS] StikDebug open \(success ? "succeeded" : "failed") reason=\(reason) url=\(url.absoluteString)")
+            log("open \(success ? "succeeded" : "failed") reason=\(reason) url=\(url.absoluteString)")
             if success {
                 completion?(true)
             } else {
@@ -61,7 +63,7 @@ enum StikDebugLauncher {
         let now = Date().timeIntervalSince1970
         let last = UserDefaults.standard.double(forKey: lastAutoOpenKey)
         guard now - last >= autoOpenCooldown else {
-            print("[ARMSX2 iOS] StikDebug auto-open throttled reason=\(reason)")
+            log("auto-open throttled reason=\(reason)")
             return
         }
 

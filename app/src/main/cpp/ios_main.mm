@@ -2219,7 +2219,6 @@ namespace Host
     }
 
     // Only needed stubs for linking
-    // GetHTTPUserAgent removed (duplicate)
     bool CopyTextToClipboard(const std::string_view text) { return false; }
     void OnOSDMessage(const std::string&, float, u32) {}
     void ReportError(const char*, const char*) {}
@@ -2755,8 +2754,6 @@ namespace FileSystem {
 }
 
 
-// ... IOCtlSrc Stub Removed ...
-
 // ... CocoaTools Stub ...
 namespace CocoaTools {
     void InhibitAppNap(const std::string&) {}
@@ -2816,7 +2813,6 @@ bool PCAPAdapter::ValidateEtherFrame(NetPacket*) { return false; }
 
 
 // ... FileSystem Stub ...
-// Duplicate FileSystem block removed
 
 // -- End Host Stubs --
 
@@ -3694,8 +3690,6 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #include <cstdio>
 
 int main(int argc, char * argv[]) {
-    // InstallSignalHandler(); // Removed
-    
     @autoreleasepool {
         // SDL_MAIN_HANDLED is set, so we use standard main()
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([PCSX2AppDelegate class]));

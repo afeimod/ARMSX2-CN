@@ -4,7 +4,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
-import ImageIO
 
 struct ISOEntry: Identifiable {
     var id: String { name }
@@ -1001,25 +1000,6 @@ private struct GameInfoPanel: View {
     }
 }
 
-private struct LibraryCompatibilityPreset: Identifiable {
-    let id: String
-    let title: String
-    let systemImage: String
-}
-
-private let libraryCompatibilityPresets: [LibraryCompatibilityPreset] = [
-    LibraryCompatibilityPreset(id: "off", title: "Off / Default", systemImage: "power"),
-    LibraryCompatibilityPreset(id: "cop1", title: "COP1 Everything Only", systemImage: "function"),
-    LibraryCompatibilityPreset(id: "loadstore", title: "COP1 + EE Load/Store", systemImage: "arrow.left.arrow.right"),
-    LibraryCompatibilityPreset(id: "mmi", title: "COP1 + EE MMI", systemImage: "rectangle.3.group"),
-    LibraryCompatibilityPreset(id: "cop2vu", title: "COP1 + EE COP2/VU Macro", systemImage: "cube.transparent"),
-    LibraryCompatibilityPreset(id: "multdiv", title: "COP1 + EE Mult/Div", systemImage: "multiply"),
-    LibraryCompatibilityPreset(id: "shifts", title: "COP1 + EE Shifts", systemImage: "arrow.left.and.right"),
-    LibraryCompatibilityPreset(id: "moves", title: "COP1 + EE Moves/HI-LO", systemImage: "arrow.triangle.swap"),
-    LibraryCompatibilityPreset(id: "integeralu", title: "COP1 + EE Integer ALU", systemImage: "plus.forwardslash.minus"),
-    LibraryCompatibilityPreset(id: "branches", title: "COP1 + EE Branches/Jumps", systemImage: "arrow.triangle.branch"),
-]
-
 private struct GameCompatibilityPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings = SettingsStore.shared
@@ -1054,7 +1034,7 @@ private struct GameCompatibilityPanel: View {
                 }
 
                 Section(settings.localized("Presets")) {
-                    ForEach(libraryCompatibilityPresets) { preset in
+                    ForEach(compatibilityPresets) { preset in
                         Button {
                             apply(preset)
                         } label: {
@@ -1120,7 +1100,7 @@ private struct GameCompatibilityPanel: View {
         }
     }
 
-    private func apply(_ preset: LibraryCompatibilityPreset) {
+    private func apply(_ preset: CompatibilityPreset) {
         ARMSX2Bridge.setCompatibilityPreset(preset.id, forISO: game.name)
         selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.name)
         identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.name)
@@ -1128,11 +1108,11 @@ private struct GameCompatibilityPanel: View {
     }
 
     private func presetTitle(_ id: String) -> String {
-        libraryCompatibilityPresets.first(where: { $0.id == id })?.title ?? "Custom Advanced Flags"
+        compatibilityPresets.first(where: { $0.id == id })?.title ?? "Custom Advanced Flags"
     }
 
-    private var advancedPresets: [LibraryCompatibilityPreset] {
-        libraryCompatibilityPresets.filter { $0.id != "off" }
+    private var advancedPresets: [CompatibilityPreset] {
+        compatibilityPresets.filter { $0.id != "off" }
     }
 }
 
@@ -1332,129 +1312,6 @@ struct PerGameSettingsPanel: View {
             return number.floatValue
         }
         return defaultValue
-    }
-}
-
-private struct CoverThumbnailView: View {
-    let gameName: String
-    let coverURL: URL?
-    let coverSignature: String?
-    let width: CGFloat
-    let height: CGFloat
-
-    @State private var image: UIImage?
-
-    private var cacheID: String {
-        "\(coverSignature ?? "placeholder")|\(Int(width))x\(Int(height))"
-    }
-
-    var body: some View {
-        ZStack {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(Color(.secondarySystemGroupedBackground))
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(.white.opacity(0.12), lineWidth: 1)
-
-            if let image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-                    .frame(width: width, height: height)
-                    .clipped()
-            } else {
-                VStack(spacing: 6) {
-                    Image(systemName: gameName.lowercased().hasSuffix(".chd") ? "archivebox" : "opticaldisc")
-                        .font(.system(size: 24, weight: .medium))
-                    Text(gameName.lowercased().hasSuffix(".chd") ? "CHD" : "PS2")
-                        .font(.caption2)
-                        .fontWeight(.bold)
-                }
-                .foregroundStyle(.secondary)
-            }
-        }
-        .frame(width: width, height: height)
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .task(id: cacheID) {
-            await loadThumbnail()
-        }
-    }
-
-    @MainActor
-    private func loadThumbnail() async {
-        guard let coverURL else {
-            image = nil
-            return
-        }
-
-        let scale = UIScreen.main.scale
-        if let cached = CoverThumbnailCache.shared.cachedImage(for: coverURL, signature: coverSignature, width: width, height: height, scale: scale) {
-            image = cached
-            return
-        }
-
-        image = await CoverThumbnailCache.shared.thumbnail(for: coverURL, signature: coverSignature, width: width, height: height, scale: scale)
-    }
-}
-
-private final class CoverThumbnailCache: @unchecked Sendable {
-    static let shared = CoverThumbnailCache()
-
-    private let cache = NSCache<NSString, UIImage>()
-
-    private init() {
-        cache.countLimit = 768
-        cache.totalCostLimit = 96 * 1024 * 1024
-    }
-
-    func cachedImage(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) -> UIImage? {
-        cache.object(forKey: cacheKey(for: url, signature: signature, width: width, height: height, scale: scale))
-    }
-
-    func thumbnail(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) async -> UIImage? {
-        let key = cacheKey(for: url, signature: signature, width: width, height: height, scale: scale)
-        if let cached = cache.object(forKey: key) {
-            return cached
-        }
-
-        let path = url.path
-        let maxPixelSize = max(1, Int(max(width, height) * scale))
-        let image = await Task.detached(priority: .utility) {
-            let sourceOptions = [kCGImageSourceShouldCache: false] as CFDictionary
-            let thumbnailOptions = [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true,
-                kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
-            ] as CFDictionary
-
-            guard let source = CGImageSourceCreateWithURL(url as CFURL, sourceOptions),
-                  let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions) else {
-                return UIImage(contentsOfFile: path)
-            }
-
-            return UIImage(cgImage: cgImage, scale: scale, orientation: .up)
-        }.value
-
-        if let image {
-            let cost = max(1, Int(image.size.width * image.scale * image.size.height * image.scale * 4))
-            cache.setObject(image, forKey: key, cost: cost)
-        }
-
-        return image
-    }
-
-    static func signature(for url: URL?) -> String? {
-        guard let url else { return nil }
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-        let modified = values?.contentModificationDate?.timeIntervalSince1970 ?? 0
-        let size = values?.fileSize ?? 0
-        return "\(url.path)|\(modified)|\(size)"
-    }
-
-    private func cacheKey(for url: URL, signature: String?, width: CGFloat, height: CGFloat, scale: CGFloat) -> NSString {
-        let pixelWidth = Int(width * scale)
-        let pixelHeight = Int(height * scale)
-        return "\(signature ?? url.path)|\(pixelWidth)x\(pixelHeight)" as NSString
     }
 }
 

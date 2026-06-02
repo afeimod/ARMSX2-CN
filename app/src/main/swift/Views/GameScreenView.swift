@@ -6,13 +6,13 @@ import UIKit
 
 private let runtimeMenuStateChangedNotification = Notification.Name("ARMSX2iOSRuntimeMenuStateChanged")
 
-private struct CompatibilityPreset: Identifiable {
+struct CompatibilityPreset: Identifiable {
     let id: String
     let title: String
     let systemImage: String
 }
 
-private let compatibilityPresets: [CompatibilityPreset] = [
+let compatibilityPresets: [CompatibilityPreset] = [
     CompatibilityPreset(id: "off", title: "Off / Default", systemImage: "power"),
     CompatibilityPreset(id: "cop1", title: "COP1 Everything Only", systemImage: "function"),
     CompatibilityPreset(id: "loadstore", title: "COP1 + EE Load/Store", systemImage: "arrow.left.arrow.right"),
