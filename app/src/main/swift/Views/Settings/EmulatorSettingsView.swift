@@ -5,6 +5,8 @@ import SwiftUI
 
 struct EmulatorSettingsView: View {
     @State private var settings = SettingsStore.shared
+    @State private var stikDebugOpenFailed = false
+    @State private var stikDebugOpenInProgress = false
 
     var body: some View {
         Form {
@@ -14,9 +16,9 @@ struct EmulatorSettingsView: View {
                     set: { settings.eeCoreType = $0 ? 2 : 1 }
                 )) {
                     HStack {
-                        Text("EE Core")
+                        Text(settings.localized("EE Core"))
                         Spacer()
-                        Text(settings.eeCoreType != 1 ? "ARM64 JIT" : "Interpreter")
+                        Text(settings.localized(settings.eeCoreType != 1 ? "ARM64 JIT" : "Interpreter"))
                             .foregroundStyle(.secondary)
                             .font(.callout)
                     }
@@ -25,7 +27,7 @@ struct EmulatorSettingsView: View {
                     HStack {
                         Text("IOP")
                         Spacer()
-                        Text(settings.iopRecompiler ? "JIT" : "Interpreter")
+                        Text(settings.localized(settings.iopRecompiler ? "JIT" : "Interpreter"))
                             .foregroundStyle(.secondary)
                             .font(.callout)
                     }
@@ -34,7 +36,7 @@ struct EmulatorSettingsView: View {
                     HStack {
                         Text("VU0")
                         Spacer()
-                        Text(settings.vu0Recompiler ? "JIT" : "Interpreter")
+                        Text(settings.localized(settings.vu0Recompiler ? "JIT" : "Interpreter"))
                             .foregroundStyle(.secondary)
                             .font(.callout)
                     }
@@ -43,39 +45,65 @@ struct EmulatorSettingsView: View {
                     HStack {
                         Text("VU1")
                         Spacer()
-                        Text(settings.vu1Recompiler ? "JIT" : "Interpreter")
+                        Text(settings.localized(settings.vu1Recompiler ? "JIT" : "Interpreter"))
                             .foregroundStyle(.secondary)
                             .font(.callout)
                     }
                 }
-                Text("Changes take effect on next VM boot.")
+                Text(settings.localized("Changes take effect on next VM boot."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("CPU Recompiler")
+                Text(settings.localized("CPU Recompiler"))
             }
 
-            Section("Boot") {
-                Toggle("Fast Boot", isOn: $settings.fastBoot)
-                Text("Skips BIOS intro. Some games require this OFF.")
+            Section(settings.localized("StikDebug")) {
+                Toggle(settings.localized("Auto-open StikDebug"), isOn: $settings.autoOpenStikDebug)
+
+                Button {
+                    stikDebugOpenInProgress = true
+                    stikDebugOpenFailed = false
+                    StikDebugLauncher.open(reason: "emulator-settings") { success in
+                        stikDebugOpenInProgress = false
+                        stikDebugOpenFailed = !success
+                    }
+                } label: {
+                    Label(settings.localized("Open StikDebug"), systemImage: "bolt.horizontal.circle")
+                }
+                .disabled(stikDebugOpenInProgress)
+
+                Text(settings.localized("Opens StikDebug automatically when JIT is missing. If the status stays red, launch ARMSX2 from the StikDebug/UTM-Dolphin script."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if stikDebugOpenFailed {
+                    Text(settings.localized("Open StikDebug manually, then run the UTM-Dolphin script and relaunch ARMSX2."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+            }
+
+            Section(settings.localized("Boot")) {
+                Toggle(settings.localized("Fast Boot"), isOn: $settings.fastBoot)
+                Text(settings.localized("Skips BIOS intro. Some games require this OFF."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Memory") {
-                Toggle("Fastmem", isOn: $settings.fastmem)
-                Text("Direct memory mapping for EE. Disable if 3D graphics are broken. Requires restart.")
+            Section(settings.localized("Memory")) {
+                Toggle(settings.localized("Fastmem"), isOn: $settings.fastmem)
+                Text(settings.localized("Direct memory mapping for EE. Disable if 3D graphics are broken. Requires restart."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Performance") {
-                Toggle("Frame Limiter", isOn: $settings.frameLimiterEnabled)
+            Section(settings.localized("Performance")) {
+                Toggle(settings.localized("Frame Limiter"), isOn: $settings.frameLimiterEnabled)
 
                 if settings.frameLimiterEnabled {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("FPS Target")
+                            Text(settings.localized("FPS Target"))
                             Spacer()
                             Text(Self.formatFPS(settings.targetFPS))
                                 .foregroundStyle(.secondary)
@@ -91,7 +119,7 @@ struct EmulatorSettingsView: View {
                         HStack {
                             Text(Self.formatFPS(SettingsStore.minTargetFPS))
                             Spacer()
-                            Button("60 FPS") {
+                            Button(settings.localized("60 FPS")) {
                                 settings.targetFPS = SettingsStore.defaultTargetFPS
                             }
                             .buttonStyle(.borderless)
@@ -103,16 +131,16 @@ struct EmulatorSettingsView: View {
                     }
                 } else {
                     HStack {
-                        Text("Speed Target")
+                        Text(settings.localized("Speed Target"))
                         Spacer()
-                        Text("Unlocked")
+                        Text(settings.localized("Unlocked"))
                             .foregroundStyle(.orange)
                             .font(.callout.monospacedDigit())
                     }
                 }
 
                 HStack {
-                    Text("NTSC Base Rate")
+                    Text(settings.localized("NTSC Base Rate"))
                     Spacer()
                     Text(Self.formatFPS(settings.ntscFramerate))
                         .foregroundStyle(.secondary)
@@ -120,83 +148,83 @@ struct EmulatorSettingsView: View {
                 }
 
                 HStack {
-                    Text("PAL Base Rate")
+                    Text(settings.localized("PAL Base Rate"))
                     Spacer()
                     Text(Self.formatFPS(settings.palFramerate))
                         .foregroundStyle(.secondary)
                         .font(.callout.monospacedDigit())
                 }
 
-                Text("FPS Target maps to PCSX2 Normal Speed: 60 FPS is normal NTSC timing, 30 FPS is about 50% speed, and higher values fast-forward. Turning the limiter OFF unlocks speed and can increase heat and battery drain.")
+                Text(settings.localized("FPS Target maps to PCSX2 Normal Speed: 60 FPS is normal NTSC timing, 30 FPS is about 50% speed, and higher values fast-forward. Turning the limiter OFF unlocks speed and can increase heat and battery drain."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                Button("Use VU1 Interpreter Preset") {
+                Button(settings.localized("Use VU1 Interpreter Preset")) {
                     settings.applyVU1CompatibilityPreset()
                 }
-                Button("Use Full Interpreter Preset") {
+                Button(settings.localized("Use Full Interpreter Preset")) {
                     settings.applyFullInterpreterPreset()
                 }
-                Text("Use the VU1 preset first for boot crashes or VU1-related texture/rendering glitches. Full Interpreter is much slower, but helps isolate dynarec/JIT issues.")
+                Text(settings.localized("Use the VU1 preset first for boot crashes or VU1-related texture/rendering glitches. Full Interpreter is much slower, but helps isolate dynarec/JIT issues."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Compatibility")
+                Text(settings.localized("Compatibility"))
             } footer: {
-                Text("Changes take effect on next VM boot.")
+                Text(settings.localized("Changes take effect on next VM boot."))
             }
 
-            Section("Patches & Cheats") {
-                Toggle("GameDB Automatic Fixes", isOn: Binding(
+            Section(settings.localized("Patches & Cheats")) {
+                Toggle(settings.localized("GameDB Automatic Fixes"), isOn: Binding(
                     get: { settings.enableGameFixes && settings.enableGameDBHardwareFixes },
                     set: { enabled in
                         settings.enableGameFixes = enabled
                         settings.enableGameDBHardwareFixes = enabled
                     }
                 ))
-                Toggle("GameDB Core Fixes", isOn: $settings.enableGameFixes)
-                Toggle("GameDB Graphics Fixes", isOn: $settings.enableGameDBHardwareFixes)
-                Toggle("GameDB PNACH Patches", isOn: $settings.enablePatches)
-                Toggle("Enable PNACH Cheats", isOn: $settings.enableCheats)
-                Toggle("Widescreen Patches", isOn: $settings.enableWidescreenPatches)
-                Toggle("No-Interlacing Patches", isOn: $settings.enableNoInterlacingPatches)
+                Toggle(settings.localized("GameDB Core Fixes"), isOn: $settings.enableGameFixes)
+                Toggle(settings.localized("GameDB Graphics Fixes"), isOn: $settings.enableGameDBHardwareFixes)
+                Toggle(settings.localized("GameDB PNACH Patches"), isOn: $settings.enablePatches)
+                Toggle(settings.localized("Enable PNACH Cheats"), isOn: $settings.enableCheats)
+                Toggle(settings.localized("Widescreen Patches"), isOn: $settings.enableWidescreenPatches)
+                Toggle(settings.localized("No-Interlacing Patches"), isOn: $settings.enableNoInterlacingPatches)
 
-                Text("GameDB Core Fixes covers timing, clamps, and gamefixes. GameDB Graphics Fixes covers renderer-specific hardware fixes; turn it off globally or per-game if a title looks worse on Metal. PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu.")
+                Text(settings.localized("GameDB Core Fixes covers timing, clamps, and gamefixes. GameDB Graphics Fixes covers renderer-specific hardware fixes; turn it off globally or per-game if a title looks worse on Metal. PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                Stepper("EE Cycle Rate: \(settings.eeCycleRate)", value: $settings.eeCycleRate, in: -3...3)
-                Text("0 = Default. Negative = underclock (stable). Positive = overclock (fast but risky).")
+                Stepper("\(settings.localized("EE Cycle Rate")): \(settings.eeCycleRate)", value: $settings.eeCycleRate, in: -3...3)
+                Text(settings.localized("0 = Default. Negative = underclock (stable). Positive = overclock (fast but risky)."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Toggle("Fast CDVD", isOn: $settings.fastCDVD)
-                Toggle("VU1 Instant", isOn: $settings.vu1Instant)
+                Toggle(settings.localized("Fast CDVD"), isOn: $settings.fastCDVD)
+                Toggle(settings.localized("VU1 Instant"), isOn: $settings.vu1Instant)
                 Toggle("MTVU", isOn: $settings.mtvu)
-                Toggle("Wait Loop Detection", isOn: $settings.waitLoop)
-                Toggle("INTC Stat Hack", isOn: $settings.intcStat)
+                Toggle(settings.localized("Wait Loop Detection"), isOn: $settings.waitLoop)
+                Toggle(settings.localized("INTC Stat Hack"), isOn: $settings.intcStat)
 
-                Text("VU1 Instant and MTVU are independent now. MTVU can help some games, but keep it off unless a game specifically benefits on iOS.")
+                Text(settings.localized("VU1 Instant and MTVU are independent now. MTVU can help some games, but keep it off unless a game specifically benefits on iOS."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             } header: {
-                Text("Speedhacks")
+                Text(settings.localized("Speedhacks"))
             } footer: {
-                Text("Changes take effect on next VM boot.")
+                Text(settings.localized("Changes take effect on next VM boot."))
             }
 
             Section {
-                Button("Reset Emulator to Defaults") {
+                Button(settings.localized("Reset Emulator to Defaults")) {
                     settings.resetEmulatorDefaults()
                 }
                 .foregroundStyle(.red)
             }
         }
-        .navigationTitle("Emulator")
+        .navigationTitle(settings.localized("Emulator"))
         .navigationBarTitleDisplayMode(.inline)
     }
 

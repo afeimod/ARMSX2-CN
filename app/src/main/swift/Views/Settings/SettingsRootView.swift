@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 private enum SettingsPane: String, CaseIterable, Identifiable {
     case language
@@ -85,6 +88,10 @@ private enum SettingsPane: String, CaseIterable, Identifiable {
 
 struct SettingsRootView: View {
     @State private var settings = SettingsStore.shared
+    @State private var jitAvailable = ARMSX2Bridge.isJITAvailable()
+    @State private var noJITFallbackActive = ARMSX2Bridge.isNoJITFallbackActive()
+    @State private var stikDebugOpenFailed = false
+    @State private var stikDebugOpenInProgress = false
 #if targetEnvironment(macCatalyst)
     @State private var selectedPane: SettingsPane? = .emulator
 #endif
@@ -105,6 +112,29 @@ struct SettingsRootView: View {
         .navigationSplitViewStyle(.balanced)
 #else
         List {
+            Section {
+                jitStatusRow
+
+                Button {
+                    stikDebugOpenInProgress = true
+                    stikDebugOpenFailed = false
+                    StikDebugLauncher.open(reason: "settings-root") { success in
+                        stikDebugOpenInProgress = false
+                        stikDebugOpenFailed = !success
+                        refreshJITStatus()
+                    }
+                } label: {
+                    Label(settings.localized("Open StikDebug"), systemImage: "bolt.horizontal.circle")
+                }
+                .disabled(stikDebugOpenInProgress)
+
+                Text(settings.localized("JIT Access means iOS currently allows executable memory. Confirm the real runtime state in-game: the OSD should show EE:JIT, IOP:JIT, and VU:JIT. If StikDebug reports a socket failure, reopen StikDebug and relaunch with the UTM-Dolphin script."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text(settings.localized("JIT Status"))
+            }
+
             Section {
                 NavigationLink {
                     LanguageSettingsView()
@@ -183,7 +213,91 @@ struct SettingsRootView: View {
         }
         .navigationTitle(settings.localized("Settings"))
         .navigationBarTitleDisplayMode(.inline)
+        .safeAreaInset(edge: .top) {
+            Color.clear.frame(height: 6)
+        }
+        .onAppear(perform: refreshJITStatus)
+#if canImport(UIKit)
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
+            refreshJITStatus()
+        }
 #endif
+#endif
+    }
+
+    private var jitStatusRow: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(jitStatusColor)
+                .frame(width: 12, height: 12)
+                .shadow(color: jitStatusColor.opacity(0.45), radius: 5)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(settings.localized(jitStatusTitle))
+                    .font(.body)
+                Text(settings.localized(jitStatusSubtitle))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Text(settings.localized(jitStatusBadge))
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(jitStatusColor)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private var jitStatusColor: Color {
+        if stikDebugOpenFailed {
+            return .orange
+        }
+        if jitAvailable {
+            return .blue
+        }
+        if noJITFallbackActive {
+            return .orange
+        }
+        return .red
+    }
+
+    private var jitStatusTitle: String {
+        if stikDebugOpenFailed {
+            return "StikDebug Did Not Open"
+        }
+        if jitAvailable {
+            return "JIT Access Detected"
+        }
+        if noJITFallbackActive {
+            return "JIT Off"
+        }
+        return "JIT Not Detected"
+    }
+
+    private var jitStatusSubtitle: String {
+        if stikDebugOpenFailed {
+            return "Open StikDebug manually, then run the UTM-Dolphin script and relaunch ARMSX2."
+        }
+        if jitAvailable {
+            return "Access is available. Confirm EE:JIT / IOP:JIT / VU:JIT in the in-game OSD."
+        }
+        if noJITFallbackActive {
+            return "No-JIT fallback is active. Use StikDebug/UTM-Dolphin for dynarec."
+        }
+        return "Launch with StikDebug/UTM-Dolphin to enable JIT."
+    }
+
+    private var jitStatusBadge: String {
+        if stikDebugOpenFailed {
+            return "Manual Open"
+        }
+        return jitAvailable ? "Check OSD" : "Needs StikDebug"
+    }
+
+    private func refreshJITStatus() {
+        jitAvailable = ARMSX2Bridge.isJITAvailable()
+        noJITFallbackActive = ARMSX2Bridge.isNoJITFallbackActive()
     }
 
     @ViewBuilder
@@ -274,57 +388,57 @@ private struct NetworkSettingsView: View {
 
     var body: some View {
         Form {
-            Section("PS2 HDD") {
-                Toggle("Enable DEV9 Virtual HDD", isOn: $settings.dev9HddEnabled)
+            Section(settings.localized("PS2 HDD")) {
+                Toggle(settings.localized("Enable DEV9 Virtual HDD"), isOn: $settings.dev9HddEnabled)
 
                 HStack {
-                    Text("Image")
+                    Text(settings.localized("Image"))
                     Spacer()
                     Text(settings.dev9HddFile.isEmpty ? "DEV9hdd.raw" : settings.dev9HddFile)
                         .foregroundStyle(.secondary)
                         .font(.caption)
                 }
 
-                Button("Use Default HDD Image") {
+                Button(settings.localized("Use Default HDD Image")) {
                     settings.dev9HddFile = "DEV9hdd.raw"
                 }
 
-                Text("Matches ARMSX2 Android's DEV9 HDD option. Requires a VM restart.")
+                Text(settings.localized("Matches ARMSX2 Android's DEV9 HDD option. Requires a VM restart."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Online / Ethernet") {
-                Toggle("Enable DEV9 Ethernet", isOn: $settings.dev9EthernetEnabled)
+            Section(settings.localized("Online / Ethernet")) {
+                Toggle(settings.localized("Enable DEV9 Ethernet"), isOn: $settings.dev9EthernetEnabled)
 
                 HStack {
-                    Text("Mode")
+                    Text(settings.localized("Mode"))
                     Spacer()
-                    Text("Sockets")
+                    Text(settings.localized("Sockets"))
                         .foregroundStyle(.secondary)
                 }
 
-                Picker("Adapter", selection: $settings.dev9EthDevice) {
+                Picker(settings.localized("Adapter"), selection: $settings.dev9EthDevice) {
                     ForEach(ARMSX2Bridge.dev9NetworkAdapters(), id: \.self) { adapter in
                         Text(adapter).tag(adapter)
                     }
                 }
 
-                Toggle("Intercept DHCP", isOn: $settings.dev9InterceptDHCP)
-                Toggle("Log DHCP", isOn: $settings.dev9EthLogDHCP)
-                Toggle("Log DNS", isOn: $settings.dev9EthLogDNS)
+                Toggle(settings.localized("Intercept DHCP"), isOn: $settings.dev9InterceptDHCP)
+                Toggle(settings.localized("Log DHCP"), isOn: $settings.dev9EthLogDHCP)
+                Toggle(settings.localized("Log DNS"), isOn: $settings.dev9EthLogDNS)
 
-                Text("Sockets is the iOS-safe DEV9 Ethernet mode exposed here. PCAP bridged/switched modes are compiled out of this iOS build, so they are intentionally not selectable until a real iOS backend exists.")
+                Text(settings.localized("Sockets is the iOS-safe DEV9 Ethernet mode exposed here. PCAP bridged/switched modes are compiled out of this iOS build, so they are intentionally not selectable until a real iOS backend exists."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("Tester Notes") {
-                Text("Games still need their in-game PS2 network setup. After changing DEV9 settings, use Reset ROM or restart the VM before testing.")
+            Section(settings.localized("Tester Notes")) {
+                Text(settings.localized("Games still need their in-game PS2 network setup. After changing DEV9 settings, use Reset ROM or restart the VM before testing."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Network")
+        .navigationTitle(settings.localized("Network"))
     }
 }

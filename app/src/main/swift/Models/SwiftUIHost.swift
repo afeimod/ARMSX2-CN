@@ -10,10 +10,28 @@ class ARMSX2HostingController<Content: View>: UIHostingController<Content> {
         AppState.shared.hideStatusBar
     }
     override var prefersHomeIndicatorAutoHidden: Bool {
-        AppState.shared.hideStatusBar
+        AppState.shared.hideStatusBar || AppState.shared.hideHomeIndicator
     }
     override var preferredStatusBarUpdateAnimation: UIStatusBarAnimation {
         .fade
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(systemChromeNeedsUpdate),
+            name: AppState.systemChromeNeedsUpdateNotification,
+            object: nil
+        )
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: AppState.systemChromeNeedsUpdateNotification,
+            object: nil
+        )
     }
 
     override func viewDidLayoutSubviews() {
@@ -24,6 +42,11 @@ class ARMSX2HostingController<Content: View>: UIHostingController<Content> {
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         applyNativeContentScale(to: view)
+    }
+
+    @objc private func systemChromeNeedsUpdate() {
+        setNeedsStatusBarAppearanceUpdate()
+        setNeedsUpdateOfHomeIndicatorAutoHidden()
     }
 
     private func applyNativeContentScale(to view: UIView) {

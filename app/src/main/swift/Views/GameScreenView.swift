@@ -31,6 +31,7 @@ struct GameScreenView: View {
     @State private var fileImporter = FileImportHandler.shared
     @State private var padVisible = true
     @State private var fullScreen = false
+    @State private var menuButtonHidden = false
     @State private var vmMenuAvailable = false
     @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
@@ -38,12 +39,15 @@ struct GameScreenView: View {
     @State private var showCompatibilityLab = false
     @State private var showPerGameSettings = false
     @State private var showPNACHImporter = false
+    @State private var showPadLayoutEditor = false
+    @State private var showResetConfirmation = false
     @State private var runtimePerGameSettingsEntry: ISOEntry?
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
     @State private var saveStateStatus: String? = nil
     @State private var runtimeOverlayPauseActive = false
+    @State private var previousHideHomeIndicator = false
 
     var body: some View {
         GeometryReader { geo in
@@ -98,6 +102,9 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
+        .fullScreenCover(isPresented: $showPadLayoutEditor) {
+            PadLayoutEditView()
+        }
         .sheet(isPresented: $showPNACHImporter) {
             ImportDocumentPicker(
                 allowedContentTypes: FileImportHandler.pnachContentTypes,
@@ -124,29 +131,63 @@ struct GameScreenView: View {
                     .transition(.opacity)
             }
         }
-        .onAppear(perform: refreshRuntimeMenuState)
+        .alert(settings.localized("Reset ROM?"), isPresented: $showResetConfirmation) {
+            Button(settings.localized("Cancel"), role: .cancel) {}
+            Button(settings.localized("Reset ROM"), role: .destructive) {
+                resetCurrentROM()
+            }
+        } message: {
+            Text(settings.localized("Restart the current game? Unsaved progress will be lost."))
+        }
+        .onAppear {
+            enterGameplaySystemChromeMode()
+            applyGameScreenPreferences()
+            refreshRuntimeMenuState()
+        }
+        .onDisappear {
+            leaveGameplaySystemChromeMode()
+        }
+        .simultaneousGesture(
+            TapGesture(count: 2).onEnded {
+                restoreMenuButtonIfHidden()
+            }
+        )
         .onChange(of: showSaveStates) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showSpeedControl) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showCompatibilityLab) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showPerGameSettings) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showPNACHImporter) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showPadLayoutEditor) { _, _ in updateRuntimeOverlayPause() }
         .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
             refreshRuntimeMenuState()
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
             refreshRuntimeMenuState()
         }
+        .persistentSystemOverlays(.hidden)
     }
 
+    private func enterGameplaySystemChromeMode() {
+        previousHideHomeIndicator = appState.hideHomeIndicator
+        appState.hideHomeIndicator = true
+    }
+
+    private func leaveGameplaySystemChromeMode() {
+        appState.hideHomeIndicator = previousHideHomeIndicator
+    }
+
+    @ViewBuilder
     private func menuOverlay(isLandscape: Bool) -> some View {
-        VStack {
-            HStack {
+        if !menuButtonHidden {
+            VStack {
+                HStack {
+                    Spacer()
+                    menuButton(isLandscape: isLandscape)
+                }
+                .padding(.top, isLandscape ? 8 : 4)
+                .padding(.trailing, isLandscape ? 8 : 4)
                 Spacer()
-                menuButton(isLandscape: isLandscape)
             }
-            .padding(.top, isLandscape ? 8 : 4)
-            .padding(.trailing, isLandscape ? 8 : 4)
-            Spacer()
         }
     }
 
@@ -169,25 +210,45 @@ struct GameScreenView: View {
             Toggle(isOn: $padVisible) {
                 Label(settings.localized("Virtual Pad"), systemImage: "gamecontroller")
             }
-            if isLandscape {
-                Toggle(isOn: $fullScreen) {
-                    Label(settings.localized("Full Screen"), systemImage: "arrow.up.left.and.arrow.down.right")
-                }
+            Toggle(isOn: $fullScreen) {
+                Label(settings.localized("Full Screen"), systemImage: "arrow.up.left.and.arrow.down.right")
             }
+            Toggle(isOn: Binding(
+                get: { menuButtonHidden || settings.hideMenuButton },
+                set: { newValue in
+                    settings.hideMenuButton = newValue
+                    menuButtonHidden = newValue
+                    if newValue {
+                        presentSaveStateStatus(settings.localized("Double-tap empty gameplay space to show the menu button again."))
+                    }
+                }
+            )) {
+                Label(settings.localized("Hide Menu Button"), systemImage: "eye.slash")
+            }
+            Button {
+                showPadLayoutEditor = true
+            } label: {
+                Label(settings.localized("Edit Virtual Pad Layout"), systemImage: "square.resize")
+            }
+
             Divider()
+
             Button {
                 refreshCompatibilityState()
                 showCompatibilityLab = true
             } label: {
                 Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
             }
-            if vmMenuAvailable {
-                Button {
-                    resetCurrentROM()
-                } label: {
-                    Label(settings.localized("Reset ROM"), systemImage: "arrow.counterclockwise.circle")
-                }
 
+            if gameMenuAvailable {
+                Button {
+                    openPerGameSettingsForCurrentGame()
+                } label: {
+                    Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
+                }
+            }
+
+            if vmMenuAvailable {
                 Button {
                     showSpeedControl = true
                 } label: {
@@ -195,12 +256,21 @@ struct GameScreenView: View {
                 }
 
                 Button {
-                    ARMSX2Bridge.testControllerRumble()
-                    presentSaveStateStatus("Controller rumble test sent")
+                    showResetConfirmation = true
                 } label: {
-                    Label(settings.localized("Test Controller Rumble"), systemImage: "waveform.path")
+                    Label(settings.localized("Reset ROM"), systemImage: "arrow.counterclockwise.circle")
                 }
+            }
 
+            if gameMenuAvailable || vmMenuAvailable {
+                Button {
+                    showSaveStates = true
+                } label: {
+                    Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
+                }
+            }
+
+            if vmMenuAvailable {
                 Menu {
                     Button {
                         ejectDisc()
@@ -243,29 +313,18 @@ struct GameScreenView: View {
 
             if gameMenuAvailable {
                 Button {
-                    openPerGameSettingsForCurrentGame()
-                } label: {
-                    Label(settings.localized("Per-Game Settings"), systemImage: "slider.horizontal.3")
-                }
-
-                Button {
                     showPNACHImporter = true
                 } label: {
                     Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
                 }
 
                 Button {
-                    showSaveStates = true
+                    clearCurrentGameCache()
                 } label: {
-                    Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
-                }
-            } else if vmMenuAvailable {
-                Button {
-                    showSaveStates = true
-                } label: {
-                    Label(settings.localized("Save / Load States"), systemImage: "square.stack.3d.up.fill")
+                    Label(settings.localized("Clear Current Game Cache"), systemImage: "trash.slash")
                 }
             }
+
             Divider()
             Button {
                 appState.returnToMenu()
@@ -281,6 +340,22 @@ struct GameScreenView: View {
         }
     }
 
+    private func applyGameScreenPreferences() {
+        menuButtonHidden = settings.hideMenuButton
+        if settings.autoFullscreen {
+            fullScreen = true
+            ARMSX2Bridge.setFullScreen(true)
+        }
+    }
+
+    private func restoreMenuButtonIfHidden() {
+        guard menuButtonHidden else { return }
+
+        menuButtonHidden = false
+        settings.hideMenuButton = false
+        presentSaveStateStatus(settings.localized("Menu button shown"))
+    }
+
     @ViewBuilder
     private var runtimePerGameSettingsContent: some View {
         if let runtimePerGameSettingsEntry {
@@ -290,14 +365,14 @@ struct GameScreenView: View {
         } else {
             NavigationStack {
                 ContentUnavailableView(
-                    "No Game Active",
+                    settings.localized("No Game Active"),
                     systemImage: "gamecontroller",
-                    description: Text("Start a game before changing per-game settings.")
+                    description: Text(settings.localized("Start a game before changing per-game settings."))
                 )
-                .navigationTitle("Per-Game Settings")
+                .navigationTitle(settings.localized("Per-Game Settings"))
                 .toolbar {
                     ToolbarItem(placement: .confirmationAction) {
-                        Button("Done") {
+                        Button(settings.localized("Done")) {
                             closePerGameSettingsOverlay()
                         }
                     }
@@ -341,7 +416,7 @@ struct GameScreenView: View {
         guard let entry = makeRuntimePerGameSettingsEntry() else {
             runtimePerGameSettingsEntry = nil
             showPerGameSettings = true
-            presentSaveStateStatus("Per-game settings need a running game.")
+            presentSaveStateStatus(settings.localized("Per-game settings need a running game."))
             return
         }
 
@@ -364,7 +439,7 @@ struct GameScreenView: View {
     }
 
     private func updateRuntimeOverlayPause() {
-        let shouldPause = showSaveStates || showSpeedControl || showCompatibilityLab || showPerGameSettings || showPNACHImporter
+        let shouldPause = showSaveStates || showSpeedControl || showCompatibilityLab || showPerGameSettings || showPNACHImporter || showPadLayoutEditor
         guard runtimeOverlayPauseActive != shouldPause else { return }
 
         runtimeOverlayPauseActive = shouldPause
@@ -483,41 +558,41 @@ struct GameScreenView: View {
                             refreshCompatibilityState()
                         }
                     )) {
-                        Label("Auto Game Presets", systemImage: "sparkles")
+                        Label(settings.localized("Auto Game Presets"), systemImage: "sparkles")
                     }
 
-                    LabeledContent("Current Mode") {
-                        Text(currentPreset.title)
+                    LabeledContent(settings.localized("Current Mode")) {
+                        Text(settings.localized(currentPreset.title))
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
 
                     if !compatibilityIdentity.isEmpty {
-                        LabeledContent("Current Game") {
+                        LabeledContent(settings.localized("Current Game")) {
                             Text(compatibilityIdentity)
                                 .foregroundStyle(.secondary)
                         }
                     } else {
-                        Text("Start a game to remember presets per title.")
+                        Text(settings.localized("Start a game to remember presets per title."))
                             .foregroundStyle(.secondary)
                     }
                 } header: {
-                    Text("Status")
+                    Text(settings.localized("Status"))
                 } footer: {
-                    Text("Auto Game Presets applies known safe defaults. Manual flags below are remembered for the current game when a game is running.")
+                    Text(settings.localized("Auto Game Presets applies known safe defaults. Manual flags below are remembered for the current game when a game is running."))
                 }
 
                 Section {
                     Button {
                         applyCompatibilityPreset(compatibilityPreset(for: "off"))
                     } label: {
-                        Label("Use Default / Clear Flags", systemImage: "power")
+                        Label(settings.localized("Use Default / Clear Flags"), systemImage: "power")
                     }
                     .foregroundStyle(.primary)
                 } header: {
-                    Text("Reset")
+                    Text(settings.localized("Reset"))
                 } footer: {
-                    Text("Use this when testing is done or a game behaves worse with compatibility flags enabled.")
+                    Text(settings.localized("Use this when testing is done or a game behaves worse with compatibility flags enabled."))
                 }
 
                 Section {
@@ -567,9 +642,9 @@ struct GameScreenView: View {
                         systemImage: "arrow.triangle.branch"
                     )
                 } header: {
-                    Text("Manual Compatibility Flags")
+                    Text(settings.localized("Manual Compatibility Flags"))
                 } footer: {
-                    Text("Toggle one or more flags when a game needs compatibility help. Changing any flag switches this game to Custom Advanced Flags.")
+                    Text(settings.localized("Toggle one or more flags when a game needs compatibility help. Changing any flag switches this game to Custom Advanced Flags."))
                 }
 
                 if !compatibilityIdentity.isEmpty {
@@ -578,17 +653,17 @@ struct GameScreenView: View {
                             let identity = compatibilityIdentity
                             ARMSX2Bridge.forgetCompatibilityPresetForCurrentGame()
                             refreshCompatibilityState()
-                            presentSaveStateStatus("Compatibility preset reset for \(identity)")
+                            presentSaveStateStatus("\(settings.localized("Compatibility preset reset for")) \(identity)")
                         } label: {
-                            Label("Forget This Game's Override", systemImage: "trash")
+                            Label(settings.localized("Forget This Game's Override"), systemImage: "trash")
                         }
                     }
                 }
             }
-            .navigationTitle("Compatibility Lab")
+            .navigationTitle(settings.localized("Compatibility Lab"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") {
+                    Button(settings.localized("Done")) {
                         showCompatibilityLab = false
                     }
                 }
@@ -604,11 +679,11 @@ struct GameScreenView: View {
                 ARMSX2Bridge.setJITBisectFlag(key, value: $0)
                 compatibilityPresetKey = "custom"
                 if !compatibilityIdentity.isEmpty {
-                    presentSaveStateStatus("Custom compatibility flags saved for \(compatibilityIdentity)")
+                    presentSaveStateStatus("\(settings.localized("Custom compatibility flags saved for")) \(compatibilityIdentity)")
                 }
             }
         )) {
-            Label(title, systemImage: systemImage)
+            Label(settings.localized(title), systemImage: systemImage)
         }
     }
 
@@ -642,15 +717,25 @@ struct GameScreenView: View {
         refreshCompatibilityState()
 
         if rememberForCurrentGame {
-            presentSaveStateStatus("\(preset.title) saved for \(compatibilityIdentity)")
+            presentSaveStateStatus("\(settings.localized(preset.title)) \(settings.localized("saved for")) \(compatibilityIdentity)")
         } else {
-            presentSaveStateStatus("Compatibility preset set to \(preset.title)")
+            presentSaveStateStatus("\(settings.localized("Compatibility preset set to")) \(settings.localized(preset.title))")
         }
     }
 
     private func resetCurrentROM() {
         appState.resetCurrentVM()
-        presentSaveStateStatus("Restarting ROM...")
+        presentSaveStateStatus(settings.localized("Restarting ROM..."))
+    }
+
+    private func clearCurrentGameCache() {
+        guard let gameName = currentRuntimeGameName() else {
+            presentSaveStateStatus(settings.localized("Cache clear needs a running game."))
+            return
+        }
+
+        let message = ARMSX2Bridge.clearCache(forISO: gameName)
+        presentSaveStateStatus(message)
     }
 
     @ViewBuilder
@@ -709,6 +794,7 @@ struct GameScreenView: View {
 
 private struct SaveStatesPanel: View {
     @Environment(\.dismiss) private var dismiss
+    @State private var settings = SettingsStore.shared
     @State private var slots: [ARMSX2SaveStateSlotInfo] = []
     @State private var busySlot: Int? = nil
     @State private var pendingOverwrite: ARMSX2SaveStateSlotInfo? = nil
@@ -723,9 +809,9 @@ private struct SaveStatesPanel: View {
                         Image(systemName: "hourglass")
                             .font(.largeTitle)
                             .foregroundStyle(.secondary)
-                        Text("Save states are not ready yet.")
+                        Text(settings.localized("Save states are not ready yet."))
                             .font(.headline)
-                        Text("Wait until the game has fully identified, then try again.")
+                        Text(settings.localized("Wait until the game has fully identified, then try again."))
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -748,7 +834,7 @@ private struct SaveStatesPanel: View {
                 }
             }
             .safeAreaInset(edge: .top) {
-                Text("Empty slots can save. Occupied slots can load or overwrite.")
+                Text(settings.localized("Empty slots can save. Occupied slots can load or overwrite."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -756,10 +842,10 @@ private struct SaveStatesPanel: View {
                     .padding(.vertical, 8)
                     .background(.regularMaterial)
             }
-            .navigationTitle("Save / Load States")
+            .navigationTitle(settings.localized("Save / Load States"))
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button("Done") {
+                    Button(settings.localized("Done")) {
                         dismiss()
                     }
                 }
@@ -769,7 +855,7 @@ private struct SaveStatesPanel: View {
                 refresh()
             }
             .confirmationDialog(
-                "Overwrite Slot \(pendingOverwrite?.slot ?? 0)?",
+                "\(settings.localized("Overwrite Slot")) \(pendingOverwrite?.slot ?? 0)?",
                 isPresented: Binding(
                     get: { pendingOverwrite != nil },
                     set: { newValue in
@@ -780,13 +866,13 @@ private struct SaveStatesPanel: View {
                 ),
                 titleVisibility: .visible
             ) {
-                Button("Overwrite", role: .destructive) {
+                Button(settings.localized("Overwrite"), role: .destructive) {
                     if let pendingOverwrite {
                         save(pendingOverwrite)
                     }
                     pendingOverwrite = nil
                 }
-                Button("Cancel", role: .cancel) {
+                Button(settings.localized("Cancel"), role: .cancel) {
                     pendingOverwrite = nil
                 }
             }
@@ -804,7 +890,7 @@ private struct SaveStatesPanel: View {
             Task { @MainActor in
                 busySlot = nil
                 refresh()
-                statusHandler(success ? "State saved to slot \(slotNumber)" : "Failed to save slot \(slotNumber)")
+                statusHandler(success ? "\(settings.localized("State saved to slot")) \(slotNumber)" : "\(settings.localized("Failed to save slot")) \(slotNumber)")
             }
         }
     }
@@ -816,7 +902,7 @@ private struct SaveStatesPanel: View {
             Task { @MainActor in
                 busySlot = nil
                 refresh()
-                statusHandler(success ? "State loaded from slot \(slotNumber)" : "Failed to load slot \(slotNumber)")
+                statusHandler(success ? "\(settings.localized("State loaded from slot")) \(slotNumber)" : "\(settings.localized("Failed to load slot")) \(slotNumber)")
                 if success {
                     dismiss()
                 }

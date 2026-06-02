@@ -3,6 +3,72 @@
 
 import SwiftUI
 import Combine
+#if canImport(UIKit)
+import UIKit
+#endif
+
+@MainActor
+enum StikDebugLauncher {
+    private static let lastAutoOpenKey = "ARMSX2iOSLastStikDebugAutoOpenTime"
+    private static let autoOpenCooldown: TimeInterval = 120
+
+    static func open(reason: String = "manual", completion: ((Bool) -> Void)? = nil) {
+#if canImport(UIKit)
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.armsx2.ios"
+        let encodedBundleID = bundleID.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? bundleID
+        let candidates = [
+            "stikdebug://enable-jit?bundle-id=\(encodedBundleID)",
+            "stikjit://enable-jit?bundle-id=\(encodedBundleID)",
+            "stikdebug://"
+        ].compactMap(URL.init(string:))
+
+        guard !candidates.isEmpty else {
+            print("[ARMSX2 iOS] StikDebug open failed: no valid launch URLs")
+            completion?(false)
+            return
+        }
+
+        openFirstAvailableURL(candidates, reason: reason, completion: completion)
+#else
+        print("[ARMSX2 iOS] StikDebug open skipped: UIKit unavailable reason=\(reason)")
+        completion?(false)
+#endif
+    }
+
+#if canImport(UIKit)
+    private static func openFirstAvailableURL(_ urls: [URL], reason: String, completion: ((Bool) -> Void)?) {
+        guard let url = urls.first else {
+            print("[ARMSX2 iOS] StikDebug open failed reason=\(reason): no URL scheme accepted")
+            completion?(false)
+            return
+        }
+
+        UIApplication.shared.open(url, options: [:]) { success in
+            print("[ARMSX2 iOS] StikDebug open \(success ? "succeeded" : "failed") reason=\(reason) url=\(url.absoluteString)")
+            if success {
+                completion?(true)
+            } else {
+                openFirstAvailableURL(Array(urls.dropFirst()), reason: reason, completion: completion)
+            }
+        }
+    }
+#endif
+
+    static func autoOpenIfNeeded(reason: String) {
+        guard SettingsStore.shared.autoOpenStikDebug else { return }
+        guard !ARMSX2Bridge.isJITAvailable() else { return }
+
+        let now = Date().timeIntervalSince1970
+        let last = UserDefaults.standard.double(forKey: lastAutoOpenKey)
+        guard now - last >= autoOpenCooldown else {
+            print("[ARMSX2 iOS] StikDebug auto-open throttled reason=\(reason)")
+            return
+        }
+
+        UserDefaults.standard.set(now, forKey: lastAutoOpenKey)
+        open(reason: "auto-\(reason)")
+    }
+}
 
 enum EmulatorState: String {
     case stopped = "Stopped"

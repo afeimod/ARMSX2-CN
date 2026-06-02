@@ -4,6 +4,7 @@
 import SwiftUI
 
 struct MemoryCardSettingsView: View {
+    @State private var settings = SettingsStore.shared
     @State private var availableCards: [String] = []
     @State private var slot1Card = ""
     @State private var slot2Card = ""
@@ -17,16 +18,16 @@ struct MemoryCardSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Directory") {
+            Section(settings.localized("Directory")) {
                 Text(ARMSX2Bridge.memoryCardDirectory())
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
                     .textSelection(.enabled)
             }
 
-            Section("Assigned Cards") {
-                Picker("Slot 1", selection: $slot1Card) {
-                    Text("Unplugged").tag("")
+            Section(settings.localized("Assigned Cards")) {
+                Picker(settings.localized("Slot 1"), selection: $slot1Card) {
+                    Text(settings.localized("Unplugged")).tag("")
                     ForEach(availableCards, id: \.self) { card in
                         Text(card).tag(card)
                     }
@@ -35,8 +36,8 @@ struct MemoryCardSettingsView: View {
                     ARMSX2Bridge.setMemoryCard(name: newValue, forSlot: 1, enabled: !newValue.isEmpty)
                 }
 
-                Picker("Slot 2", selection: $slot2Card) {
-                    Text("Unplugged").tag("")
+                Picker(settings.localized("Slot 2"), selection: $slot2Card) {
+                    Text(settings.localized("Unplugged")).tag("")
                     ForEach(availableCards, id: \.self) { card in
                         Text(card).tag(card)
                     }
@@ -45,20 +46,20 @@ struct MemoryCardSettingsView: View {
                     ARMSX2Bridge.setMemoryCard(name: newValue, forSlot: 2, enabled: !newValue.isEmpty)
                 }
 
-                Text("Slot changes take effect on the next VM boot.")
+                Text(settings.localized("Slot changes take effect on the next VM boot."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
             Section {
-                TextField("Card name", text: $newCardName)
+                TextField(settings.localized("Card name"), text: $newCardName)
                     .textInputAutocapitalization(.never)
                     .autocorrectionDisabled()
 
-                Toggle("Folder Memory Card", isOn: $createFolderCard)
+                Toggle(settings.localized("Folder Memory Card"), isOn: $createFolderCard)
 
                 if !createFolderCard {
-                    Picker("Size", selection: $newCardSizeMB) {
+                    Picker(settings.localized("Size"), selection: $newCardSizeMB) {
                         ForEach(cardSizes, id: \.self) { size in
                             Text("\(size) MB").tag(size)
                         }
@@ -68,17 +69,17 @@ struct MemoryCardSettingsView: View {
                 Button {
                     createCard()
                 } label: {
-                    Label(createFolderCard ? "Create Folder Card" : "Create Card", systemImage: "memorychip")
+                    Label(settings.localized(createFolderCard ? "Create Folder Card" : "Create Card"), systemImage: "memorychip")
                 }
             } header: {
-                Text("Create Memory Card")
+                Text(settings.localized("Create Memory Card"))
             } footer: {
-                Text("File cards support 8 MB, 16 MB, 32 MB, and 64 MB. Folder cards match the ARMSX2/PCSX2 folder-card behavior and are useful for game-specific saves.")
+                Text(settings.localized("File cards support 8 MB, 16 MB, 32 MB, and 64 MB. Folder cards match the ARMSX2/PCSX2 folder-card behavior and are useful for game-specific saves."))
             }
 
-            Section("Available Cards") {
+            Section(settings.localized("Available Cards")) {
                 if availableCards.isEmpty {
-                    Text("No cards found.")
+                    Text(settings.localized("No cards found."))
                         .foregroundStyle(.secondary)
                 } else {
                     ForEach(availableCards, id: \.self) { card in
@@ -87,13 +88,13 @@ struct MemoryCardSettingsView: View {
                 }
             }
         }
-        .navigationTitle("Memory Cards")
+        .navigationTitle(settings.localized("Memory Cards"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: refresh)
-        .alert("Memory Cards", isPresented: $showResult) {
-            Button("OK") {}
+        .alert(settings.localized("Memory Cards"), isPresented: $showResult) {
+            Button(settings.localized("OK")) {}
         } message: {
-            Text(resultMessage ?? "")
+            Text(settings.localized(resultMessage ?? ""))
         }
     }
 

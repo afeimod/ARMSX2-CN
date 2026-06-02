@@ -8,9 +8,10 @@ private struct StorageReport: Sendable, Equatable {
     var appCacheBytes: Int64 = 0
     var textureDumpBytes: Int64 = 0
     var diagnosticLogBytes: Int64 = 0
+    var stateSafetyBackupBytes: Int64 = 0
 
     var totalGeneratedBytes: Int64 {
-        appCacheBytes + textureDumpBytes + diagnosticLogBytes
+        appCacheBytes + textureDumpBytes + diagnosticLogBytes + stateSafetyBackupBytes
     }
 }
 
@@ -26,6 +27,7 @@ private struct StoragePaths: Sendable {
     let temporaryURL: URL
     let textureRootURL: URL
     let logsURL: URL
+    let stateSafetyBackupsURL: URL
     let rootLogURLs: [URL]
 
     @MainActor
@@ -40,6 +42,7 @@ private struct StoragePaths: Sendable {
             temporaryURL: URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true),
             textureRootURL: documentsURL.appendingPathComponent("textures", isDirectory: true),
             logsURL: documentsURL.appendingPathComponent("logs", isDirectory: true),
+            stateSafetyBackupsURL: documentsURL.appendingPathComponent("memcard-state-backups", isDirectory: true),
             rootLogURLs: [
                 documentsURL.appendingPathComponent("pcsx2_log.txt", isDirectory: false),
                 documentsURL.appendingPathComponent("emulog.txt", isDirectory: false)
@@ -75,13 +78,13 @@ private enum StorageClearAction: Identifiable, Sendable {
     var confirmationMessage: String {
         switch self {
         case .appCache:
-            return "This removes emulator cache, iOS cache, and temporary files. Games, BIOS, saves, memory cards, covers, settings, and texture packs are preserved."
+            return "This removes emulator cache, iOS cache, temporary files, and save-state safety backups. Games, BIOS, saves, memory cards, covers, settings, and texture packs are preserved."
         case .textureDumps:
             return "This removes generated texture dump folders only. Replacement texture packs are preserved, and texture dumping will be turned off so storage does not refill immediately."
         case .diagnosticLogs:
             return "This clears pcsx2_log.txt and generated diagnostic logs. It is useful before sending a fresh bug report, but it removes old logs from the app container."
         case .allGenerated:
-            return "This removes app cache, temporary files, generated texture dumps, and diagnostic logs. Games, BIOS, saves, memory cards, covers, settings, and replacement texture packs are preserved."
+            return "This removes app cache, temporary files, save-state safety backups, generated texture dumps, and diagnostic logs. Games, BIOS, saves, memory cards, covers, settings, and replacement texture packs are preserved."
         }
     }
 
@@ -104,7 +107,8 @@ private enum StorageCleaner {
                 },
                 diagnosticLogBytes: directorySize(paths.logsURL) + paths.rootLogURLs.reduce(Int64(0)) { partial, url in
                     partial + directorySize(url)
-                }
+                },
+                stateSafetyBackupBytes: directorySize(paths.stateSafetyBackupsURL)
             )
         }.value
     }
@@ -118,6 +122,7 @@ private enum StorageCleaner {
                 clearContents(of: paths.emulatorCacheURL, recreate: true, failures: &failures)
                 clearContents(of: paths.systemCachesURL, recreate: true, failures: &failures)
                 clearContents(of: paths.temporaryURL, recreate: true, failures: &failures)
+                clearContents(of: paths.stateSafetyBackupsURL, recreate: true, failures: &failures)
             }
 
             if action.includesTextureDumps {
@@ -146,7 +151,8 @@ private enum StorageCleaner {
             },
             diagnosticLogBytes: directorySize(paths.logsURL) + paths.rootLogURLs.reduce(Int64(0)) { partial, url in
                 partial + directorySize(url)
-            }
+            },
+            stateSafetyBackupBytes: directorySize(paths.stateSafetyBackupsURL)
         )
     }
 
@@ -278,72 +284,66 @@ struct StorageSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Usage") {
-                LabeledContent("App Cache", value: formatBytes(report.appCacheBytes))
-                LabeledContent("Texture Dumps", value: formatBytes(report.textureDumpBytes))
-                LabeledContent("Diagnostic Logs", value: formatBytes(report.diagnosticLogBytes))
-                LabeledContent("Generated Total", value: formatBytes(report.totalGeneratedBytes))
+            Section(settings.localized("Usage")) {
+                LabeledContent(settings.localized("App Cache"), value: formatBytes(report.appCacheBytes))
+                LabeledContent(settings.localized("Texture Dumps"), value: formatBytes(report.textureDumpBytes))
+                LabeledContent(settings.localized("Diagnostic Logs"), value: formatBytes(report.diagnosticLogBytes))
+                LabeledContent(settings.localized("State Safety Backups"), value: formatBytes(report.stateSafetyBackupBytes))
+                LabeledContent(settings.localized("Generated Total"), value: formatBytes(report.totalGeneratedBytes))
 
                 Button {
                     Task { await refreshReport() }
                 } label: {
-                    Label("Refresh Storage Usage", systemImage: "arrow.clockwise")
+                    Label(settings.localized("Refresh Storage Usage"), systemImage: "arrow.clockwise")
                 }
                 .disabled(isWorking)
             }
 
-            Section("Cleanup") {
+            Section(settings.localized("Cleanup")) {
                 Button(role: .destructive) {
                     pendingAction = .appCache
                 } label: {
-                    Label("Clear App Cache", systemImage: "trash")
+                    Label(settings.localized("Clear App Cache"), systemImage: "trash")
                 }
                 .disabled(isWorking)
 
                 Button(role: .destructive) {
                     pendingAction = .textureDumps
                 } label: {
-                    Label("Clear Texture Dumps", systemImage: "photo.stack")
+                    Label(settings.localized("Clear Texture Dumps"), systemImage: "photo.stack")
                 }
                 .disabled(isWorking)
 
                 Button(role: .destructive) {
                     pendingAction = .diagnosticLogs
                 } label: {
-                    Label("Clear Diagnostic Logs", systemImage: "doc.text.magnifyingglass")
+                    Label(settings.localized("Clear Diagnostic Logs"), systemImage: "doc.text.magnifyingglass")
                 }
                 .disabled(isWorking)
 
                 Button(role: .destructive) {
                     pendingAction = .allGenerated
                 } label: {
-                    Label("Clear All Generated Files", systemImage: "externaldrive.badge.xmark")
+                    Label(settings.localized("Clear All Generated Files"), systemImage: "externaldrive.badge.xmark")
                 }
                 .disabled(isWorking)
 
                 if isWorking {
-                    ProgressView("Cleaning...")
+                    ProgressView(settings.localized("Cleaning..."))
                 }
 
-                Text("This never removes imported games, BIOS files, save states, memory cards, covers, settings, PNACH files, or replacement texture packs.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-
-            Section("Prevention") {
-                Toggle("Dump Replaceable Textures", isOn: $settings.dumpReplaceableTextures)
-                Text("Texture dumping is useful for creating packs, but it can fill storage very quickly. Leave it off for normal play.")
+                Text(settings.localized("This never removes imported games, BIOS files, save states, memory cards, covers, settings, PNACH files, or replacement texture packs."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Storage")
+        .navigationTitle(settings.localized("Storage"))
         .navigationBarTitleDisplayMode(.inline)
         .task {
             await refreshReport()
         }
         .confirmationDialog(
-            pendingAction?.title ?? "Clear Cache",
+            settings.localized(pendingAction?.title ?? "Clear Cache"),
             isPresented: Binding(
                 get: { pendingAction != nil },
                 set: { if !$0 { pendingAction = nil } }
@@ -351,21 +351,21 @@ struct StorageSettingsView: View {
             titleVisibility: .visible
         ) {
             if let pendingAction {
-                Button(pendingAction.title, role: .destructive) {
+                Button(settings.localized(pendingAction.title), role: .destructive) {
                     let action = pendingAction
                     self.pendingAction = nil
                     Task { await clear(action) }
                 }
             }
 
-            Button("Cancel", role: .cancel) {
+            Button(settings.localized("Cancel"), role: .cancel) {
                 pendingAction = nil
             }
         } message: {
-            Text(pendingAction?.confirmationMessage ?? "")
+            Text(settings.localized(pendingAction?.confirmationMessage ?? ""))
         }
-        .alert("Storage Cleanup", isPresented: $showResult) {
-            Button("OK") {}
+        .alert(settings.localized("Storage Cleanup"), isPresented: $showResult) {
+            Button(settings.localized("OK")) {}
         } message: {
             Text(resultMessage ?? "")
         }
@@ -390,9 +390,9 @@ struct StorageSettingsView: View {
         report = await StorageCleaner.report(paths: paths)
         isWorking = false
 
-        var message = "Removed about \(formatBytes(result.bytesRemoved)) of generated data."
+        var message = "\(settings.localized("Removed about")) \(formatBytes(result.bytesRemoved)) \(settings.localized("of generated data."))"
         if !result.failures.isEmpty {
-            message += "\n\nSome files could not be removed:\n\(result.failures.prefix(5).joined(separator: "\n"))"
+            message += "\n\n\(settings.localized("Some files could not be removed:"))\n\(result.failures.prefix(5).joined(separator: "\n"))"
         }
         resultMessage = message
         showResult = true

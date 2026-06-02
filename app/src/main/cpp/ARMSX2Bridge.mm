@@ -15,6 +15,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include "SIO/Pad/Pad.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "SIO/Memcard/MemoryCardFile.h"
+#include "SIO/Sio.h"
 #include "Counters.h"
 #include "GS/GSState.h"
 #include "GameList.h"
@@ -451,6 +452,83 @@ static BOOL ARMSX2PopulateGameListEntryForISO(NSString* isoName, GameList::Entry
     return GameList::PopulateEntryFromPath(path.UTF8String, entry) ? YES : NO;
 }
 
+static NSString* ARMSX2CompatibilityIdentityKey(NSString* serial, u32 crc);
+
+static NSArray<NSString*>* ARMSX2GameDataTokensForEntry(NSString* isoName, const GameList::Entry& entry)
+{
+    NSMutableOrderedSet<NSString*>* tokens = [NSMutableOrderedSet orderedSet];
+    NSString* baseName = isoName.stringByDeletingPathExtension ?: isoName;
+    if (baseName.length > 0)
+        [tokens addObject:baseName.lowercaseString];
+    if (!entry.serial.empty())
+        [tokens addObject:ARMSX2NSStringFromStdString(entry.serial).lowercaseString];
+    if (entry.crc != 0)
+        [tokens addObject:[[NSString stringWithFormat:@"%08X", entry.crc] lowercaseString]];
+    return tokens.array;
+}
+
+static NSInteger ARMSX2RemoveMatchingGeneratedFiles(NSString* directory, NSArray<NSString*>* tokens)
+{
+    if (directory.length == 0 || tokens.count == 0)
+        return 0;
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    BOOL isDirectory = NO;
+    if (![fm fileExistsAtPath:directory isDirectory:&isDirectory] || !isDirectory)
+        return 0;
+
+    NSMutableArray<NSURL*>* matches = [NSMutableArray array];
+    NSURL* rootURL = [NSURL fileURLWithPath:directory isDirectory:YES];
+    NSDirectoryEnumerator<NSURL*>* enumerator =
+        [fm enumeratorAtURL:rootURL
+ includingPropertiesForKeys:@[NSURLIsDirectoryKey]
+                    options:NSDirectoryEnumerationSkipsHiddenFiles
+               errorHandler:^BOOL(NSURL* url, NSError* error) {
+                   NSLog(@"[ARMSX2Bridge] Game data scan skipped %@ error=%@", url.path, error.localizedDescription);
+                   return YES;
+               }];
+
+    for (NSURL* url in enumerator) {
+        NSString* name = url.lastPathComponent.lowercaseString;
+        for (NSString* token in tokens) {
+            if (token.length > 3 && [name containsString:token]) {
+                [matches addObject:url];
+                [enumerator skipDescendants];
+                break;
+            }
+        }
+    }
+
+    [matches sortUsingComparator:^NSComparisonResult(NSURL* lhs, NSURL* rhs) {
+        return lhs.path.length > rhs.path.length ? NSOrderedAscending : NSOrderedDescending;
+    }];
+
+    NSInteger removed = 0;
+    for (NSURL* url in matches) {
+        NSError* error = nil;
+        if ([fm removeItemAtURL:url error:&error]) {
+            removed++;
+            NSLog(@"[ARMSX2Bridge] Removed generated game file %@", url.path);
+        } else {
+            NSLog(@"[ARMSX2Bridge] Failed removing generated game file %@ error=%@", url.path, error.localizedDescription);
+        }
+    }
+    return removed;
+}
+
+static NSString* ARMSX2CompatibilityIdentityForISOName(NSString* isoName, GameList::Entry* entryOut = nullptr)
+{
+    GameList::Entry entry;
+    NSString* resolvedPath = nil;
+    if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0)
+        return @"";
+
+    if (entryOut)
+        *entryOut = entry;
+
+    return ARMSX2CompatibilityIdentityKey(ARMSX2NSStringFromStdString(entry.serial), entry.crc);
+}
+
 static NSString* ARMSX2CompatibilityIdentityKey(NSString* serial, u32 crc)
 {
     NSString* normalizedSerial = [[serial ?: @"" stringByReplacingOccurrencesOfString:@"_" withString:@"-"] uppercaseString];
@@ -597,6 +675,155 @@ static NSData* ARMSX2ReadSaveStatePreviewPNG(const std::string& path)
         return nil;
 
     return [NSData dataWithBytes:data->data() length:data->size()];
+}
+
+static dispatch_queue_t ARMSX2SaveStateQueue()
+{
+    static dispatch_queue_t queue;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        queue = dispatch_queue_create("org.armsx2.ios.savestates", DISPATCH_QUEUE_SERIAL);
+    });
+    return queue;
+}
+
+static NSString* ARMSX2SanitizedBackupPathComponent(NSString* value)
+{
+    if (value.length == 0)
+        return @"unknown";
+
+    NSMutableString* sanitized = [NSMutableString stringWithCapacity:value.length];
+    NSCharacterSet* invalid = [NSCharacterSet characterSetWithCharactersInString:@"/\\:?%*|\"<> "];
+    for (NSUInteger i = 0; i < value.length; i++) {
+        const unichar ch = [value characterAtIndex:i];
+        [sanitized appendString:[invalid characterIsMember:ch] ? @"_" : [NSString stringWithCharacters:&ch length:1]];
+    }
+
+    return sanitized.length > 0 ? sanitized : @"unknown";
+}
+
+static NSString* ARMSX2MemcardBackupRoot()
+{
+    const std::string root = Path::Combine(EmuFolders::DataRoot, "memcard-state-backups");
+    return ARMSX2NSStringFromStdString(root);
+}
+
+static void ARMSX2PruneOldMemcardBackups(NSString* backupRoot, NSUInteger keepCount)
+{
+    if (backupRoot.length == 0 || keepCount == 0)
+        return;
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSArray<NSURL*>* entries = [fm contentsOfDirectoryAtURL:[NSURL fileURLWithPath:backupRoot]
+                                includingPropertiesForKeys:@[NSURLContentModificationDateKey]
+                                                   options:NSDirectoryEnumerationSkipsHiddenFiles
+                                                     error:nil];
+    if (entries.count <= keepCount)
+        return;
+
+    NSArray<NSURL*>* sorted = [entries sortedArrayUsingComparator:^NSComparisonResult(NSURL* lhs, NSURL* rhs) {
+        NSDate* leftDate = nil;
+        NSDate* rightDate = nil;
+        [lhs getResourceValue:&leftDate forKey:NSURLContentModificationDateKey error:nil];
+        [rhs getResourceValue:&rightDate forKey:NSURLContentModificationDateKey error:nil];
+        NSDate* lhsDate = leftDate ?: [NSDate distantPast];
+        NSDate* rhsDate = rightDate ?: [NSDate distantPast];
+        return [rhsDate compare:lhsDate];
+    }];
+
+    for (NSUInteger i = keepCount; i < sorted.count; i++) {
+        NSError* error = nil;
+        if (![fm removeItemAtURL:sorted[i] error:&error]) {
+            NSLog(@"[ARMSX2 iOS SaveState] memcard backup prune failed path=%@ error=%@",
+                  sorted[i].path, error.localizedDescription ?: @"unknown");
+        }
+    }
+}
+
+static NSInteger ARMSX2BackupAssignedMemoryCards(const char* reason, s32 stateSlot, const std::string& serial, u32 crc)
+{
+    NSString* backupRoot = ARMSX2MemcardBackupRoot();
+    if (backupRoot.length == 0)
+        return 0;
+
+    NSFileManager* fm = [NSFileManager defaultManager];
+    NSError* mkdirError = nil;
+    if (![fm createDirectoryAtPath:backupRoot withIntermediateDirectories:YES attributes:nil error:&mkdirError]) {
+        NSLog(@"[ARMSX2 iOS SaveState] memcard backup root failed path=%@ error=%@",
+              backupRoot, mkdirError.localizedDescription ?: @"unknown");
+        return 0;
+    }
+
+    NSString* safeSerial = ARMSX2SanitizedBackupPathComponent(ARMSX2NSStringFromStdString(serial));
+    const long long timestamp = static_cast<long long>(llround([[NSDate date] timeIntervalSince1970] * 1000.0));
+    NSString* backupDirName = [NSString stringWithFormat:@"%lld-%@-%08X-slot%02d-%s",
+                                                        timestamp, safeSerial, crc, stateSlot, reason ? reason : "state"];
+    NSString* backupDir = [backupRoot stringByAppendingPathComponent:backupDirName];
+    if (![fm createDirectoryAtPath:backupDir withIntermediateDirectories:YES attributes:nil error:&mkdirError]) {
+        NSLog(@"[ARMSX2 iOS SaveState] memcard backup directory failed path=%@ error=%@",
+              backupDir, mkdirError.localizedDescription ?: @"unknown");
+        return 0;
+    }
+
+    NSInteger copied = 0;
+    constexpr size_t numMemoryCardSlots = sizeof(EmuConfig.Mcd) / sizeof(EmuConfig.Mcd[0]);
+    for (size_t i = 0; i < numMemoryCardSlots; i++) {
+        if (!EmuConfig.Mcd[i].Enabled || EmuConfig.Mcd[i].Filename.empty())
+            continue;
+
+        const std::string source = EmuConfig.FullpathToMcd(static_cast<uint>(i));
+        NSString* sourcePath = ARMSX2NSStringFromStdString(source);
+        BOOL isDirectory = NO;
+        if (sourcePath.length == 0 || ![fm fileExistsAtPath:sourcePath isDirectory:&isDirectory])
+            continue;
+
+        NSString* sourceName = ARMSX2SanitizedBackupPathComponent(sourcePath.lastPathComponent);
+        NSString* targetName = [NSString stringWithFormat:@"slot%zu-%@", i + 1, sourceName];
+        NSString* targetPath = [backupDir stringByAppendingPathComponent:targetName];
+        NSError* copyError = nil;
+        if ([fm copyItemAtPath:sourcePath toPath:targetPath error:&copyError]) {
+            copied++;
+            NSLog(@"[ARMSX2 iOS SaveState] memcard backup copied slot=%zu path=%@",
+                  i + 1, targetPath);
+        } else {
+            NSLog(@"[ARMSX2 iOS SaveState] memcard backup failed slot=%zu source=%@ error=%@",
+                  i + 1, sourcePath, copyError.localizedDescription ?: @"unknown");
+        }
+    }
+
+    if (copied == 0) {
+        [fm removeItemAtPath:backupDir error:nil];
+    } else {
+        ARMSX2PruneOldMemcardBackups(backupRoot, 6);
+        NSLog(@"[ARMSX2 iOS SaveState] memcard backup complete reason=%s slot=%d copied=%ld dir=%@",
+              reason ? reason : "state", stateSlot, static_cast<long>(copied), backupDir);
+    }
+
+    return copied;
+}
+
+static bool ARMSX2FlushNVRAMAndMemoryCards(const char* reason)
+{
+    cdvdSaveNVRAM();
+    s_lastNVMSaveDate = [NSDate date];
+
+    if (!VMManager::HasValidVM()) {
+        NSLog(@"[ARMSX2Bridge] Save-state flush skipped memory cards reason=%s validVM=0",
+              reason ? reason : "unknown");
+        return true;
+    }
+
+    if (MemcardBusy::IsBusy()) {
+        NSLog(@"[ARMSX2Bridge] Save-state flush blocked reason=%s memoryCardBusy=1",
+              reason ? reason : "unknown");
+        return false;
+    }
+
+    FileMcd_EmuClose();
+    FileMcd_EmuOpen();
+    NSLog(@"[ARMSX2Bridge] Save-state flush complete reason=%s nvmDate=%@",
+          reason ? reason : "unknown", s_lastNVMSaveDate);
+    return true;
 }
 
 static BOOL ARMSX2IsControllerSkinImageName(NSString* name)
@@ -765,9 +992,10 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 }
 
 + (void)saveMemoryCards {
-    // FileMcd_EmuClose triggers save on all open memory cards
-    // For now, MC saves happen automatically via the existing PCSX2 MC system
-    NSLog(@"[ARMSX2Bridge] Memory card save requested");
+    Host::RunOnCPUThread([]() {
+        const bool flushed = ARMSX2FlushNVRAMAndMemoryCards("manual-save-memory-cards");
+        NSLog(@"[ARMSX2Bridge] Memory card save requested result=%d", flushed ? 1 : 0);
+    }, false);
 }
 
 + (void)saveAllState {
@@ -831,19 +1059,37 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     auto* pad = static_cast<PadDualshock2*>(Pad::GetPad(0, 0));
     if (!pad) return;
     // Convert axis (-1..+1) to individual direction values (0..1)
-    pad->Set(PadDualshock2::Inputs::PAD_L_RIGHT, x > 0 ? x : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_LEFT, x < 0 ? -x : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_DOWN, y > 0 ? y : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_UP, y < 0 ? -y : 0.0f);
+    const float right = x > 0 ? x : 0.0f;
+    const float left = x < 0 ? -x : 0.0f;
+    const float down = y > 0 ? y : 0.0f;
+    const float up = y < 0 ? -y : 0.0f;
+    pad->Set(PadDualshock2::Inputs::PAD_L_RIGHT, right);
+    pad->Set(PadDualshock2::Inputs::PAD_L_LEFT, left);
+    pad->Set(PadDualshock2::Inputs::PAD_L_DOWN, down);
+    pad->Set(PadDualshock2::Inputs::PAD_L_UP, up);
+    extern bool g_touchPadState[64];
+    g_touchPadState[PadDualshock2::Inputs::PAD_L_RIGHT] = right > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_L_LEFT] = left > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_L_DOWN] = down > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_L_UP] = up > 0.01f;
 }
 
 + (void)setRightStickX:(float)x Y:(float)y {
     auto* pad = static_cast<PadDualshock2*>(Pad::GetPad(0, 0));
     if (!pad) return;
-    pad->Set(PadDualshock2::Inputs::PAD_R_RIGHT, x > 0 ? x : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_LEFT, x < 0 ? -x : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_DOWN, y > 0 ? y : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_UP, y < 0 ? -y : 0.0f);
+    const float right = x > 0 ? x : 0.0f;
+    const float left = x < 0 ? -x : 0.0f;
+    const float down = y > 0 ? y : 0.0f;
+    const float up = y < 0 ? -y : 0.0f;
+    pad->Set(PadDualshock2::Inputs::PAD_R_RIGHT, right);
+    pad->Set(PadDualshock2::Inputs::PAD_R_LEFT, left);
+    pad->Set(PadDualshock2::Inputs::PAD_R_DOWN, down);
+    pad->Set(PadDualshock2::Inputs::PAD_R_UP, up);
+    extern bool g_touchPadState[64];
+    g_touchPadState[PadDualshock2::Inputs::PAD_R_RIGHT] = right > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_R_LEFT] = left > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_R_DOWN] = down > 0.01f;
+    g_touchPadState[PadDualshock2::Inputs::PAD_R_UP] = up > 0.01f;
 }
 
 + (nonnull NSString *)biosName {
@@ -882,6 +1128,14 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 + (nonnull NSString *)buildVersion {
     NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
     return [NSString stringWithFormat:@"ARMSX2 iOS v%@", ver];
+}
+
++ (BOOL)isJITAvailable {
+    return DarwinMisc::IsJITAvailable();
+}
+
++ (BOOL)isNoJITFallbackActive {
+    return DarwinMisc::iPSX2_FORCE_EE_INTERP != 0;
 }
 
 + (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
@@ -1091,6 +1345,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
     const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
     const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
+    const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
     NSMutableDictionary<NSString*, id>* result = [@{
         @"enabled": @NO,
         @"path": @"",
@@ -1105,6 +1360,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         @"enablePatches": @(globalEnablePatches),
         @"enableGameFixes": @(globalEnableGameFixes),
         @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
+        @"eeCoreType": @(globalEECoreType),
     } mutableCopy];
 
     if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
@@ -1131,7 +1387,9 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.ContainsValue("EmuCore", "EnableCheats") ||
         si.ContainsValue("EmuCore", "EnablePatches") ||
         si.ContainsValue("EmuCore", "EnableGameFixes") ||
-        si.ContainsValue("EmuCore/GS", "UserHacks");
+        si.ContainsValue("EmuCore/GS", "UserHacks") ||
+        si.ContainsValue("EmuCore/CPU", "CoreType") ||
+        si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec");
 
     result[@"enabled"] = @(hasKnownOverride);
     NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
@@ -1144,6 +1402,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
     result[@"enableGameFixes"] = @(si.GetBoolValue("EmuCore", "EnableGameFixes", [result[@"enableGameFixes"] boolValue]));
     result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
+    result[@"eeCoreType"] = @(si.GetIntValue("EmuCore/CPU", "CoreType", [result[@"eeCoreType"] intValue]));
     return result;
 }
 
@@ -1154,6 +1413,7 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
               textureFiltering:(int)textureFiltering
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
+                    eeCoreType:(int)eeCoreType
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
@@ -1182,6 +1442,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
         si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
         si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
+        si.SetIntValue("EmuCore/CPU", "CoreType", eeCoreType);
+        si.SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", eeCoreType == 2);
     } else {
         si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
@@ -1193,6 +1455,8 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.DeleteValue("EmuCore", "EnablePatches");
         si.DeleteValue("EmuCore", "EnableGameFixes");
         si.DeleteValue("EmuCore/GS", "UserHacks");
+        si.DeleteValue("EmuCore/CPU", "CoreType");
+        si.DeleteValue("EmuCore/CPU", "UseArm64Dynarec");
         si.RemoveEmptySections();
     }
 
@@ -1203,6 +1467,82 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
           entry.crc, ARMSX2NSStringFromStdString(settingsPath), saved ? 1 : 0);
     if (!saved)
         NSLog(@"[ARMSX2Bridge] Game settings save error: %@", ARMSX2NSStringFromStdString(error.GetDescription()));
+}
+
++ (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName {
+    GameList::Entry entry;
+    NSString* resolvedPath = nil;
+    if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
+        NSLog(@"[ARMSX2Bridge] Clear cache unavailable for %@ path=%@", isoName, resolvedPath ?: @"");
+        return @"Cache not cleared: game identity was not found.";
+    }
+
+    NSArray<NSString*>* tokens = ARMSX2GameDataTokensForEntry(isoName, entry);
+    NSInteger removed = 0;
+    removed += ARMSX2RemoveMatchingGeneratedFiles(ARMSX2NSStringFromStdString(EmuFolders::Cache), tokens);
+    removed += ARMSX2RemoveMatchingGeneratedFiles(NSTemporaryDirectory(), tokens);
+
+    NSLog(@"[ARMSX2Bridge] Clear cache iso=%@ serial=%@ crc=%08X removed=%ld",
+          isoName, ARMSX2NSStringFromStdString(entry.serial), entry.crc, (long)removed);
+    return [NSString stringWithFormat:@"Cleared %ld generated cache item%@ for %@.",
+            (long)removed, removed == 1 ? @"" : @"s", isoName.stringByDeletingPathExtension ?: isoName];
+}
+
++ (nonnull NSString *)deleteGameDataForISO:(nonnull NSString *)isoName {
+    GameList::Entry entry;
+    NSString* resolvedPath = nil;
+    if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
+        NSLog(@"[ARMSX2Bridge] Delete game data unavailable for %@ path=%@", isoName, resolvedPath ?: @"");
+        return @"Game data was not deleted: game identity was not found.";
+    }
+
+    NSInteger removed = 0;
+    auto removePath = [&removed](const std::string& path) {
+        if (path.empty() || !FileSystem::FileExists(path.c_str()))
+            return;
+        if (FileSystem::DeleteFilePath(path.c_str()))
+            removed++;
+    };
+
+    for (s32 slot = -1; slot <= VMManager::NUM_SAVE_STATE_SLOTS; slot++) {
+        removePath(VMManager::GetSaveStateFileName(entry.serial.c_str(), entry.crc, slot));
+        removePath(VMManager::GetSaveStateFileName(entry.serial.c_str(), entry.crc, slot, true));
+    }
+
+    removePath(Patch::GetPnachFilename(entry.serial, entry.crc, true));
+    removePath(Patch::GetPnachFilename(entry.serial, entry.crc, false));
+    removePath(VMManager::GetGameSettingsPath(entry.serial, entry.crc));
+
+    NSString* identity = ARMSX2CompatibilityIdentityKey(ARMSX2NSStringFromStdString(entry.serial), entry.crc);
+    if (g_p44_settings_interface && identity.length > 0) {
+        g_p44_settings_interface->DeleteValue("ARMSX2/JITBisectGamePresets", identity.UTF8String);
+        ARMSX2ClearCompatibilityCustomFlagsForIdentity(identity);
+        g_p44_settings_interface->Save();
+    }
+
+    NSArray<NSString*>* tokens = ARMSX2GameDataTokensForEntry(isoName, entry);
+    removed += ARMSX2RemoveMatchingGeneratedFiles(ARMSX2NSStringFromStdString(EmuFolders::Cache), tokens);
+    removed += ARMSX2RemoveMatchingGeneratedFiles(NSTemporaryDirectory(), tokens);
+
+    NSLog(@"[ARMSX2Bridge] Delete game data iso=%@ serial=%@ crc=%08X removed=%ld",
+          isoName, ARMSX2NSStringFromStdString(entry.serial), entry.crc, (long)removed);
+    return [NSString stringWithFormat:@"Deleted %ld game-data item%@ for %@. Memory card contents were left intact.",
+            (long)removed, removed == 1 ? @"" : @"s", isoName.stringByDeletingPathExtension ?: isoName];
+}
+
++ (BOOL)deleteISO:(nonnull NSString *)isoName deleteGameData:(BOOL)deleteGameData {
+    NSString* isoPath = ARMSX2ResolveISOPath(isoName);
+    if (isoPath.length == 0)
+        return NO;
+
+    if (deleteGameData)
+        [self deleteGameDataForISO:isoName];
+
+    NSError* error = nil;
+    BOOL removed = [[NSFileManager defaultManager] removeItemAtPath:isoPath error:&error];
+    NSLog(@"[ARMSX2Bridge] Delete ISO iso=%@ path=%@ result=%d error=%@",
+          isoName, isoPath, removed ? 1 : 0, error.localizedDescription ?: @"");
+    return removed;
 }
 
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion {
@@ -1309,12 +1649,10 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     GSConfig.OsdShowInputRec = false;
 
     switch (preset) {
-    case 1: // simple: Android-style quick readout
+    case 1: // simple: clean player readout; device stats are Swift-side
         GSConfig.OsdShowFPS = true;
         GSConfig.OsdShowSpeed = true;
         GSConfig.OsdShowCPU = true;
-        GSConfig.OsdShowGPU = true;
-        GSConfig.OsdShowIndicators = true;
         break;
     case 2: // detail: performance and renderer diagnostics
         GSConfig.OsdShowFPS = true;
@@ -1542,6 +1880,25 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     return ARMSX2CurrentCompatibilityIdentityKey();
 }
 
++ (nonnull NSString *)compatibilityPresetForISO:(nonnull NSString *)isoName
+{
+    GameList::Entry entry;
+    NSString* identity = ARMSX2CompatibilityIdentityForISOName(isoName, &entry);
+    if (identity.length == 0)
+        return ARMSX2CompatibilityProfileOff;
+
+    NSString* title = ARMSX2NSStringFromStdString(entry.GetTitle(false));
+    if (title.length == 0)
+        title = isoName.stringByDeletingPathExtension ?: isoName;
+
+    return ARMSX2ResolvedCompatibilityPreset(identity, title);
+}
+
++ (nonnull NSString *)compatibilityIdentityForISO:(nonnull NSString *)isoName
+{
+    return ARMSX2CompatibilityIdentityForISOName(isoName);
+}
+
 + (BOOL)isCompatibilityAutoGamePresetsEnabled
 {
     if (!g_p44_settings_interface)
@@ -1556,6 +1913,71 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         g_p44_settings_interface->Save();
     }
     NSLog(@"[ARMSX2Bridge] Compatibility auto game presets %@", enabled ? @"ON" : @"OFF");
+}
+
++ (void)setCompatibilityPreset:(nonnull NSString *)preset forISO:(nonnull NSString *)isoName
+{
+    if (!g_p44_settings_interface)
+        return;
+
+    NSString* normalized = ARMSX2NormalizeCompatibilityProfile(preset);
+    NSString* identity = ARMSX2CompatibilityIdentityForISOName(isoName);
+    if (identity.length == 0) {
+        NSLog(@"[ARMSX2Bridge] Compatibility preset save rejected iso=%@", isoName);
+        return;
+    }
+
+    g_p44_settings_interface->SetStringValue("ARMSX2/JITBisectGamePresets", identity.UTF8String, normalized.UTF8String);
+    if (![normalized isEqualToString:ARMSX2CompatibilityProfileCustom])
+        ARMSX2ClearCompatibilityCustomFlagsForIdentity(identity);
+    g_p44_settings_interface->Save();
+    NSLog(@"[ARMSX2Bridge] Compatibility saved preset=%@ identity=%@ iso=%@", normalized, identity, isoName);
+}
+
++ (BOOL)compatibilityFlag:(nonnull NSString *)flag forISO:(nonnull NSString *)isoName
+{
+    if (!g_p44_settings_interface)
+        return NO;
+
+    NSString* identity = ARMSX2CompatibilityIdentityForISOName(isoName);
+    NSString* key = ARMSX2CompatibilityProfileFlagKey(ARMSX2NormalizeCompatibilityProfile(flag));
+    if (identity.length == 0 || key.length == 0)
+        return NO;
+
+    NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
+    bool value = false;
+    if (g_p44_settings_interface->GetBoolValue(section.UTF8String, key.UTF8String, &value))
+        return value ? YES : NO;
+
+    NSString* activeKey = ARMSX2CompatibilityProfileFlagKey(ARMSX2ResolvedCompatibilityPreset(identity, identity));
+    return (activeKey.length > 0 && [activeKey isEqualToString:key]) ? YES : NO;
+}
+
++ (void)setCompatibilityFlag:(nonnull NSString *)flag enabled:(BOOL)enabled forISO:(nonnull NSString *)isoName
+{
+    if (!g_p44_settings_interface)
+        return;
+
+    NSString* identity = ARMSX2CompatibilityIdentityForISOName(isoName);
+    NSString* key = ARMSX2CompatibilityProfileFlagKey(ARMSX2NormalizeCompatibilityProfile(flag));
+    if (identity.length == 0 || key.length == 0) {
+        NSLog(@"[ARMSX2Bridge] Compatibility custom flag rejected flag=%@ iso=%@", flag, isoName);
+        return;
+    }
+
+    NSString* section = ARMSX2CompatibilityCustomFlagSection(identity);
+    g_p44_settings_interface->SetStringValue("ARMSX2/JITBisectGamePresets", identity.UTF8String, ARMSX2CompatibilityProfileCustom.UTF8String);
+    g_p44_settings_interface->SetBoolValue(section.UTF8String, key.UTF8String, enabled ? true : false);
+
+    NSString* currentIdentity = ARMSX2CurrentCompatibilityIdentityKey();
+    if ([identity isEqualToString:currentIdentity]) {
+        ARMSX2ApplyJITBisectFlag(key, enabled);
+        g_p44_settings_interface->SetBoolValue("ARMSX2/JITBisect", key.UTF8String, enabled ? true : false);
+        g_p44_settings_interface->SetStringValue("ARMSX2/JITBisect", "Profile", ARMSX2CompatibilityProfileCustom.UTF8String);
+    }
+
+    g_p44_settings_interface->Save();
+    NSLog(@"[ARMSX2Bridge] Compatibility custom flag %@ %@ identity=%@ iso=%@", key, enabled ? @"ON" : @"OFF", identity, isoName);
 }
 
 + (void)setCompatibilityPreset:(nonnull NSString *)preset rememberForCurrentGame:(BOOL)rememberForCurrentGame
@@ -1588,6 +2010,21 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSString* profile = ARMSX2ResolvedCompatibilityPreset(identity, identity);
     ARMSX2ApplyCompatibilityProfile(profile, YES, [NSString stringWithFormat:@"forget %@", identity]);
     NSLog(@"[ARMSX2Bridge] Compatibility forgot preset identity=%@", identity);
+}
+
++ (void)forgetCompatibilityPresetForISO:(nonnull NSString *)isoName
+{
+    if (!g_p44_settings_interface)
+        return;
+
+    NSString* identity = ARMSX2CompatibilityIdentityForISOName(isoName);
+    if (identity.length == 0)
+        return;
+
+    g_p44_settings_interface->DeleteValue("ARMSX2/JITBisectGamePresets", identity.UTF8String);
+    ARMSX2ClearCompatibilityCustomFlagsForIdentity(identity);
+    g_p44_settings_interface->Save();
+    NSLog(@"[ARMSX2Bridge] Compatibility forgot preset identity=%@ iso=%@", identity, isoName);
 }
 
 #pragma mark - VM lifecycle
@@ -1683,12 +2120,27 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     const std::string targetPath = VMManager::GetSaveStateFileName(serial.c_str(), crc, nativeSlot);
     NSLog(@"[ARMSX2 iOS SaveState] save requested slot=%d path=%@", nativeSlot, ARMSX2NSStringFromStdString(targetPath));
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_async(ARMSX2SaveStateQueue(), ^{
         bool result = false;
+        VMManager::WaitForSaveStateFlush();
         Host::RunOnCPUThread([nativeSlot, &result]() {
             NSLog(@"[ARMSX2 iOS SaveState] CPU save start slot=%d", nativeSlot);
-            result = VMManager::SaveStateToSlot(nativeSlot, true);
-            NSLog(@"[ARMSX2 iOS SaveState] CPU save queued slot=%d result=%d", nativeSlot, result ? 1 : 0);
+            if (MemcardBusy::IsBusy()) {
+                NSLog(@"[ARMSX2 iOS SaveState] CPU save rejected slot=%d reason=memory-card-busy", nativeSlot);
+                result = false;
+                return;
+            }
+
+            if (!ARMSX2FlushNVRAMAndMemoryCards("pre-save-state")) {
+                NSLog(@"[ARMSX2 iOS SaveState] CPU save rejected slot=%d reason=pre-save-flush-failed", nativeSlot);
+                result = false;
+                return;
+            }
+
+            result = VMManager::SaveStateToSlot(nativeSlot, false);
+            if (result)
+                ARMSX2FlushNVRAMAndMemoryCards("post-save-state");
+            NSLog(@"[ARMSX2 iOS SaveState] CPU save finished slot=%d result=%d", nativeSlot, result ? 1 : 0);
         }, true);
 
         if (result) {
@@ -1720,15 +2172,38 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     NSLog(@"[ARMSX2 iOS SaveState] load requested slot=%d path=%@ exists=%d",
           nativeSlot, ARMSX2NSStringFromStdString(targetPath), (!targetPath.empty() && FileSystem::FileExists(targetPath.c_str())) ? 1 : 0);
 
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+    dispatch_async(ARMSX2SaveStateQueue(), ^{
         bool result = false;
-        Host::RunOnCPUThread([nativeSlot, &result]() {
+        bool flushResult = false;
+        VMManager::WaitForSaveStateFlush();
+        Host::RunOnCPUThread([&flushResult]() {
+            flushResult = ARMSX2FlushNVRAMAndMemoryCards("pre-load-state");
+        }, true);
+
+        NSInteger backupCount = 0;
+        if (flushResult)
+            backupCount = ARMSX2BackupAssignedMemoryCards("pre-load-state", nativeSlot, serial, crc);
+
+        Host::RunOnCPUThread([nativeSlot, flushResult, &result]() {
             NSLog(@"[ARMSX2 iOS SaveState] CPU load start slot=%d", nativeSlot);
+            if (!flushResult) {
+                NSLog(@"[ARMSX2 iOS SaveState] CPU load rejected slot=%d reason=pre-load-flush-failed", nativeSlot);
+                result = false;
+                return;
+            }
+
+            if (MemcardBusy::IsBusy()) {
+                NSLog(@"[ARMSX2 iOS SaveState] CPU load rejected slot=%d reason=memory-card-busy", nativeSlot);
+                result = false;
+                return;
+            }
+
             result = VMManager::LoadStateFromSlot(nativeSlot);
             NSLog(@"[ARMSX2 iOS SaveState] CPU load finished slot=%d result=%d", nativeSlot, result ? 1 : 0);
         }, true);
 
-        NSLog(@"[ARMSX2 iOS SaveState] load callback slot=%d result=%d", nativeSlot, result ? 1 : 0);
+        NSLog(@"[ARMSX2 iOS SaveState] load callback slot=%d result=%d memcardBackups=%ld",
+              nativeSlot, result ? 1 : 0, static_cast<long>(backupCount));
 
         if (callback)
             dispatch_async(dispatch_get_main_queue(), ^{ callback(result ? YES : NO); });

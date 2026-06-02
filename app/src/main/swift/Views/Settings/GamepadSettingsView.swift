@@ -76,9 +76,9 @@ struct GamepadSettingsView: View {
                 } label: {
                     Label {
                         HStack {
-                            Text("Local Multiplayer")
+                            Text(settings.localized("Local Multiplayer"))
                             Spacer()
-                            Text(multitapModeTitle(settings.controllerMultitapMode))
+                            Text(settings.localized(multitapModeTitle(settings.controllerMultitapMode)))
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -87,7 +87,7 @@ struct GamepadSettingsView: View {
                     }
                 }
             } footer: {
-                Text("Configure multitap for 3-4 local controllers.")
+                Text(settings.localized("Configure multitap for 3-4 local controllers."))
             }
 
             Section {
@@ -95,33 +95,33 @@ struct GamepadSettingsView: View {
                     mappingRow(btn)
                 }
             } header: {
-                Text("Button Mapping")
+                Text(settings.localized("Button Mapping"))
             } footer: {
-                Text("Tap a row, then press a button on your controller to assign it. L2/R2 are analog triggers (not remappable).")
+                Text(settings.localized("Tap a row, then press a button on your controller to assign it. L2/R2 are analog triggers (not remappable)."))
             }
 
             Section {
                 Button {
                     ARMSX2Bridge.testControllerRumble()
-                    statusMessage = "Controller rumble test sent."
+                    statusMessage = settings.localized("Controller rumble test sent.")
                 } label: {
-                    Label("Test Controller Rumble", systemImage: "waveform.path")
+                    Label(settings.localized("Test Controller Rumble"), systemImage: "waveform.path")
                 }
 
-                Button("Reset to Default") {
+                Button(settings.localized("Reset to Default")) {
                     ARMSX2Bridge.resetButtonMappings()
                     mappingVersion += 1
                 }
                 .foregroundStyle(.red)
             } header: {
-                Text("Tools")
+                Text(settings.localized("Tools"))
             } footer: {
                 if let statusMessage {
                     Text(statusMessage)
                 }
             }
         }
-        .navigationTitle("Game Controller")
+        .navigationTitle(settings.localized("Game Controller"))
         .navigationBarTitleDisplayMode(.inline)
         .onDisappear {
             stopCapture()
@@ -143,18 +143,18 @@ struct GamepadSettingsView: View {
             HStack {
                 // Left: assigned controller button (prominent)
                 if isCapturing {
-                    Text("Press a button...")
+                    Text(settings.localized("Press a button..."))
                         .font(.body)
                         .fontWeight(.medium)
                         .foregroundStyle(.orange)
                 } else {
-                    Text(sdlButtonName(currentSDL))
+                    Text(settings.localized(sdlButtonName(currentSDL)))
                         .font(.body)
                         .foregroundStyle(.primary)
                 }
                 Spacer()
                 // Right: PS2 function name (secondary)
-                Text(btn.name)
+                Text(settings.localized(btn.name))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -194,30 +194,30 @@ struct LocalMultiplayerSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Picker("Multitap Mode", selection: $settings.controllerMultitapMode) {
+                Picker(settings.localized("Multitap Mode"), selection: $settings.controllerMultitapMode) {
                     ForEach(multitapModes, id: \.id) { mode in
-                        Text(mode.title).tag(mode.id)
+                        Text(settings.localized(mode.title)).tag(mode.id)
                     }
                 }
 
                 HStack {
-                    Text("Current Mode")
+                    Text(settings.localized("Current Mode"))
                     Spacer()
-                    Text(multitapModeTitle(settings.controllerMultitapMode))
+                    Text(settings.localized(multitapModeTitle(settings.controllerMultitapMode)))
                         .foregroundStyle(.secondary)
                 }
             } header: {
-                Text("Multitap")
+                Text(settings.localized("Multitap"))
             } footer: {
-                Text("Auto enables Port 1 multitap when 3 or more controllers are detected before boot. Manual modes take effect on the next boot/reset.")
+                Text(settings.localized("Auto enables Port 1 multitap when 3 or more controllers are detected before boot. Manual modes take effect on the next boot/reset."))
             }
 
-            Section("Controller Mapping") {
-                Text("Disabled maps controllers 1-2 to normal PS2 ports. Port 1 Multitap maps controllers 1-4 to 1A/1B/1C/1D. Port 2 Multitap keeps controller 1 on Port 1 and maps controllers 2-4 to Port 2 multitap slots.")
+            Section(settings.localized("Controller Mapping")) {
+                Text(settings.localized("Disabled maps controllers 1-2 to normal PS2 ports. Port 1 Multitap maps controllers 1-4 to 1A/1B/1C/1D. Port 2 Multitap keeps controller 1 on Port 1 and maps controllers 2-4 to Port 2 multitap slots."))
                     .foregroundStyle(.secondary)
             }
         }
-        .navigationTitle("Local Multiplayer")
+        .navigationTitle(settings.localized("Local Multiplayer"))
         .navigationBarTitleDisplayMode(.inline)
     }
 }

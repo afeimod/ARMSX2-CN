@@ -90,6 +90,8 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 // Info
 + (nonnull NSString *)biosName;
 + (nonnull NSString *)buildVersion;
++ (BOOL)isJITAvailable;
++ (BOOL)isNoJITFallbackActive;
 + (nonnull NSArray<NSURL *> *)extractControllerSkinArchiveAtURL:(nonnull NSURL *)archiveURL
                                                     toDirectory:(nonnull NSURL *)destinationDirectory
     NS_SWIFT_NAME(extractControllerSkinArchive(at:to:));
@@ -114,11 +116,15 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
               textureFiltering:(int)textureFiltering
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
+                    eeCoreType:(int)eeCoreType
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
     enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
-    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:eeCoreType:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
++ (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(clearCache(forISO:));
++ (nonnull NSString *)deleteGameDataForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(deleteGameData(forISO:));
++ (BOOL)deleteISO:(nonnull NSString *)isoName deleteGameData:(BOOL)deleteGameData NS_SWIFT_NAME(deleteISO(_:deleteGameData:));
 + (void)changeDiscToISO:(nonnull NSString *)isoName completion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(changeDisc(toISO:completion:));
 + (void)ejectDiscWithCompletion:(nullable ARMSX2SaveStateCompletion)completion NS_SWIFT_NAME(ejectDisc(completion:));
 
@@ -152,10 +158,16 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (void)setJITBisectFlag:(nonnull NSString *)key value:(BOOL)value;
 + (nonnull NSString *)compatibilityPresetForCurrentGame;
 + (nonnull NSString *)compatibilityIdentityForCurrentGame;
++ (nonnull NSString *)compatibilityPresetForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(compatibilityPreset(forISO:));
++ (nonnull NSString *)compatibilityIdentityForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(compatibilityIdentity(forISO:));
 + (BOOL)isCompatibilityAutoGamePresetsEnabled;
 + (void)setCompatibilityAutoGamePresetsEnabled:(BOOL)enabled;
 + (void)setCompatibilityPreset:(nonnull NSString *)preset rememberForCurrentGame:(BOOL)rememberForCurrentGame;
++ (void)setCompatibilityPreset:(nonnull NSString *)preset forISO:(nonnull NSString *)isoName NS_SWIFT_NAME(setCompatibilityPreset(_:forISO:));
++ (BOOL)compatibilityFlag:(nonnull NSString *)flag forISO:(nonnull NSString *)isoName NS_SWIFT_NAME(compatibilityFlag(_:forISO:));
++ (void)setCompatibilityFlag:(nonnull NSString *)flag enabled:(BOOL)enabled forISO:(nonnull NSString *)isoName NS_SWIFT_NAME(setCompatibilityFlag(_:enabled:forISO:));
 + (void)forgetCompatibilityPresetForCurrentGame;
++ (void)forgetCompatibilityPresetForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(forgetCompatibilityPreset(forISO:));
 
 // [P44] VM lifecycle for menu flow
 + (BOOL)isVMRunning;

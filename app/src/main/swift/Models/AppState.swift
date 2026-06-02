@@ -6,6 +6,7 @@ import SwiftUI
 @Observable
 final class AppState: @unchecked Sendable {
     static let shared = AppState()
+    static let systemChromeNeedsUpdateNotification = Notification.Name("ARMSX2iOSSystemChromeNeedsUpdate")
 
     enum Screen {
         case menu
@@ -15,7 +16,20 @@ final class AppState: @unchecked Sendable {
     var currentScreen: Screen = .menu
     var selectedTab: Int = 0
     var runningGameName: String? = nil
-    var hideStatusBar: Bool = false
+    var hideStatusBar: Bool = false {
+        didSet {
+            if oldValue != hideStatusBar {
+                NotificationCenter.default.post(name: Self.systemChromeNeedsUpdateNotification, object: nil)
+            }
+        }
+    }
+    var hideHomeIndicator: Bool = false {
+        didSet {
+            if oldValue != hideHomeIndicator {
+                NotificationCenter.default.post(name: Self.systemChromeNeedsUpdateNotification, object: nil)
+            }
+        }
+    }
 
     @ObservationIgnored private var pendingBootAction: (() -> Void)?
     @ObservationIgnored private var shutdownObserver: NSObjectProtocol?
@@ -48,6 +62,9 @@ final class AppState: @unchecked Sendable {
     }
 
     func bootGame(isoName: String) {
+        Task { @MainActor in
+            StikDebugLauncher.autoOpenIfNeeded(reason: "game boot")
+        }
         ARMSX2Bridge.bootISO(isoName)
         ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
         runningGameName = isoName
@@ -58,6 +75,9 @@ final class AppState: @unchecked Sendable {
     }
 
     func bootBIOSOnly() {
+        Task { @MainActor in
+            StikDebugLauncher.autoOpenIfNeeded(reason: "BIOS boot")
+        }
         ARMSX2Bridge.setINIString("GameISO", key: "BootISO", value: "")
         ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
         runningGameName = "BIOS"

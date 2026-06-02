@@ -31,6 +31,32 @@ struct VirtualPadSettingsView: View {
                 }
             }
 
+            Section(settings.localized("Gameplay")) {
+                Toggle(settings.localized("Auto Full Screen"), isOn: $settings.autoFullscreen)
+                Toggle(settings.localized("Hide Menu Button"), isOn: $settings.hideMenuButton)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(settings.localized("Analog Stick Size"))
+                        Spacer()
+                        Text("\(Int((settings.analogStickScale * 100).rounded()))%")
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.analogStickScale) },
+                            set: { settings.analogStickScale = Float($0) }
+                        ),
+                        in: 0.8...1.6,
+                        step: 0.05
+                    )
+                }
+
+                Text(settings.localized("Double-tap empty gameplay space to show the menu button again."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section(settings.localized("Custom Skin")) {
                 Button {
                     showSkinImporter = true

@@ -64,7 +64,7 @@ struct BIOSListView: View {
             .sheet(isPresented: $showBIOSImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.biosContentTypes,
-                    allowsMultipleSelection: false
+                    allowsMultipleSelection: true
                 ) { result in
                     showBIOSImporter = false
                     handleBIOSPickerResult(result, source: "primary")
@@ -73,7 +73,7 @@ struct BIOSListView: View {
             .sheet(isPresented: $showBIOSCompatibilityImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.biosContentTypes,
-                    allowsMultipleSelection: false,
+                    allowsMultipleSelection: true,
                     legacyDocumentTypes: ["public.item", "public.data", "public.content"]
                 ) { result in
                     showBIOSCompatibilityImporter = false

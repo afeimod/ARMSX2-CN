@@ -530,6 +530,10 @@ struct VirtualControllerView: View {
     var isLandscape: Bool = false
     var drawFullSkinBackground: Bool = true
 
+    private var analogStickScale: CGFloat {
+        min(max(CGFloat(settings.analogStickScale), 0.8), 1.6)
+    }
+
     // A004: Scale buttons based on screen width (baseline: iPhone 15 = 393pt width)
     private func deviceScale(_ geo: GeometryProxy) -> CGFloat {
         let baseWidth: CGFloat = 393
@@ -600,10 +604,10 @@ struct VirtualControllerView: View {
             PadBtn(label: "START", w: 48, h: 22, btn: .start)
                 .scaleEffect(pos("start", landscape: true).scale)
                 .position(x: pos("start", landscape: true).x * w, y: pos("start", landscape: true).y * h)
-            StickView(isLeft: true)
+            StickView(isLeft: true, sizeScale: analogStickScale)
                 .scaleEffect(pos("lstick", landscape: true).scale)
                 .position(x: pos("lstick", landscape: true).x * w, y: pos("lstick", landscape: true).y * h)
-            StickView(isLeft: false)
+            StickView(isLeft: false, sizeScale: analogStickScale)
                 .scaleEffect(pos("rstick", landscape: true).scale)
                 .position(x: pos("rstick", landscape: true).x * w, y: pos("rstick", landscape: true).y * h)
         }
@@ -655,10 +659,10 @@ struct VirtualControllerView: View {
                 ActionButtonsView(size: 42)
                     .scaleEffect(pos("action", landscape: false).scale)
                     .position(x: pos("action", landscape: false).x * cW, y: pos("action", landscape: false).y * cH)
-                StickView(isLeft: true)
+                StickView(isLeft: true, sizeScale: analogStickScale)
                     .scaleEffect(pos("lstick", landscape: false).scale)
                     .position(x: pos("lstick", landscape: false).x * cW, y: pos("lstick", landscape: false).y * cH)
-                StickView(isLeft: false)
+                StickView(isLeft: false, sizeScale: analogStickScale)
                     .scaleEffect(pos("rstick", landscape: false).scale)
                     .position(x: pos("rstick", landscape: false).x * cW, y: pos("rstick", landscape: false).y * cH)
             }
@@ -708,17 +712,19 @@ private struct ControllerPressEffect<S: InsettableShape>: View {
     let opacity: Double
 
     var body: some View {
-        shape
-            .inset(by: 1)
-            .fill(color.opacity(isPressed ? 0.34 * opacity : 0.06 * opacity))
-            .overlay {
-                shape
-                    .inset(by: 1)
-                    .stroke(color.opacity(isPressed ? 0.72 * opacity : 0.20 * opacity), lineWidth: isPressed ? 2.2 : 1.0)
-            }
-            .shadow(color: color.opacity(isPressed ? 0.42 * opacity : 0.08 * opacity), radius: isPressed ? 9 : 3)
-            .scaleEffect(isPressed ? 0.92 : 1.0)
-            .animation(.easeOut(duration: 0.06), value: isPressed)
+        if isPressed {
+            shape
+                .inset(by: 1)
+                .fill(color.opacity(0.34 * opacity))
+                .overlay {
+                    shape
+                        .inset(by: 1)
+                        .stroke(color.opacity(0.72 * opacity), lineWidth: 2.2)
+                }
+                .shadow(color: color.opacity(0.42 * opacity), radius: 9)
+                .scaleEffect(0.92)
+                .animation(.easeOut(duration: 0.06), value: isPressed)
+        }
     }
 }
 
@@ -732,7 +738,7 @@ struct PSBtn: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(.white.opacity(0.001))
+                .fill(.clear)
 
             if !padUsesFullSkin || on {
                 ControllerPressEffect(shape: Circle(), color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
@@ -778,7 +784,7 @@ struct PadBtn: View {
         let shape = RoundedRectangle(cornerRadius: min(w, h) * 0.28, style: .continuous)
         ZStack {
             shape
-                .fill(.white.opacity(0.001))
+                .fill(.clear)
 
             if !padUsesFullSkin || on {
                 ControllerPressEffect(shape: shape, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
@@ -815,7 +821,18 @@ struct PadBtn: View {
 // MARK: - Analog Stick with L3/R3 tap
 struct StickView: View {
     let isLeft: Bool
-    let sz: CGFloat = 68; let knob: CGFloat = 30
+    let sizeScale: CGFloat
+
+    private var clampedScale: CGFloat {
+        min(max(sizeScale, 0.8), 1.6)
+    }
+    private var sz: CGFloat {
+        68 * clampedScale
+    }
+    private var knob: CGFloat {
+        30 * clampedScale
+    }
+
     @State private var off: CGSize = .zero
     @State private var isDragging = false
     @Environment(\.padOpacity) private var padOpacity
@@ -825,10 +842,10 @@ struct StickView: View {
     var body: some View {
         ZStack {
             Circle()
-                .fill(.white.opacity(0.001))
+                .fill(.clear)
                 .frame(width: sz, height: sz)
 
-            if !padUsesFullSkin || isDragging {
+            if isDragging {
                 Circle()
                     .fill(.black.opacity((isDragging ? 0.26 : 0.18) * padOpacity))
                     .stroke(.white.opacity((isDragging ? 0.34 : 0.18) * padOpacity), lineWidth: isDragging ? 1.8 : 1)

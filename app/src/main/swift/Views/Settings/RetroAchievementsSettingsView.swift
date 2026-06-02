@@ -6,6 +6,7 @@ import SwiftUI
 private let retroAchievementsNotification = Notification.Name("ARMSX2RetroAchievementsStateChanged")
 
 struct RetroAchievementsSettingsView: View {
+    @State private var settings = SettingsStore.shared
     @State private var state: [String: Any] = [:]
     @State private var achievementsEnabled = false
     @State private var hardcoreEnabled = false
@@ -23,7 +24,7 @@ struct RetroAchievementsSettingsView: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Enable RetroAchievements", isOn: Binding(
+                Toggle(settings.localized("Enable RetroAchievements"), isOn: Binding(
                     get: { achievementsEnabled },
                     set: { newValue in
                         achievementsEnabled = newValue
@@ -33,26 +34,26 @@ struct RetroAchievementsSettingsView: View {
                 ))
 
                 statusRow("Client", value: bool("active") ? "Active" : "Inactive")
-                statusRow("Account", value: accountSummary)
+                statusRow("Account", value: accountSummary, localizeValue: !bool("loggedIn"))
             } header: {
-                Text("RetroAchievements")
+                Text(settings.localized("RetroAchievements"))
             } footer: {
-                Text("Uses the same achievements core as ARMSX2 Android. Login tokens are stored in ARMSX2's local config; passwords are not stored by this screen.")
+                Text(settings.localized("Uses the same achievements core as ARMSX2 Android. Login tokens are stored in ARMSX2's local config; passwords are not stored by this screen."))
             }
 
-            Section("Account") {
+            Section(settings.localized("Account")) {
                 if bool("loggedIn") {
-                    statusRow("User", value: displayName)
-                    statusRow("Points", value: "\(int("points")) hard / \(int("softcorePoints")) soft")
+                    statusRow("User", value: displayName, localizeValue: false)
+                    statusRow("Points", value: "\(int("points")) hard / \(int("softcorePoints")) soft", localizeValue: false)
                     if int("unreadMessages") > 0 {
-                        statusRow("Messages", value: "\(int("unreadMessages")) unread")
+                        statusRow("Messages", value: "\(int("unreadMessages")) \(settings.localized("unread"))", localizeValue: false)
                     }
 
                     Button(role: .destructive) {
                         ARMSX2Bridge.logoutRetroAchievements()
                         refreshSoon()
                     } label: {
-                        Text("Log Out")
+                        Text(settings.localized("Log Out"))
                     }
                 } else {
                     Button {
@@ -60,14 +61,14 @@ struct RetroAchievementsSettingsView: View {
                         password = ""
                         showingLogin = true
                     } label: {
-                        Text(loggingIn ? "Logging In..." : "Log In")
+                        Text(settings.localized(loggingIn ? "Logging In..." : "Log In"))
                     }
                     .disabled(!achievementsEnabled || loggingIn)
                 }
             }
 
             Section {
-                Toggle("Hardcore Mode", isOn: Binding(
+                Toggle(settings.localized("Hardcore Mode"), isOn: Binding(
                     get: { hardcoreEnabled },
                     set: { newValue in
                         hardcoreEnabled = newValue
@@ -77,7 +78,7 @@ struct RetroAchievementsSettingsView: View {
                 ))
                 .disabled(!achievementsEnabled)
 
-                Toggle("Achievement Notifications", isOn: Binding(
+                Toggle(settings.localized("Achievement Notifications"), isOn: Binding(
                     get: { notificationsEnabled },
                     set: { newValue in
                         notificationsEnabled = newValue
@@ -87,7 +88,7 @@ struct RetroAchievementsSettingsView: View {
                 ))
                 .disabled(!achievementsEnabled)
 
-                Toggle("Leaderboard Notifications", isOn: Binding(
+                Toggle(settings.localized("Leaderboard Notifications"), isOn: Binding(
                     get: { leaderboardNotificationsEnabled },
                     set: { newValue in
                         leaderboardNotificationsEnabled = newValue
@@ -97,7 +98,7 @@ struct RetroAchievementsSettingsView: View {
                 ))
                 .disabled(!achievementsEnabled)
 
-                Toggle("In-Game Overlays", isOn: Binding(
+                Toggle(settings.localized("In-Game Overlays"), isOn: Binding(
                     get: { overlaysEnabled },
                     set: { newValue in
                         overlaysEnabled = newValue
@@ -107,19 +108,19 @@ struct RetroAchievementsSettingsView: View {
                 ))
                 .disabled(!achievementsEnabled)
             } header: {
-                Text("Modes")
+                Text(settings.localized("Modes"))
             } footer: {
-                Text("Hardcore is enforced by the core and can restrict cheats, save states, and other non-hardcore features while active.")
+                Text(settings.localized("Hardcore is enforced by the core and can restrict cheats, save states, and other non-hardcore features while active."))
             }
 
-            Section("Current Game") {
+            Section(settings.localized("Current Game")) {
                 if bool("hasActiveGame") {
-                    statusRow("Title", value: string("gameTitle", fallback: "Unknown Game"))
-                    statusRow("Game ID", value: "\(int("gameId"))")
+                    statusRow("Title", value: string("gameTitle", fallback: settings.localized("Unknown Game")), localizeValue: false)
+                    statusRow("Game ID", value: "\(int("gameId"))", localizeValue: false)
 
                     if int("totalAchievements") > 0 {
-                        statusRow("Achievements", value: "\(int("unlockedAchievements")) / \(int("totalAchievements"))")
-                        statusRow("Points", value: "\(int("unlockedPoints")) / \(int("totalPoints"))")
+                        statusRow("Achievements", value: "\(int("unlockedAchievements")) / \(int("totalAchievements"))", localizeValue: false)
+                        statusRow("Points", value: "\(int("unlockedPoints")) / \(int("totalPoints"))", localizeValue: false)
                     } else if bool("hasAchievements") {
                         statusRow("Achievements", value: "Loaded")
                     } else {
@@ -131,34 +132,34 @@ struct RetroAchievementsSettingsView: View {
                     }
 
                     if bool("hasRichPresence") {
-                        statusRow("Rich Presence", value: string("richPresence", fallback: "Active"))
+                        statusRow("Rich Presence", value: string("richPresence", fallback: settings.localized("Active")), localizeValue: false)
                     }
                 } else {
-                    Text("Boot a game while RetroAchievements is enabled to see game progress here.")
+                    Text(settings.localized("Boot a game while RetroAchievements is enabled to see game progress here."))
                         .foregroundStyle(.secondary)
                 }
             }
         }
-        .navigationTitle("RetroAchievements")
+        .navigationTitle(settings.localized("RetroAchievements"))
         .navigationBarTitleDisplayMode(.inline)
         .onAppear(perform: refresh)
         .onReceive(NotificationCenter.default.publisher(for: retroAchievementsNotification)) { _ in
             refresh()
         }
-        .alert("RetroAchievements Login", isPresented: $showingLogin) {
-            TextField("Username", text: $username)
+        .alert(settings.localized("RetroAchievements Login"), isPresented: $showingLogin) {
+            TextField(settings.localized("Username"), text: $username)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            SecureField("Password", text: $password)
-            Button("Log In") {
+            SecureField(settings.localized("Password"), text: $password)
+            Button(settings.localized("Log In")) {
                 beginLogin()
             }
-            Button("Cancel", role: .cancel) {}
+            Button(settings.localized("Cancel"), role: .cancel) {}
         } message: {
-            Text("Use your RetroAchievements account credentials.")
+            Text(settings.localized("Use your RetroAchievements account credentials."))
         }
-        .alert(messageTitle, isPresented: $showingMessage) {
-            Button("OK", role: .cancel) {}
+        .alert(settings.localized(messageTitle), isPresented: $showingMessage) {
+            Button(settings.localized("OK"), role: .cancel) {}
         } message: {
             Text(messageBody)
         }
@@ -175,11 +176,11 @@ struct RetroAchievementsSettingsView: View {
         string("displayName", fallback: string("username", fallback: "Logged in"))
     }
 
-    private func statusRow(_ title: String, value: String) -> some View {
+    private func statusRow(_ title: String, value: String, localizeValue: Bool = true) -> some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(title)
+            Text(settings.localized(title))
             Spacer(minLength: 16)
-            Text(value)
+            Text(localizeValue ? settings.localized(value) : value)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.trailing)
         }
@@ -203,7 +204,7 @@ struct RetroAchievementsSettingsView: View {
     private func beginLogin() {
         let trimmedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedUsername.isEmpty, !password.isEmpty else {
-            showMessage(title: "Missing Login", body: "Enter both your RetroAchievements username and password.")
+            showMessage(title: "Missing Login", body: settings.localized("Enter both your RetroAchievements username and password."))
             return
         }
 
@@ -213,7 +214,7 @@ struct RetroAchievementsSettingsView: View {
                 loggingIn = false
                 password = ""
                 refresh()
-                showMessage(title: success ? "Logged In" : "Login Failed", body: message)
+                showMessage(title: success ? "Logged In" : "Login Failed", body: settings.localized(message))
             }
         }
     }

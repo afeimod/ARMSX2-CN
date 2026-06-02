@@ -32,8 +32,13 @@ struct RootView: View {
         }
         .environment(\.layoutDirection, settings.localizedLayoutDirection)
         .statusBarHidden(showBootSplash)
+        .onAppear {
+            StikDebugLauncher.autoOpenIfNeeded(reason: "app launch")
+        }
         .onOpenURL { url in
-            fileImporter.handleURL(url)
+            if !ARMSX2DeepLinkHandler.handle(url) {
+                fileImporter.handleURL(url)
+            }
         }
         .alert(settings.localized("File Import"), isPresented: $fileImporter.showImportAlert) {
             Button(settings.localized("OK")) {}

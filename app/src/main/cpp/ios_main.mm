@@ -864,6 +864,9 @@ static constexpr u32 ARMSX2_GAMEPAD_RUMBLE_DURATION_MS = 220;
 static constexpr double ARMSX2_GAMEPAD_RUMBLE_FORCE_STOP_SECONDS = 0.30;
 static constexpr u16 ARMSX2_GAMEPAD_RUMBLE_MAX_INTENSITY = 0x7000;
 
+static CHHapticEngine* s_nativePulseHapticEngine[ARMSX2_MAX_IOS_GAMEPADS] = {};
+static std::atomic<u32> s_nativePulseHapticStopGeneration[ARMSX2_MAX_IOS_GAMEPADS];
+static std::atomic<u32> s_loggedNativePulseHapticEvents{0};
 static GCController* s_nativeHapticController = nil;
 static CHHapticEngine* s_nativeHapticEngine = nil;
 static id<CHHapticAdvancedPatternPlayer> s_nativeHapticPlayer = nil;
@@ -871,6 +874,236 @@ static u32 s_nativeAppliedGamepadRumble = 0;
 static bool s_nativeAppliedGamepadRumbleValid = false;
 static bool s_loggedNativeGamepadRumbleReady = false;
 static bool s_loggedNativeGamepadRumbleUnavailable = false;
+static std::atomic<u8> s_nativeGamepadDpadMask[ARMSX2_MAX_IOS_GAMEPADS];
+static std::atomic<u8> s_nativeGamepadDpadLatchedMask[ARMSX2_MAX_IOS_GAMEPADS];
+static std::atomic<u8> s_nativeGamepadAnyDpadMask{0};
+static std::atomic<u8> s_nativeGamepadAnyDpadLatchedMask{0};
+static std::atomic<u32> s_loggedNativeGamepadDpadEvents{0};
+static std::atomic<u32> s_loggedNativeGamepadDpadApplyEvents{0};
+static std::atomic<u32> s_loggedJoyConRumbleSkipped{0};
+static id s_nativeGamepadConnectObserver = nil;
+static id s_nativeGamepadDisconnectObserver = nil;
+
+enum : u8
+{
+    ARMSX2_NATIVE_DPAD_UP = 1 << 0,
+    ARMSX2_NATIVE_DPAD_DOWN = 1 << 1,
+    ARMSX2_NATIVE_DPAD_LEFT = 1 << 2,
+    ARMSX2_NATIVE_DPAD_RIGHT = 1 << 3,
+};
+
+static u8 ARMSX2NativeDpadBitForPS2Button(u32 ps2_button)
+{
+    switch (ps2_button)
+    {
+        case PadDualshock2::Inputs::PAD_UP:
+            return ARMSX2_NATIVE_DPAD_UP;
+        case PadDualshock2::Inputs::PAD_DOWN:
+            return ARMSX2_NATIVE_DPAD_DOWN;
+        case PadDualshock2::Inputs::PAD_LEFT:
+            return ARMSX2_NATIVE_DPAD_LEFT;
+        case PadDualshock2::Inputs::PAD_RIGHT:
+            return ARMSX2_NATIVE_DPAD_RIGHT;
+        default:
+            return 0;
+    }
+}
+
+static void ARMSX2RecomputeNativeGamepadAnyDpadMask()
+{
+    u8 any_mask = 0;
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++)
+        any_mask |= s_nativeGamepadDpadMask[slot].load(std::memory_order_relaxed);
+
+    s_nativeGamepadAnyDpadMask.store(any_mask, std::memory_order_relaxed);
+}
+
+static void ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask()
+{
+    u8 any_mask = 0;
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++)
+        any_mask |= s_nativeGamepadDpadLatchedMask[slot].load(std::memory_order_relaxed);
+
+    s_nativeGamepadAnyDpadLatchedMask.store(any_mask, std::memory_order_relaxed);
+}
+
+static u8 ARMSX2NativeDpadMaskForDirectionPad(GCControllerDirectionPad* dpad)
+{
+    if (!dpad)
+        return 0;
+
+    u8 mask = 0;
+    if (dpad.up.pressed || dpad.yAxis.value > 0.35f)
+        mask |= ARMSX2_NATIVE_DPAD_UP;
+    if (dpad.down.pressed || dpad.yAxis.value < -0.35f)
+        mask |= ARMSX2_NATIVE_DPAD_DOWN;
+    if (dpad.left.pressed || dpad.xAxis.value < -0.35f)
+        mask |= ARMSX2_NATIVE_DPAD_LEFT;
+    if (dpad.right.pressed || dpad.xAxis.value > 0.35f)
+        mask |= ARMSX2_NATIVE_DPAD_RIGHT;
+
+    return mask;
+}
+
+static GCControllerDirectionPad* ARMSX2NativeDpadForController(GCController* controller)
+{
+    if (!controller)
+        return nil;
+
+    GCExtendedGamepad* extended = controller.extendedGamepad;
+    if (extended && extended.dpad)
+        return extended.dpad;
+
+    GCPhysicalInputProfile* profile = controller.physicalInputProfile;
+    if (profile && [profile respondsToSelector:@selector(dpads)]) {
+        NSDictionary<NSString*, GCControllerDirectionPad*>* dpads = profile.dpads;
+        for (NSString* key in dpads) {
+            GCControllerDirectionPad* dpad = dpads[key];
+            if (dpad)
+                return dpad;
+        }
+    }
+
+    return nil;
+}
+
+static void ARMSX2SetNativeGamepadDpadBit(u32 slot, u8 bit, bool pressed, const char* direction)
+{
+    if (slot >= ARMSX2_MAX_IOS_GAMEPADS || bit == 0)
+        return;
+
+    if (pressed) {
+        s_nativeGamepadDpadLatchedMask[slot].fetch_or(bit, std::memory_order_relaxed);
+        ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask();
+    }
+
+    const u8 old_mask = s_nativeGamepadDpadMask[slot].load(std::memory_order_relaxed);
+    const u8 new_mask = pressed ? (old_mask | bit) : (old_mask & ~bit);
+    if (new_mask == old_mask)
+        return;
+
+    s_nativeGamepadDpadMask[slot].store(new_mask, std::memory_order_relaxed);
+    ARMSX2RecomputeNativeGamepadAnyDpadMask();
+    const u32 log_index = s_loggedNativeGamepadDpadEvents.fetch_add(1, std::memory_order_relaxed);
+    if (log_index < 24) {
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Native dpad slot=%u dir=%s pressed=%u mask=0x%02x",
+            slot + 1, direction ? direction : "unknown", pressed ? 1 : 0, new_mask);
+    }
+}
+
+static void ARMSX2PollNativeGamepadDpadMasks(const char* reason)
+{
+    NSArray<GCController*>* controllers = [GCController controllers];
+    u8 any_mask = 0;
+    u32 slot = 0;
+    for (GCController* controller in controllers) {
+        if (slot >= ARMSX2_MAX_IOS_GAMEPADS)
+            break;
+
+        const u8 mask = ARMSX2NativeDpadMaskForDirectionPad(ARMSX2NativeDpadForController(controller));
+        s_nativeGamepadDpadMask[slot].store(mask, std::memory_order_relaxed);
+        if (mask != 0)
+            s_nativeGamepadDpadLatchedMask[slot].fetch_or(mask, std::memory_order_relaxed);
+        any_mask |= mask;
+        slot++;
+    }
+
+    for (; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+        s_nativeGamepadDpadMask[slot].store(0, std::memory_order_relaxed);
+        s_nativeGamepadDpadLatchedMask[slot].store(0, std::memory_order_relaxed);
+    }
+
+    s_nativeGamepadAnyDpadMask.store(any_mask, std::memory_order_relaxed);
+    ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask();
+
+    static std::atomic<u32> s_loggedNativeGamepadPolls{0};
+    const u32 log_index = s_loggedNativeGamepadPolls.fetch_add(1, std::memory_order_relaxed);
+    if (log_index < 8) {
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Native dpad poll reason=%s controllers=%u any=0x%02x",
+            reason ? reason : "poll", static_cast<unsigned>(controllers.count), any_mask);
+    }
+}
+
+static void ARMSX2RefreshNativeGamepadDpadHandlersOnMain(const char* reason)
+{
+    for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+        s_nativeGamepadDpadMask[slot].store(0, std::memory_order_relaxed);
+        s_nativeGamepadDpadLatchedMask[slot].store(0, std::memory_order_relaxed);
+    }
+    s_nativeGamepadAnyDpadMask.store(0, std::memory_order_relaxed);
+    s_nativeGamepadAnyDpadLatchedMask.store(0, std::memory_order_relaxed);
+
+    NSArray<GCController*>* controllers = [GCController controllers];
+    u32 slot = 0;
+    for (GCController* controller in controllers) {
+        if (slot >= ARMSX2_MAX_IOS_GAMEPADS)
+            break;
+
+        GCControllerDirectionPad* dpad = ARMSX2NativeDpadForController(controller);
+        if (!dpad) {
+            slot++;
+            continue;
+        }
+
+        const u32 controller_slot = slot;
+        const u8 initial_mask = ARMSX2NativeDpadMaskForDirectionPad(dpad);
+        s_nativeGamepadDpadMask[controller_slot].store(initial_mask, std::memory_order_relaxed);
+        if (initial_mask != 0)
+            s_nativeGamepadDpadLatchedMask[controller_slot].store(initial_mask, std::memory_order_relaxed);
+
+        dpad.up.pressedChangedHandler = ^(GCControllerButtonInput* button, float value, BOOL pressed) {
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_UP, pressed, "up");
+        };
+        dpad.down.pressedChangedHandler = ^(GCControllerButtonInput* button, float value, BOOL pressed) {
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_DOWN, pressed, "down");
+        };
+        dpad.left.pressedChangedHandler = ^(GCControllerButtonInput* button, float value, BOOL pressed) {
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_LEFT, pressed, "left");
+        };
+        dpad.right.pressedChangedHandler = ^(GCControllerButtonInput* button, float value, BOOL pressed) {
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_RIGHT, pressed, "right");
+        };
+        dpad.valueChangedHandler = ^(GCControllerDirectionPad* directionPad, float xValue, float yValue) {
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_UP, yValue > 0.35f, "up-axis");
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_DOWN, yValue < -0.35f, "down-axis");
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_LEFT, xValue < -0.35f, "left-axis");
+            ARMSX2SetNativeGamepadDpadBit(controller_slot, ARMSX2_NATIVE_DPAD_RIGHT, xValue > 0.35f, "right-axis");
+        };
+
+        NSString* vendor = controller.vendorName ?: @"unknown";
+        NSString* product = @"";
+        if ([controller respondsToSelector:@selector(productCategory)])
+            product = controller.productCategory ?: @"";
+        Console.WriteLn("[ARMSX2 iOS Gamepad] Native dpad fallback slot=%u vendor=%s category=%s reason=%s",
+            controller_slot + 1, vendor.UTF8String, product.UTF8String, reason ? reason : "refresh");
+
+        slot++;
+    }
+
+    ARMSX2RecomputeNativeGamepadAnyDpadMask();
+    ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask();
+}
+
+static void ARMSX2InstallNativeGamepadDpadObserversOnMain()
+{
+    if (s_nativeGamepadConnectObserver)
+        return;
+
+    NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+    s_nativeGamepadConnectObserver = [center addObserverForName:GCControllerDidConnectNotification
+                                                         object:nil
+                                                          queue:[NSOperationQueue mainQueue]
+                                                     usingBlock:^(NSNotification* notification) {
+        ARMSX2RefreshNativeGamepadDpadHandlersOnMain("native-connect");
+    }];
+    s_nativeGamepadDisconnectObserver = [center addObserverForName:GCControllerDidDisconnectNotification
+                                                            object:nil
+                                                             queue:[NSOperationQueue mainQueue]
+                                                        usingBlock:^(NSNotification* notification) {
+        ARMSX2RefreshNativeGamepadDpadHandlersOnMain("native-disconnect");
+    }];
+    ARMSX2RefreshNativeGamepadDpadHandlersOnMain("observer-install");
+}
 
 enum class ARMSX2IOSMultitapMode : int
 {
@@ -1246,8 +1479,8 @@ static bool ARMSX2EnsureNativeGamepadRumbleOnMain(float intensity, float sharpne
 
 static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
 {
-    if (s_nativeAppliedGamepadRumbleValid && packed == s_nativeAppliedGamepadRumble)
-        return;
+	if (s_nativeAppliedGamepadRumbleValid && packed == s_nativeAppliedGamepadRumble)
+		return;
 
     const float large = ARMSX2RumbleLargeIntensity(packed);
     const float small = ARMSX2RumbleSmallIntensity(packed);
@@ -1263,13 +1496,221 @@ static void ARMSX2ApplyNativeGamepadRumbleOnMain(u32 packed)
     if (ARMSX2EnsureNativeGamepadRumbleOnMain(intensity, sharpness)) {
         s_nativeAppliedGamepadRumble = packed;
         s_nativeAppliedGamepadRumbleValid = true;
-    }
+	}
+}
+
+static void ARMSX2StopNativeGamepadRumblePulseOnMain(u32 slot)
+{
+	if (slot >= ARMSX2_MAX_IOS_GAMEPADS)
+		return;
+
+	s_nativePulseHapticStopGeneration[slot].fetch_add(1, std::memory_order_relaxed);
+	if (s_nativePulseHapticEngine[slot]) {
+		[s_nativePulseHapticEngine[slot] stopWithCompletionHandler:nil];
+		s_nativePulseHapticEngine[slot] = nil;
+	}
+}
+
+static GCController* ARMSX2FindNativeHapticControllerForSlot(u32 slot)
+{
+	NSArray<GCController*>* controllers = [GCController controllers];
+	if (slot < controllers.count) {
+		GCController* controller = controllers[slot];
+		if (controller.haptics)
+			return controller;
+	}
+
+	if (controllers.count == 1) {
+		GCController* controller = controllers.firstObject;
+		if (controller.haptics)
+			return controller;
+	}
+
+	for (GCController* controller in controllers) {
+		if (controller.haptics)
+			return controller;
+	}
+
+	return nil;
+}
+
+static GCController* ARMSX2FindNativeControllerForSlot(u32 slot)
+{
+	NSArray<GCController*>* controllers = [GCController controllers];
+	if (slot < controllers.count)
+		return controllers[slot];
+
+	if (controllers.count == 1)
+		return controllers.firstObject;
+
+	return nil;
+}
+
+static bool ARMSX2NativeControllerLooksLikeJoyCon(GCController* controller)
+{
+	if (!controller)
+		return false;
+
+	NSString* vendor = controller.vendorName ?: @"";
+	NSString* category = @"";
+	if ([controller respondsToSelector:@selector(productCategory)])
+		category = controller.productCategory ?: @"";
+
+	NSString* descriptor = [[NSString stringWithFormat:@"%@ %@", vendor, category] lowercaseString];
+	return [descriptor containsString:@"joy-con"] ||
+	       [descriptor containsString:@"joycon"] ||
+	       [descriptor containsString:@"joy con"];
+}
+
+static bool ARMSX2NativeControllerSlotLooksLikeJoyCon(u32 slot)
+{
+	return ARMSX2NativeControllerLooksLikeJoyCon(ARMSX2FindNativeControllerForSlot(slot));
+}
+
+static bool ARMSX2ApplyNativeGamepadRumblePulseOnMain(u32 slot, u32 packed, const char* reason)
+{
+	if (slot >= ARMSX2_MAX_IOS_GAMEPADS)
+		return false;
+
+	if (@available(iOS 14.0, *)) {
+	} else {
+		return false;
+	}
+
+	const float large = ARMSX2RumbleLargeIntensity(packed);
+	const float small = ARMSX2RumbleSmallIntensity(packed);
+	const float raw_intensity = std::max(large, small);
+	if (raw_intensity <= 0.01f) {
+		ARMSX2StopNativeGamepadRumblePulseOnMain(slot);
+		return true;
+	}
+
+	GCController* controller = ARMSX2FindNativeHapticControllerForSlot(slot);
+	if (ARMSX2NativeControllerLooksLikeJoyCon(controller)) {
+		const u32 log_index = s_loggedJoyConRumbleSkipped.fetch_add(1, std::memory_order_relaxed);
+		if (log_index < 16) {
+			NSString* vendor = controller.vendorName ?: @"unknown";
+			NSString* product = @"";
+			if ([controller respondsToSelector:@selector(productCategory)])
+				product = controller.productCategory ?: @"";
+			Console.WriteLn("[ARMSX2 iOS Gamepad] Joy-Con native rumble skipped slot=%u controller=%s category=%s reason=%s",
+				slot + 1, vendor.UTF8String, product.UTF8String, reason ? reason : "unknown");
+		}
+		return false;
+	}
+
+	if (!controller || !controller.haptics) {
+		const u32 log_index = s_loggedNativePulseHapticEvents.fetch_add(1, std::memory_order_relaxed);
+		if (log_index < 16) {
+			Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse unavailable slot=%u reason=%s controllers=%u",
+				slot + 1, reason ? reason : "unknown", static_cast<unsigned>([GCController controllers].count));
+		}
+		return false;
+	}
+
+	ARMSX2StopNativeGamepadRumblePulseOnMain(slot);
+
+	GCHapticsLocality locality = GCHapticsLocalityDefault;
+	NSSet<GCHapticsLocality>* localities = controller.haptics.supportedLocalities;
+	if ([localities containsObject:GCHapticsLocalityAll])
+		locality = GCHapticsLocalityAll;
+
+	CHHapticEngine* engine = [controller.haptics createEngineWithLocality:locality];
+	if (!engine) {
+		const u32 log_index = s_loggedNativePulseHapticEvents.fetch_add(1, std::memory_order_relaxed);
+		if (log_index < 16) {
+			NSString* vendor = controller.vendorName ?: @"unknown";
+			Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse engine failed slot=%u controller=%s locality=%s reason=%s",
+				slot + 1, vendor.UTF8String, locality.UTF8String, reason ? reason : "unknown");
+		}
+		return false;
+	}
+
+	engine.playsHapticsOnly = YES;
+	engine.autoShutdownEnabled = YES;
+
+	NSError* error = nil;
+	if (![engine startAndReturnError:&error]) {
+		NSString* vendor = controller.vendorName ?: @"unknown";
+		Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse start failed slot=%u controller=%s: %s",
+			slot + 1, vendor.UTF8String, error.localizedDescription.UTF8String ?: "unknown");
+		return false;
+	}
+
+	const float intensity = std::clamp(raw_intensity, 0.10f, 0.55f);
+	const float sharpness = std::clamp(0.25f + (small * 0.45f), 0.20f, 0.65f);
+	NSArray<CHHapticEventParameter*>* params = @[
+		[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticIntensity value:intensity],
+		[[CHHapticEventParameter alloc] initWithParameterID:CHHapticEventParameterIDHapticSharpness value:sharpness]
+	];
+	CHHapticEvent* event = [[CHHapticEvent alloc] initWithEventType:CHHapticEventTypeHapticContinuous
+	                                                     parameters:params
+	                                                   relativeTime:0.0
+	                                                        duration:0.18];
+	CHHapticPattern* pattern = [[CHHapticPattern alloc] initWithEvents:@[event] parameters:@[] error:&error];
+	if (!pattern) {
+		Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse pattern failed slot=%u: %s",
+			slot + 1, error.localizedDescription.UTF8String ?: "unknown");
+		[engine stopWithCompletionHandler:nil];
+		return false;
+	}
+
+	id<CHHapticPatternPlayer> player = [engine createPlayerWithPattern:pattern error:&error];
+	if (!player || ![player startAtTime:CHHapticTimeImmediate error:&error]) {
+		Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse player failed slot=%u: %s",
+			slot + 1, error.localizedDescription.UTF8String ?: "unknown");
+		[engine stopWithCompletionHandler:nil];
+		return false;
+	}
+
+	s_nativePulseHapticEngine[slot] = engine;
+	const u32 stop_generation = s_nativePulseHapticStopGeneration[slot].fetch_add(1, std::memory_order_relaxed) + 1;
+	const u32 log_index = s_loggedNativePulseHapticEvents.fetch_add(1, std::memory_order_relaxed);
+	if (log_index < 16) {
+		NSString* vendor = controller.vendorName ?: @"unknown";
+		NSString* product = @"";
+		if ([controller respondsToSelector:@selector(productCategory)])
+			product = controller.productCategory ?: @"";
+		Console.WriteLn("[ARMSX2 iOS Gamepad] Native haptic pulse accepted slot=%u controller=%s category=%s locality=%s reason=%s intensity=%.2f",
+			slot + 1, vendor.UTF8String, product.UTF8String, locality.UTF8String, reason ? reason : "unknown", intensity);
+	}
+
+	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(ARMSX2_GAMEPAD_RUMBLE_FORCE_STOP_SECONDS * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+		if (slot >= ARMSX2_MAX_IOS_GAMEPADS ||
+			s_nativePulseHapticStopGeneration[slot].load(std::memory_order_relaxed) != stop_generation)
+			return;
+
+		if (s_nativePulseHapticEngine[slot]) {
+			[s_nativePulseHapticEngine[slot] stopWithCompletionHandler:nil];
+			s_nativePulseHapticEngine[slot] = nil;
+		}
+	});
+
+	return true;
+}
+
+static bool ARMSX2ApplyNativeGamepadRumblePulseForJoyConOnMain(u32 slot, u32 packed, const char* reason)
+{
+	GCController* controller = ARMSX2FindNativeControllerForSlot(slot);
+	if (!ARMSX2NativeControllerLooksLikeJoyCon(controller))
+		return false;
+
+	const u32 log_index = s_loggedJoyConRumbleSkipped.fetch_add(1, std::memory_order_relaxed);
+	if (log_index < 16) {
+		NSString* vendor = controller.vendorName ?: @"unknown";
+		NSString* product = @"";
+		if ([controller respondsToSelector:@selector(productCategory)])
+			product = controller.productCategory ?: @"";
+		Console.WriteLn("[ARMSX2 iOS Gamepad] Joy-Con rumble skipped slot=%u controller=%s category=%s reason=%s",
+			slot + 1, vendor.UTF8String, product.UTF8String, reason ? reason : "unknown");
+	}
+	return false;
 }
 
 static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
 {
-    if (gamepad_index >= ARMSX2_MAX_IOS_GAMEPADS)
-        return;
+	if (gamepad_index >= ARMSX2_MAX_IOS_GAMEPADS)
+		return;
 
     const u32 packed = s_pendingGamepadRumble[gamepad_index].load(std::memory_order_relaxed);
     if (s_appliedGamepadRumbleValid[gamepad_index] && packed == s_appliedGamepadRumble[gamepad_index])
@@ -1280,11 +1721,34 @@ static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
     const bool wants_rumble = (large != 0 || small != 0);
     const u32 stop_generation = s_gamepadRumbleStopGeneration[gamepad_index].fetch_add(1, std::memory_order_relaxed) + 1;
 
+    if (!wants_rumble) {
+        const u32 slot = gamepad_index;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ARMSX2StopNativeGamepadRumblePulseOnMain(slot);
+        });
+    }
+
+    if (wants_rumble && ARMSX2NativeControllerSlotLooksLikeJoyCon(gamepad_index)) {
+        const u32 log_index = s_loggedJoyConRumbleSkipped.fetch_add(1, std::memory_order_relaxed);
+        if (log_index < 16)
+            Console.WriteLn("[ARMSX2 iOS Gamepad] Joy-Con rumble request ignored safely slot=%u", gamepad_index + 1);
+        s_appliedGamepadRumble[gamepad_index] = packed;
+        s_appliedGamepadRumbleValid[gamepad_index] = true;
+        return;
+    }
+
     if (s_gamepads[gamepad_index]) {
         if (SDL_RumbleGamepad(s_gamepads[gamepad_index], large, small, ARMSX2_GAMEPAD_RUMBLE_DURATION_MS)) {
             if (!s_loggedSDLGamepadRumble) {
                 Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble accepted");
                 s_loggedSDLGamepadRumble = true;
+            }
+            if (wants_rumble) {
+                const u32 slot = gamepad_index;
+                const u32 native_packed = packed;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ARMSX2ApplyNativeGamepadRumblePulseForJoyConOnMain(slot, native_packed, "joycon-sdl-mirror");
+                });
             }
             if (wants_rumble) {
                 const u32 slot = gamepad_index;
@@ -1297,16 +1761,32 @@ static void ARMSX2ApplyPendingGamepadRumble(u32 gamepad_index)
                         SDL_RumbleGamepad(s_gamepads[slot], 0, 0, 0);
                         SDL_RumbleGamepadTriggers(s_gamepads[slot], 0, 0, 0);
                     }
+                    ARMSX2StopNativeGamepadRumblePulseOnMain(slot);
                     if (!s_loggedSDLGamepadRumbleForceStop) {
                         Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller rumble force-stopped");
                         s_loggedSDLGamepadRumbleForceStop = true;
                     }
                 });
             }
-        } else if (!s_loggedGamepadRumbleFailure) {
-            Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller %u rumble unavailable: %s", gamepad_index + 1, SDL_GetError());
-            s_loggedGamepadRumbleFailure = true;
+        } else {
+            if (!s_loggedGamepadRumbleFailure) {
+                Console.WriteLn("[ARMSX2 iOS Gamepad] SDL controller %u rumble unavailable: %s", gamepad_index + 1, SDL_GetError());
+                s_loggedGamepadRumbleFailure = true;
+            }
+            if (wants_rumble) {
+                const u32 slot = gamepad_index;
+                const u32 native_packed = packed;
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ARMSX2ApplyNativeGamepadRumblePulseOnMain(slot, native_packed, "sdl-fallback");
+                });
+            }
         }
+    } else if (wants_rumble) {
+        const u32 slot = gamepad_index;
+        const u32 native_packed = packed;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            ARMSX2ApplyNativeGamepadRumblePulseOnMain(slot, native_packed, "no-sdl-gamepad");
+        });
     }
 
     s_appliedGamepadRumble[gamepad_index] = packed;
@@ -1348,17 +1828,48 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
     }
 
     bool anySDLGamepad = false;
+    bool anyNativeFallback = false;
+    const u32 test_packed = ARMSX2PackGamepadRumble(0.55f, 0.55f);
     for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
         if (!s_gamepads[slot])
             continue;
+
+        if (ARMSX2NativeControllerSlotLooksLikeJoyCon(slot)) {
+            const u32 log_index = s_loggedJoyConRumbleSkipped.fetch_add(1, std::memory_order_relaxed);
+            if (log_index < 16)
+                Console.WriteLn("[ARMSX2 iOS Gamepad] Test Joy-Con rumble skipped slot=%u", slot + 1);
+            continue;
+        }
 
         anySDLGamepad = true;
         const bool ok = SDL_RumbleGamepad(s_gamepads[slot], ARMSX2_GAMEPAD_RUMBLE_MAX_INTENSITY, ARMSX2_GAMEPAD_RUMBLE_MAX_INTENSITY, 250);
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL controller %u rumble %s%s%s",
             slot + 1, ok ? "accepted" : "failed", ok ? "" : ": ", ok ? "" : SDL_GetError());
+        const u32 native_slot = slot;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (ok)
+                ARMSX2ApplyNativeGamepadRumblePulseForJoyConOnMain(native_slot, test_packed, "test-joycon-sdl-mirror");
+            else
+                ARMSX2ApplyNativeGamepadRumblePulseOnMain(native_slot, test_packed, "test-sdl-fallback");
+        });
+        anyNativeFallback = true;
     }
-    if (!anySDLGamepad)
+    if (!anySDLGamepad) {
         Console.WriteLn("[ARMSX2 iOS Gamepad] Test SDL rumble skipped: no SDL gamepad open");
+        for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
+            if (ARMSX2NativeControllerSlotLooksLikeJoyCon(slot)) {
+                const u32 log_index = s_loggedJoyConRumbleSkipped.fetch_add(1, std::memory_order_relaxed);
+                if (log_index < 16)
+                    Console.WriteLn("[ARMSX2 iOS Gamepad] Test native Joy-Con rumble skipped slot=%u", slot + 1);
+                continue;
+            }
+            const u32 native_slot = slot;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ARMSX2ApplyNativeGamepadRumblePulseOnMain(native_slot, test_packed, "test-no-sdl-gamepad");
+            });
+        }
+        anyNativeFallback = true;
+    }
 
     for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
         s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
@@ -1366,7 +1877,7 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
         s_appliedGamepadRumbleValid[slot] = false;
     }
 
-    Console.WriteLn("[ARMSX2 iOS Gamepad] Native CoreHaptics fallback disabled; using SDL rumble only");
+    Console.WriteLn("[ARMSX2 iOS Gamepad] Native CoreHaptics pulse fallback %s", anyNativeFallback ? "queued when needed" : "not queued");
 
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, static_cast<int64_t>(0.30 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
@@ -1374,6 +1885,7 @@ extern "C" void ARMSX2_iOSTestGamepadRumble(void)
                 SDL_RumbleGamepad(s_gamepads[slot], 0, 0, 0);
                 SDL_RumbleGamepadTriggers(s_gamepads[slot], 0, 0, 0);
             }
+            ARMSX2StopNativeGamepadRumblePulseOnMain(slot);
             s_pendingGamepadRumble[slot].store(0, std::memory_order_relaxed);
             s_appliedGamepadRumble[slot] = 0;
             s_appliedGamepadRumbleValid[slot] = false;
@@ -1386,6 +1898,7 @@ static void ARMSX2RefreshIOSGamepads()
 {
     SDL_PumpEvents();
     SDL_UpdateGamepads();
+    ARMSX2PollNativeGamepadDpadMasks("sdl-refresh");
 
     for (u32 slot = 0; slot < ARMSX2_MAX_IOS_GAMEPADS; slot++) {
         SDL_Gamepad* gamepad = s_gamepads[slot];
@@ -1398,6 +1911,14 @@ static void ARMSX2RefreshIOSGamepads()
             s_gamepadRumbleStopGeneration[slot].fetch_add(1, std::memory_order_relaxed);
             s_appliedGamepadRumble[slot] = 0;
             s_appliedGamepadRumbleValid[slot] = false;
+            s_nativeGamepadDpadMask[slot].store(0, std::memory_order_relaxed);
+            s_nativeGamepadDpadLatchedMask[slot].store(0, std::memory_order_relaxed);
+            ARMSX2RecomputeNativeGamepadAnyDpadMask();
+            ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask();
+            const u32 disconnected_slot = slot;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                ARMSX2StopNativeGamepadRumblePulseOnMain(disconnected_slot);
+            });
             if (slot == 0) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     ARMSX2ResetNativeGamepadRumbleOnMain();
@@ -1430,6 +1951,9 @@ static void ARMSX2RefreshIOSGamepads()
 
             s_gamepads[slot] = SDL_OpenGamepad(ids[id_index]);
             if (s_gamepads[slot]) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    ARMSX2RefreshNativeGamepadDpadHandlersOnMain("sdl-open");
+                });
                 const u32 pad_slot = ARMSX2PadSlotForGamepadIndex(slot);
                 if (pad_slot == 0xffffffffu || pad_slot >= Pad::NUM_CONTROLLER_PORTS) {
                     Console.WriteLn("[Files] MFi gamepad %u connected but ignored by current multitap mode: %s",
@@ -1457,7 +1981,7 @@ static bool ARMSX2ShouldPreserveTouchState(u32 ps2_button, bool preserve_touch)
     return preserve_touch && ps2_button < (sizeof(g_touchPadState) / sizeof(g_touchPadState[0])) && g_touchPadState[ps2_button];
 }
 
-static void ARMSX2ApplyIOSGamepadInput(SDL_Gamepad* gamepad, PadBase* pad, bool preserve_touch)
+static void ARMSX2ApplyIOSGamepadInput(u32 gamepad_index, SDL_Gamepad* gamepad, PadBase* pad, bool preserve_touch)
 {
     if (!gamepad || !pad)
         return;
@@ -1487,11 +2011,72 @@ static void ARMSX2ApplyIOSGamepadInput(SDL_Gamepad* gamepad, PadBase* pad, bool 
         if (sdlBtn < 0)
             continue;
 
-        const bool pressed = SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(sdlBtn));
+        const u32 ps2Button = ps2Buttons[i];
+        if (ps2Button == 0)
+            continue;
+
+        if (ARMSX2NativeDpadBitForPS2Button(ps2Button) != 0)
+            continue;
+
+        bool pressed = SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(sdlBtn));
+
         if (pressed)
-            pad->Set(ps2Buttons[i], 1.0f);
-        else if (!ARMSX2ShouldPreserveTouchState(ps2Buttons[i], preserve_touch))
-            pad->Set(ps2Buttons[i], 0.0f);
+            pad->Set(ps2Button, 1.0f);
+        else if (!ARMSX2ShouldPreserveTouchState(ps2Button, preserve_touch))
+            pad->Set(ps2Button, 0.0f);
+    }
+
+    struct DpadBinding
+    {
+        int map_index;
+        u32 ps2_button;
+        u8 native_bit;
+    };
+    static constexpr DpadBinding dpad_bindings[] = {
+        {0, PadDualshock2::Inputs::PAD_UP, ARMSX2_NATIVE_DPAD_UP},
+        {1, PadDualshock2::Inputs::PAD_DOWN, ARMSX2_NATIVE_DPAD_DOWN},
+        {2, PadDualshock2::Inputs::PAD_LEFT, ARMSX2_NATIVE_DPAD_LEFT},
+        {3, PadDualshock2::Inputs::PAD_RIGHT, ARMSX2_NATIVE_DPAD_RIGHT},
+    };
+
+    u8 native_dpad_mask = 0;
+    u8 slot_latched_mask = 0;
+    u8 any_latched_mask = 0;
+    if (gamepad_index < ARMSX2_MAX_IOS_GAMEPADS) {
+        slot_latched_mask = s_nativeGamepadDpadLatchedMask[gamepad_index].exchange(0, std::memory_order_relaxed);
+        native_dpad_mask = s_nativeGamepadDpadMask[gamepad_index].load(std::memory_order_relaxed) | slot_latched_mask;
+        if (gamepad_index == 0 && ARMSX2ConnectedGamepadCount() <= 1) {
+            any_latched_mask = s_nativeGamepadAnyDpadLatchedMask.exchange(0, std::memory_order_relaxed);
+            native_dpad_mask |= s_nativeGamepadAnyDpadMask.load(std::memory_order_relaxed) | any_latched_mask;
+        }
+        ARMSX2RecomputeNativeGamepadAnyDpadLatchedMask();
+    }
+
+    for (const DpadBinding& binding : dpad_bindings) {
+        bool pressed = false;
+        const int sdlBtn = s_buttonMap[binding.map_index];
+        if (sdlBtn >= 0)
+            pressed = SDL_GetGamepadButton(gamepad, static_cast<SDL_GamepadButton>(sdlBtn));
+
+        const bool native_pressed = ((native_dpad_mask & binding.native_bit) != 0);
+        pressed = pressed || native_pressed;
+
+        if (native_pressed) {
+            const u32 log_index = s_loggedNativeGamepadDpadApplyEvents.fetch_add(1, std::memory_order_relaxed);
+            if (log_index < 48) {
+                Console.WriteLn("[ARMSX2 iOS Gamepad] Native dpad applied gamepad=%u ps2=0x%08x slot_mask=0x%02x slot_latched=0x%02x any_mask=0x%02x any_latched=0x%02x",
+                    gamepad_index + 1, binding.ps2_button,
+                    s_nativeGamepadDpadMask[gamepad_index].load(std::memory_order_relaxed),
+                    slot_latched_mask,
+                    s_nativeGamepadAnyDpadMask.load(std::memory_order_relaxed),
+                    any_latched_mask);
+            }
+        }
+
+        if (pressed)
+            pad->Set(binding.ps2_button, 1.0f);
+        else if (!ARMSX2ShouldPreserveTouchState(binding.ps2_button, preserve_touch))
+            pad->Set(binding.ps2_button, 0.0f);
     }
 
     const float l2 = SDL_GetGamepadAxis(gamepad, SDL_GAMEPAD_AXIS_LEFT_TRIGGER) / 32767.0f;
@@ -1509,14 +2094,18 @@ static void ARMSX2ApplyIOSGamepadInput(SDL_Gamepad* gamepad, PadBase* pad, bool 
     const float ly = axis(SDL_GAMEPAD_AXIS_LEFTY);
     const float rx = axis(SDL_GAMEPAD_AXIS_RIGHTX);
     const float ry = axis(SDL_GAMEPAD_AXIS_RIGHTY);
-    pad->Set(PadDualshock2::Inputs::PAD_L_RIGHT, lx > 0 ? lx : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_LEFT,  lx < 0 ? -lx : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_DOWN,  ly > 0 ? ly : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_L_UP,    ly < 0 ? -ly : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_RIGHT, rx > 0 ? rx : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_LEFT,  rx < 0 ? -rx : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_DOWN,  ry > 0 ? ry : 0.0f);
-    pad->Set(PadDualshock2::Inputs::PAD_R_UP,    ry < 0 ? -ry : 0.0f);
+    auto set_axis = [&](u32 input, float value) {
+        if (value > 0.0f || !ARMSX2ShouldPreserveTouchState(input, preserve_touch))
+            pad->Set(input, value);
+    };
+    set_axis(PadDualshock2::Inputs::PAD_L_RIGHT, lx > 0 ? lx : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_L_LEFT,  lx < 0 ? -lx : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_L_DOWN,  ly > 0 ? ly : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_L_UP,    ly < 0 ? -ly : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_R_RIGHT, rx > 0 ? rx : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_R_LEFT,  rx < 0 ? -rx : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_R_DOWN,  ry > 0 ? ry : 0.0f);
+    set_axis(PadDualshock2::Inputs::PAD_R_UP,    ry < 0 ? -ry : 0.0f);
 }
 
 // View controller references for background color switching
@@ -1768,7 +2357,7 @@ namespace Host
                     continue;
 
                 ARMSX2ApplyPendingGamepadRumble(gamepad_index);
-                ARMSX2ApplyIOSGamepadInput(gamepad, gamepad_pad, gamepad_index == 0);
+                ARMSX2ApplyIOSGamepadInput(gamepad_index, gamepad, gamepad_pad, gamepad_index == 0);
             }
         }
 
@@ -2203,6 +2792,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
         }
         s_initialized = true;
     }
+    ARMSX2InstallNativeGamepadDpadObserversOnMain();
     
     // --- Setup PCSX2 Environment ---
     // (Moved to AppDelegate)

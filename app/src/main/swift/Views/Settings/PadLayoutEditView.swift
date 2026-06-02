@@ -306,9 +306,9 @@ private struct DraggableGroup: View {
         case "r2":
             PadBtn(label: "R2", w: 110, h: 40, btn: .R2)
         case "lstick":
-            StickView(isLeft: true)
+            StickView(isLeft: true, sizeScale: 1.0)
         case "rstick":
-            StickView(isLeft: false)
+            StickView(isLeft: false, sizeScale: 1.0)
         case "select":
             PadBtn(label: "SEL", w: 42, h: 22, btn: .select)
         case "start":
