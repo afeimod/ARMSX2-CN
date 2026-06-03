@@ -557,4 +557,15 @@ struct ImportDocumentPicker: UIViewControllerRepresentable {
             onComplete(.failure(CocoaError(.userCancelled)))
         }
     }
+    
+}
+
+@objc class DeepLinkBridge: NSObject {
+    @objc @discardableResult
+    static func handle(_ url: URL) -> Bool {
+        Task { @MainActor in
+            _ = ARMSX2DeepLinkHandler.handle(url)
+        }
+        return true
+    }
 }

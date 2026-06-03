@@ -3092,6 +3092,17 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSRequestVMBoot" object:nil];
         });
     }
+
+    // Cold-launch deep link: iOS delivers the launch URL through connectionOptions,
+    NSSet<UIOpenURLContext *> *launchURLContexts = connectionOptions.URLContexts;
+    if (launchURLContexts.count > 0) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            for (UIOpenURLContext *ctx in launchURLContexts) {
+                NSLog(@"[ARMSX2 iOS DeepLink] cold-launch url=%@", ctx.URL.absoluteString);
+                [DeepLinkBridge handle:ctx.URL];
+            }
+        });
+    }
 #else
     // Fallback: no SwiftUI — auto-boot like before
     if (!EmuConfig.BaseFilenames.Bios.empty() && FileSystem::FileExists(Path::Combine(EmuFolders::Bios, EmuConfig.BaseFilenames.Bios).c_str())) {
@@ -3108,6 +3119,13 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
         }
     }
 #endif
+}
+
+- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts {
+    for (UIOpenURLContext *context in URLContexts) {
+        NSURL *url = context.URL;
+        [DeepLinkBridge handle:url];
+    }
 }
 
 - (void)checkAndConfigureBIOS {
