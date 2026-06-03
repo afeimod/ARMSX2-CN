@@ -161,6 +161,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Models/SwiftUIHost.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppState.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppLanguage.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/VirtualPadSkin.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SettingsStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/FileImportHandler.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift
