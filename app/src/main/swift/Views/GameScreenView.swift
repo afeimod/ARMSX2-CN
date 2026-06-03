@@ -46,8 +46,12 @@ struct GameScreenView: View {
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
     @State private var saveStateStatus: String? = nil
+    @State private var saveStateStatusGeneration = 0
     @State private var runtimeOverlayPauseActive = false
     @State private var previousHideHomeIndicator = false
+
+    private static let briefStatusDisplayDuration: TimeInterval = 2.2
+    private static let importantStatusDisplayDuration: TimeInterval = 6.0
 
     var body: some View {
         GeometryReader { geo in
@@ -90,8 +94,11 @@ struct GameScreenView: View {
             ARMSX2Bridge.setFullScreen(newValue)
         }
         .sheet(isPresented: $showSaveStates) {
-            SaveStatesPanel { message in
-                presentSaveStateStatus(message)
+            SaveStatesPanel { message, isImportant in
+                presentSaveStateStatus(
+                    message,
+                    displayDuration: isImportant ? Self.importantStatusDisplayDuration : Self.briefStatusDisplayDuration
+                )
             }
         }
         .sheet(isPresented: $showSpeedControl) {
@@ -113,11 +120,11 @@ struct GameScreenView: View {
                 showPNACHImporter = false
                 switch result {
                 case .success(let urls):
-                    let message = fileImporter.importPNACHURLs(urls, asCheat: true)
-                    presentSaveStateStatus(message)
+                    let message = fileImporter.importPNACHURLs(urls, asCheat: true, presentsAlert: false)
+                    presentPNACHImportResult(message)
                 case .failure(let error):
-                    if (error as NSError).code != NSUserCancelledError {
-                        presentSaveStateStatus("PNACH import failed: \(error.localizedDescription)")
+                    if !FileImportHandler.isUserCancelledPickerError(error) {
+                        fileImporter.presentImportResult(FileImportHandler.failedPNACHPickerMessage(errorDescription: error.localizedDescription))
                     }
                 }
             }
@@ -416,7 +423,7 @@ struct GameScreenView: View {
         guard let entry = makeRuntimePerGameSettingsEntry() else {
             runtimePerGameSettingsEntry = nil
             showPerGameSettings = true
-            presentSaveStateStatus(settings.localized("Per-game settings need a running game."))
+            presentImportantSaveStateStatus(settings.localized("Per-game settings need a running game."))
             return
         }
 
@@ -730,7 +737,7 @@ struct GameScreenView: View {
 
     private func clearCurrentGameCache() {
         guard let gameName = currentRuntimeGameName() else {
-            presentSaveStateStatus(settings.localized("Cache clear needs a running game."))
+            presentImportantSaveStateStatus(settings.localized("Cache clear needs a running game."))
             return
         }
 
@@ -752,16 +759,41 @@ struct GameScreenView: View {
         }
     }
 
-    private func presentSaveStateStatus(_ message: String) {
+    private func presentSaveStateStatus(
+        _ message: String,
+        displayDuration: TimeInterval = Self.briefStatusDisplayDuration
+    ) {
+        saveStateStatusGeneration += 1
+        let currentGeneration = saveStateStatusGeneration
         withAnimation(.easeOut(duration: 0.18)) {
             saveStateStatus = message
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.2) {
-            guard saveStateStatus == message else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + displayDuration) {
+            guard saveStateStatusGeneration == currentGeneration else { return }
             withAnimation(.easeIn(duration: 0.18)) {
                 saveStateStatus = nil
             }
         }
+    }
+
+    private func presentImportantSaveStateStatus(_ message: String) {
+        presentSaveStateStatus(message, displayDuration: Self.importantStatusDisplayDuration)
+    }
+
+    private func presentPNACHImportResult(_ message: String) {
+        if Self.isPNACHImportSuccessMessage(message) {
+            presentSaveStateStatus(message)
+        } else {
+            fileImporter.presentImportResult(message)
+        }
+    }
+
+    private static func isPNACHImportSuccessMessage(_ message: String) -> Bool {
+        let lines = message
+            .split(separator: "\n")
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return !lines.isEmpty && lines.allSatisfy { $0.hasPrefix("PNACH imported") }
     }
 
     private var availableDiscSwapNames: [String] {
@@ -772,7 +804,11 @@ struct GameScreenView: View {
         presentSaveStateStatus("Changing disc...")
         ARMSX2Bridge.changeDisc(toISO: discName) { success in
             Task { @MainActor in
-                presentSaveStateStatus(success ? "\(discName) inserted. Use the game's disc-swap prompt if needed." : "Failed to change disc")
+                if success {
+                    presentSaveStateStatus("\(discName) inserted. Use the game's disc-swap prompt if needed.")
+                } else {
+                    presentImportantSaveStateStatus("Could not change discs. Open the game's disc-swap prompt first, or restart with the target disc.")
+                }
             }
         }
     }
@@ -786,7 +822,11 @@ struct GameScreenView: View {
         presentSaveStateStatus("Ejecting disc...")
         ARMSX2Bridge.ejectDisc { success in
             Task { @MainActor in
-                presentSaveStateStatus(success ? "Disc ejected" : "Failed to eject disc")
+                if success {
+                    presentSaveStateStatus("Disc ejected")
+                } else {
+                    presentImportantSaveStateStatus("Could not eject the disc. Try again after the game has finished loading.")
+                }
             }
         }
     }
@@ -799,7 +839,7 @@ private struct SaveStatesPanel: View {
     @State private var busySlot: Int? = nil
     @State private var pendingOverwrite: ARMSX2SaveStateSlotInfo? = nil
 
-    let statusHandler: (String) -> Void
+    let statusHandler: (String, Bool) -> Void
 
     var body: some View {
         NavigationStack {
@@ -890,7 +930,10 @@ private struct SaveStatesPanel: View {
             Task { @MainActor in
                 busySlot = nil
                 refresh()
-                statusHandler(success ? "\(settings.localized("State saved to slot")) \(slotNumber)" : "\(settings.localized("Failed to save slot")) \(slotNumber)")
+                let message = success
+                    ? "\(settings.localized("State saved to slot")) \(slotNumber)"
+                    : "\(settings.localized("Could not save slot")) \(slotNumber). \(settings.localized("Try again after gameplay has fully loaded."))"
+                statusHandler(message, !success)
             }
         }
     }
@@ -902,7 +945,10 @@ private struct SaveStatesPanel: View {
             Task { @MainActor in
                 busySlot = nil
                 refresh()
-                statusHandler(success ? "\(settings.localized("State loaded from slot")) \(slotNumber)" : "\(settings.localized("Failed to load slot")) \(slotNumber)")
+                let message = success
+                    ? "\(settings.localized("State loaded from slot")) \(slotNumber)"
+                    : "\(settings.localized("Could not load slot")) \(slotNumber). \(settings.localized("Make sure it has a saved state first."))"
+                statusHandler(message, !success)
                 if success {
                     dismiss()
                 }

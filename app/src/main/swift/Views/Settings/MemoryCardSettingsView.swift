@@ -15,6 +15,7 @@ struct MemoryCardSettingsView: View {
     @State private var showResult = false
 
     private let cardSizes = [8, 16, 32, 64]
+    private let pathLikeCharacters: [Character] = ["/", "\\", ":", "*", "?", "\"", "<", ">", "|"]
 
     var body: some View {
         Form {
@@ -105,9 +106,32 @@ struct MemoryCardSettingsView: View {
     }
 
     private func createCard() {
+        if let validationMessage = validateNewMemoryCardName(newCardName) {
+            resultMessage = validationMessage
+            showResult = true
+            return
+        }
+
         let success = ARMSX2Bridge.createMemoryCard(named: newCardName, sizeMB: newCardSizeMB, folder: createFolderCard)
         refresh()
         resultMessage = success ? "Memory card created." : "Could not create memory card. Check the name, size, or whether it already exists."
         showResult = true
+    }
+
+    private func validateNewMemoryCardName(_ name: String) -> String? {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.isEmpty {
+            return "Enter a name for the memory card first."
+        }
+
+        if trimmedName.contains(where: { pathLikeCharacters.contains($0) }) {
+            return "Memory card names cannot contain folder or path characters like / or \\."
+        }
+
+        if availableCards.contains(where: { $0.caseInsensitiveCompare(trimmedName) == .orderedSame }) {
+            return "A memory card with this name already exists."
+        }
+
+        return nil
     }
 }

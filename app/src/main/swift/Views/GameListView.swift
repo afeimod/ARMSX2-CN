@@ -150,11 +150,6 @@ struct GameListView: View {
                     }
                 }
             }
-            .alert(settings.localized("Import Result"), isPresented: $fileImporter.showImportAlert) {
-                Button(settings.localized("OK")) {}
-            } message: {
-                Text(fileImporter.lastImportMessage ?? "")
-            }
             .alert(settings.localized("Cover Result"), isPresented: $coverStore.showCoverAlert) {
                 Button(settings.localized("OK")) {}
             } message: {
@@ -259,9 +254,8 @@ struct GameListView: View {
                         loadGames()
                         autoDownloadCovers(for: importedGames)
                     case .failure(let error):
-                        if (error as NSError).code != NSUserCancelledError {
-                            fileImporter.lastImportMessage = "Import failed: \(error.localizedDescription)"
-                            fileImporter.showImportAlert = true
+                        if !FileImportHandler.isUserCancelledPickerError(error) {
+                            fileImporter.presentImportResult(FileImportHandler.failedGamePickerMessage(errorDescription: error.localizedDescription))
                         }
                     }
                 }
@@ -293,14 +287,12 @@ struct GameListView: View {
                         if let pendingPNACHGameName {
                             fileImporter.importPNACHURLs(urls, forISO: pendingPNACHGameName, asCheat: true)
                         } else {
-                            fileImporter.lastImportMessage = "Pick a game first, then import its PNACH patch."
-                            fileImporter.showImportAlert = true
+                            fileImporter.presentImportResult(FileImportHandler.pnachImportNeedsGameMessage)
                         }
                         pendingPNACHGameName = nil
                     case .failure(let error):
-                        if (error as NSError).code != NSUserCancelledError {
-                            fileImporter.lastImportMessage = "PNACH import failed: \(error.localizedDescription)"
-                            fileImporter.showImportAlert = true
+                        if !FileImportHandler.isUserCancelledPickerError(error) {
+                            fileImporter.presentImportResult(FileImportHandler.failedPNACHPickerMessage(errorDescription: error.localizedDescription))
                         }
                         pendingPNACHGameName = nil
                     }

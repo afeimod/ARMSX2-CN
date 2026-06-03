@@ -56,11 +56,6 @@ struct BIOSListView: View {
                     }
                 }
             }
-            .alert(settings.localized("Import Result"), isPresented: $fileImporter.showImportAlert) {
-                Button(settings.localized("OK")) {}
-            } message: {
-                Text(fileImporter.lastImportMessage ?? "")
-            }
             .sheet(isPresented: $showBIOSImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.biosContentTypes,
@@ -162,18 +157,17 @@ struct BIOSListView: View {
                 defaultBIOS = firstBIOS
             }
             if bioses.isEmpty, !urls.isEmpty {
-                fileImporter.lastImportMessage = [
+                let message = [
                     fileImporter.lastImportMessage,
                     "No usable PS2 BIOS was found after import. Use a 1-50 MB .bin or .rom BIOS dump."
                 ]
                 .compactMap { $0 }
                 .joined(separator: "\n")
-                fileImporter.showImportAlert = true
+                fileImporter.presentImportResult(message)
             }
         case .failure(let error):
-            if (error as NSError).code != NSUserCancelledError {
-                fileImporter.lastImportMessage = "BIOS import failed: \(error.localizedDescription)"
-                fileImporter.showImportAlert = true
+            if !FileImportHandler.isUserCancelledPickerError(error) {
+                fileImporter.presentImportResult(FileImportHandler.failedBIOSPickerMessage(errorDescription: error.localizedDescription))
             }
         }
     }
