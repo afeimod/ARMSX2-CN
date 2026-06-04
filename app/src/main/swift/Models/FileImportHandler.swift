@@ -49,12 +49,24 @@ final class FileImportHandler: @unchecked Sendable {
     }
 
     @discardableResult
-    func handleURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) -> [ImportedGame] {
-        importURLs(urls, preferredDestination: preferredDestination)
+    func handleURLs(
+        _ urls: [URL],
+        preferredDestination: ImportDestination = .automatic,
+        allowReplacingExistingFiles: Bool = true
+    ) -> [ImportedGame] {
+        importURLs(
+            urls,
+            preferredDestination: preferredDestination,
+            allowReplacingExistingFiles: allowReplacingExistingFiles
+        )
     }
 
     @discardableResult
-    func importURLs(_ urls: [URL], preferredDestination: ImportDestination = .automatic) -> [ImportedGame] {
+    func importURLs(
+        _ urls: [URL],
+        preferredDestination: ImportDestination = .automatic,
+        allowReplacingExistingFiles: Bool = true
+    ) -> [ImportedGame] {
         NSLog("[ARMSX2 iOS Import] importing %d file(s), destination=%@", urls.count, String(describing: preferredDestination))
 
         var imported: [String] = []
@@ -63,7 +75,11 @@ final class FileImportHandler: @unchecked Sendable {
         var failed: [String] = []
 
         for url in urls {
-            switch importFile(url, preferredDestination: preferredDestination) {
+            switch importFile(
+                url,
+                preferredDestination: preferredDestination,
+                allowReplacingExistingFiles: allowReplacingExistingFiles
+            ) {
             case .success(let message, let importedGame):
                 imported.append(message)
                 if let importedGame {
@@ -89,6 +105,50 @@ final class FileImportHandler: @unchecked Sendable {
 
         presentImportResult(lines.isEmpty ? "No files imported." : lines.joined(separator: "\n"))
         return importedGames
+    }
+
+    func existingFileNames(for urls: [URL], preferredDestination: ImportDestination) -> [String] {
+        let directoryName: String
+        let supportedExtensions: Set<String>
+        switch preferredDestination {
+        case .game:
+            directoryName = "iso"
+            supportedExtensions = Self.gameExtensions
+        case .bios:
+            directoryName = "bios"
+            supportedExtensions = Self.biosExtensions
+        default:
+            return []
+        }
+
+        let docsPath = NSSearchPathForDirectoriesInDomains(.documentDirectory, .userDomainMask, true).first!
+        let destinationDirectory = (docsPath as NSString).appendingPathComponent(directoryName)
+        var existingFileNames: [String] = []
+        var seenFileNames = Set<String>()
+
+        for url in urls where supportedExtensions.contains(url.pathExtension.lowercased()) {
+            let fileName = url.lastPathComponent
+            let destinationPath = (destinationDirectory as NSString).appendingPathComponent(fileName)
+            if FileManager.default.fileExists(atPath: destinationPath),
+               seenFileNames.insert(fileName).inserted {
+                existingFileNames.append(fileName)
+            }
+        }
+        return existingFileNames
+    }
+
+    static func replacementConfirmationMessage(for fileNames: [String]) -> String {
+        let visibleFileNames = fileNames.prefix(3)
+        var lines = [
+            "Some selected files already exist. Replacing them will overwrite the current copies.",
+            "",
+            fileNames.count == 1 ? "Existing file:" : "Existing files:"
+        ]
+        lines.append(contentsOf: visibleFileNames)
+        if fileNames.count > visibleFileNames.count {
+            lines.append("...and \(fileNames.count - visibleFileNames.count) more.")
+        }
+        return lines.joined(separator: "\n")
     }
 
     @discardableResult
@@ -135,7 +195,11 @@ final class FileImportHandler: @unchecked Sendable {
         case failure(String)
     }
 
-    private func importFile(_ url: URL, preferredDestination: ImportDestination) -> ImportResult {
+    private func importFile(
+        _ url: URL,
+        preferredDestination: ImportDestination,
+        allowReplacingExistingFiles: Bool
+    ) -> ImportResult {
         let accessing = url.startAccessingSecurityScopedResource()
         defer { if accessing { url.stopAccessingSecurityScopedResource() } }
 
@@ -203,6 +267,9 @@ final class FileImportHandler: @unchecked Sendable {
         // Copy file
         do {
             if FileManager.default.fileExists(atPath: destPath) {
+                guard allowReplacingExistingFiles else {
+                    return .failure("\(fileName) already exists. Import it again and choose Replace to overwrite the current copy.")
+                }
                 try FileManager.default.removeItem(atPath: destPath)
             }
             try copyImportedFile(from: url, to: URL(fileURLWithPath: destPath))

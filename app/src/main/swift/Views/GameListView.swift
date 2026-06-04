@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+import PhotosUI
 import UniformTypeIdentifiers
 import UIKit
 
@@ -28,13 +29,19 @@ struct GameListView: View {
     @State private var coverStore = CoverStore.shared
     @State private var showGameImporter = false
     @State private var showCoverImporter = false
+    @State private var showCoverPhotoPicker = false
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
     @State private var showCoverTemplateEditor = false
     @State private var showPNACHImporter = false
+    @State private var showGameReplacementAlert = false
     @State private var coverTemplateDraft = CoverStore.defaultCoverURLTemplate
     @State private var pendingGameName: String = ""
+    @State private var pendingGameImportURLs: [URL] = []
+    @State private var existingGameImportFileNames: [String] = []
     @State private var pendingCoverGameName: String?
+    @State private var pendingCoverPhotoGameName: String?
+    @State private var selectedCoverPhotoItem: PhotosPickerItem?
     @State private var pendingPNACHGameName: String?
     @State private var gameInfoTarget: ISOEntry?
     @State private var gameSettingsTarget: ISOEntry?
@@ -242,6 +249,17 @@ struct GameListView: View {
             } message: {
                 Text(gameActionMessage ?? "")
             }
+            .alert(settings.localized("Replace existing files?"), isPresented: $showGameReplacementAlert) {
+                Button(settings.localized("Cancel"), role: .cancel) {
+                    clearPendingGameImport()
+                }
+                Button(settings.localized("Replace"), role: .destructive) {
+                    importGames(pendingGameImportURLs, allowReplacingExistingFiles: true)
+                    clearPendingGameImport()
+                }
+            } message: {
+                Text(FileImportHandler.replacementConfirmationMessage(for: existingGameImportFileNames))
+            }
             .sheet(isPresented: $showGameImporter) {
                 ImportDocumentPicker(
                     allowedContentTypes: FileImportHandler.gameContentTypes,
@@ -250,9 +268,7 @@ struct GameListView: View {
                     showGameImporter = false
                     switch result {
                     case .success(let urls):
-                        let importedGames = fileImporter.importURLs(urls, preferredDestination: .game)
-                        loadGames()
-                        autoDownloadCovers(for: importedGames)
+                        prepareGameImport(urls)
                     case .failure(let error):
                         if !FileImportHandler.isUserCancelledPickerError(error) {
                             fileImporter.presentImportResult(FileImportHandler.failedGamePickerMessage(errorDescription: error.localizedDescription))
@@ -260,21 +276,36 @@ struct GameListView: View {
                     }
                 }
             }
-            .fileImporter(
-                isPresented: $showCoverImporter,
-                allowedContentTypes: CoverStore.coverContentTypes,
-                allowsMultipleSelection: pendingCoverGameName == nil
-            ) { result in
-                switch result {
-                case .success(let urls):
-                    coverStore.importCoverURLs(urls, forGameNamed: pendingCoverGameName)
-                    pendingCoverGameName = nil
-                    loadGames()
-                case .failure(let error):
-                    coverStore.lastCoverMessage = "Cover import failed: \(error.localizedDescription)"
-                    coverStore.showCoverAlert = true
-                    pendingCoverGameName = nil
+            .sheet(isPresented: $showCoverImporter) {
+                ImportDocumentPicker(
+                    allowedContentTypes: CoverStore.coverContentTypes,
+                    allowsMultipleSelection: pendingCoverGameName == nil
+                ) { result in
+                    showCoverImporter = false
+                    switch result {
+                    case .success(let urls):
+                        coverStore.importCoverURLs(urls, forGameNamed: pendingCoverGameName)
+                        pendingCoverGameName = nil
+                        loadGames()
+                    case .failure(let error):
+                        if !FileImportHandler.isUserCancelledPickerError(error) {
+                            coverStore.lastCoverMessage = "Cover import failed: \(error.localizedDescription)"
+                            coverStore.showCoverAlert = true
+                        }
+                        pendingCoverGameName = nil
+                    }
                 }
+            }
+            .photosPicker(
+                isPresented: $showCoverPhotoPicker,
+                selection: $selectedCoverPhotoItem,
+                matching: .images
+            )
+            .onChange(of: selectedCoverPhotoItem) { _, photoItem in
+                guard let photoItem, let gameName = pendingCoverPhotoGameName else { return }
+                selectedCoverPhotoItem = nil
+                pendingCoverPhotoGameName = nil
+                importCoverPhoto(photoItem, forGameNamed: gameName)
             }
             .sheet(isPresented: $showPNACHImporter) {
                 ImportDocumentPicker(
@@ -701,10 +732,17 @@ struct GameListView: View {
             .disabled(coverStore.isDownloadingCovers)
 
             Button {
+                pendingCoverPhotoGameName = game.name
+                showCoverPhotoPicker = true
+            } label: {
+                Label(settings.localized("Choose from Photos"), systemImage: "photo.on.rectangle")
+            }
+
+            Button {
                 pendingCoverGameName = game.name
                 showCoverImporter = true
             } label: {
-                Label(settings.localized("Choose Cover"), systemImage: "photo")
+                Label(settings.localized("Choose from Files"), systemImage: "folder")
             }
 
             if game.coverURL != nil {
@@ -810,10 +848,54 @@ struct GameListView: View {
         }
     }
 
+    private func prepareGameImport(_ urls: [URL]) {
+        let existingFileNames = fileImporter.existingFileNames(for: urls, preferredDestination: .game)
+        guard !existingFileNames.isEmpty else {
+            importGames(urls, allowReplacingExistingFiles: false)
+            return
+        }
+
+        pendingGameImportURLs = urls
+        existingGameImportFileNames = existingFileNames
+        showGameReplacementAlert = true
+    }
+
+    private func importGames(_ urls: [URL], allowReplacingExistingFiles: Bool) {
+        let importedGames = fileImporter.importURLs(
+            urls,
+            preferredDestination: .game,
+            allowReplacingExistingFiles: allowReplacingExistingFiles
+        )
+        loadGames()
+        autoDownloadCovers(for: importedGames)
+    }
+
+    private func clearPendingGameImport() {
+        pendingGameImportURLs = []
+        existingGameImportFileNames = []
+    }
+
     private func downloadCover(for game: ISOEntry) {
         Task {
             _ = await coverStore.downloadMissingCovers(for: [game.coverInfo])
             loadGames()
+        }
+    }
+
+    private func importCoverPhoto(_ photoItem: PhotosPickerItem, forGameNamed gameName: String) {
+        Task {
+            do {
+                guard let data = try await photoItem.loadTransferable(type: Data.self) else {
+                    coverStore.lastCoverMessage = "The selected photo could not be loaded."
+                    coverStore.showCoverAlert = true
+                    return
+                }
+                coverStore.importCoverData(data, forGameNamed: gameName)
+                loadGames()
+            } catch {
+                coverStore.lastCoverMessage = "Cover import failed: \(error.localizedDescription)"
+                coverStore.showCoverAlert = true
+            }
         }
     }
 

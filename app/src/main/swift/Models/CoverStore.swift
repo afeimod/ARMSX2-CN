@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import Foundation
+import ImageIO
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -27,7 +28,7 @@ final class CoverStore: @unchecked Sendable {
 
     static let imageExtensions: [String] = ["jpg", "jpeg", "png", "webp", "heic", "heif"]
     static let coverContentTypes: [UTType] = {
-        var types: [UTType] = [.image]
+        var types: [UTType] = [.item, .data, .content, .image]
         for ext in imageExtensions {
             if let type = UTType(filenameExtension: ext), !types.contains(type) {
                 types.append(type)
@@ -136,7 +137,10 @@ final class CoverStore: @unchecked Sendable {
         }
 
         if showResult {
-            lastCoverMessage = "Downloaded \(downloaded) cover(s). Skipped \(skipped) existing. Failed \(failed)."
+            let summary = "Downloaded \(downloaded) cover(s). Skipped \(skipped) existing. Failed \(failed)."
+            lastCoverMessage = failed > 0
+                ? "\(summary)\nCheck your connection and Cover Source, or choose a local cover."
+                : summary
             showCoverAlert = true
         } else {
             NSLog("[ARMSX2 iOS Covers] auto-download finished downloaded=%d skipped=%d failed=%d", downloaded, skipped, failed)
@@ -175,10 +179,9 @@ final class CoverStore: @unchecked Sendable {
 
             let destination = primaryCoverDirectory.appendingPathComponent(baseName).appendingPathExtension(ext)
             do {
-                if fileManager.fileExists(atPath: destination.path) {
-                    try fileManager.removeItem(at: destination)
+                try replaceCover(at: destination) {
+                    try fileManager.copyItem(at: sourceURL, to: destination)
                 }
-                try fileManager.copyItem(at: sourceURL, to: destination)
                 imported.append(sourceURL.lastPathComponent)
                 NSLog("[ARMSX2 iOS Covers] imported %@ -> %@", sourceURL.lastPathComponent, destination.path)
             } catch {
@@ -200,6 +203,35 @@ final class CoverStore: @unchecked Sendable {
         }
 
         let message = lines.isEmpty ? "No covers imported." : lines.joined(separator: "\n")
+        lastCoverMessage = message
+        showCoverAlert = true
+        return message
+    }
+
+    @discardableResult
+    func importCoverData(_ data: Data, forGameNamed gameName: String) -> String {
+        guard let ext = imageExtension(for: data) else {
+            let message = "The selected photo is not a supported image."
+            lastCoverMessage = message
+            showCoverAlert = true
+            return message
+        }
+
+        removeManagedCovers(forGameNamed: gameName)
+        let baseName = preferredManagedCoverBaseName(forGameName: gameName)
+        let destination = primaryCoverDirectory.appendingPathComponent(baseName).appendingPathExtension(ext)
+        let message: String
+        do {
+            try replaceCover(at: destination) {
+                try data.write(to: destination, options: .atomic)
+            }
+            message = "Assigned cover from Photos."
+            NSLog("[ARMSX2 iOS Covers] imported photo -> %@", destination.path)
+        } catch {
+            message = "Cover import failed: \(error.localizedDescription)"
+            NSLog("[ARMSX2 iOS Covers] photo import failed -> %@ error=%@", destination.path, error.localizedDescription)
+        }
+
         lastCoverMessage = message
         showCoverAlert = true
         return message
@@ -444,6 +476,24 @@ final class CoverStore: @unchecked Sendable {
             return ext == "jpeg" ? "jpg" : ext
         }
         return "jpg"
+    }
+
+    private func imageExtension(for data: Data) -> String? {
+        guard let imageSource = CGImageSourceCreateWithData(data as CFData, nil),
+              let typeIdentifier = CGImageSourceGetType(imageSource),
+              let ext = UTType(typeIdentifier as String)?.preferredFilenameExtension?.lowercased() else {
+            return nil
+        }
+
+        let normalized = ext == "jpeg" ? "jpg" : ext
+        return Self.imageExtensions.contains(normalized) ? normalized : nil
+    }
+
+    private func replaceCover(at destination: URL, write: () throws -> Void) throws {
+        if fileManager.fileExists(atPath: destination.path) {
+            try fileManager.removeItem(at: destination)
+        }
+        try write()
     }
 
     private func preferredManagedCoverBaseName(forGameName gameName: String) -> String {

@@ -11,6 +11,9 @@ struct BIOSListView: View {
     @State private var fileImporter = FileImportHandler.shared
     @State private var showBIOSImporter = false
     @State private var showBIOSCompatibilityImporter = false
+    @State private var showBIOSReplacementAlert = false
+    @State private var pendingBIOSImportURLs: [URL] = []
+    @State private var existingBIOSImportFileNames: [String] = []
 
     var body: some View {
         NavigationStack {
@@ -74,6 +77,17 @@ struct BIOSListView: View {
                     showBIOSCompatibilityImporter = false
                     handleBIOSPickerResult(result, source: "compatibility")
                 }
+            }
+            .alert(settings.localized("Replace existing files?"), isPresented: $showBIOSReplacementAlert) {
+                Button(settings.localized("Cancel"), role: .cancel) {
+                    clearPendingBIOSImport()
+                }
+                Button(settings.localized("Replace"), role: .destructive) {
+                    importBIOSFiles(pendingBIOSImportURLs, allowReplacingExistingFiles: true)
+                    clearPendingBIOSImport()
+                }
+            } message: {
+                Text(FileImportHandler.replacementConfirmationMessage(for: existingBIOSImportFileNames))
             }
         }
         .onAppear { loadBIOSes() }
@@ -161,21 +175,7 @@ struct BIOSListView: View {
         switch result {
         case .success(let urls):
             NSLog("[ARMSX2 iOS BIOS] %@ picker completed with %d URL(s)", source, urls.count)
-            fileImporter.handleURLs(urls, preferredDestination: .bios)
-            loadBIOSes()
-            if defaultBIOS.isEmpty, let firstBIOS = bioses.first(where: { $0.valid })?.fileName {
-                ARMSX2Bridge.setDefaultBIOS(firstBIOS)
-                defaultBIOS = firstBIOS
-            }
-            if !bioses.contains(where: { $0.valid }), !urls.isEmpty {
-                let message = [
-                    fileImporter.lastImportMessage,
-                    "No bootable PS2 BIOS was found after import. Companion ROMs may be listed, but select a valid boot BIOS dump."
-                ]
-                .compactMap { $0 }
-                .joined(separator: "\n")
-                fileImporter.presentImportResult(message)
-            }
+            prepareBIOSImport(urls)
         case .failure(let error):
             if !FileImportHandler.isUserCancelledPickerError(error) {
                 fileImporter.presentImportResult(FileImportHandler.failedBIOSPickerMessage(errorDescription: error.localizedDescription))
@@ -183,9 +183,80 @@ struct BIOSListView: View {
         }
     }
 
+    private func prepareBIOSImport(_ urls: [URL]) {
+        let existingFileNames = fileImporter.existingFileNames(for: urls, preferredDestination: .bios)
+        guard !existingFileNames.isEmpty else {
+            importBIOSFiles(urls, allowReplacingExistingFiles: false)
+            return
+        }
+
+        pendingBIOSImportURLs = urls
+        existingBIOSImportFileNames = existingFileNames
+        showBIOSReplacementAlert = true
+    }
+
+    private func importBIOSFiles(_ urls: [URL], allowReplacingExistingFiles: Bool) {
+        fileImporter.handleURLs(
+            urls,
+            preferredDestination: .bios,
+            allowReplacingExistingFiles: allowReplacingExistingFiles
+        )
+        loadBIOSes()
+        if defaultBIOS.isEmpty, let firstBIOS = bioses.first(where: { $0.valid })?.fileName {
+            ARMSX2Bridge.setDefaultBIOS(firstBIOS)
+            defaultBIOS = firstBIOS
+        }
+        if let guidance = nonBootableImportGuidance(for: urls) {
+            let message = [
+                fileImporter.lastImportMessage,
+                guidance
+            ]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+            fileImporter.presentImportResult(message)
+        } else if !bioses.contains(where: { $0.valid }), !urls.isEmpty {
+            let message = [
+                fileImporter.lastImportMessage,
+                "No bootable PS2 BIOS was found. Import a valid PS2 BIOS dump before starting games."
+            ]
+            .compactMap { $0 }
+            .joined(separator: "\n")
+            fileImporter.presentImportResult(message)
+        }
+    }
+
+    private func clearPendingBIOSImport() {
+        pendingBIOSImportURLs = []
+        existingBIOSImportFileNames = []
+    }
+
     private func loadBIOSes() {
         bioses = ARMSX2Bridge.availableBIOSInfos()
         defaultBIOS = ARMSX2Bridge.defaultBIOSName()
+    }
+
+    private func nonBootableImportGuidance(for urls: [URL]) -> String? {
+        let selectedFileNames = Set(urls.map(\.lastPathComponent))
+        let nonBootableFileNames = bioses
+            .filter { !$0.valid && selectedFileNames.contains($0.fileName) }
+            .map(\.fileName)
+
+        guard !nonBootableFileNames.isEmpty else { return nil }
+
+        let fileMessage: String
+        let setupMessage: String
+        if nonBootableFileNames.count == 1 {
+            fileMessage = "\(nonBootableFileNames[0]) is in your BIOS folder, but it is not a bootable PS2 BIOS. It may be a companion ROM or unsupported BIOS-related file."
+            setupMessage = "A bootable BIOS is already installed, but this selected file cannot be used to boot games."
+        } else {
+            fileMessage = "These selected files are in your BIOS folder, but they are not bootable PS2 BIOS files: \(nonBootableFileNames.joined(separator: ", ")). They may be companion ROMs or unsupported BIOS-related files."
+            setupMessage = "A bootable BIOS is already installed, but these files cannot be used to boot games."
+        }
+
+        if bioses.contains(where: { $0.valid }) {
+            return "\(fileMessage)\n\(setupMessage)"
+        }
+        return "\(fileMessage)\nNo bootable PS2 BIOS was found. Import a valid PS2 BIOS dump before starting games."
     }
 
     private func regionBadge(for bios: ARMSX2BIOSInfo) -> some View {
@@ -203,7 +274,7 @@ struct BIOSListView: View {
                     .foregroundStyle(.secondary)
             }
         }
-        .accessibilityLabel(bios.valid ? "\(bios.regionName) BIOS" : "Unknown BIOS region")
+        .accessibilityLabel(bios.valid ? "\(bios.regionName) BIOS" : settings.localized("Not a boot BIOS"))
     }
 
     private func flagEmoji(for countryCode: String) -> String? {
