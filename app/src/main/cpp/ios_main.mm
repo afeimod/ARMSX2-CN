@@ -3653,7 +3653,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_1_2_4_burnout_dib_vu_fix_build135_v1\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_1_3_1_black_beforedraw_release\n");
     
     // [iPSX2] Unification Validation
     // @@BIOS_GATE@@ build_id=2026-01-14_13-30-00 bundle=(from_nsbundle)

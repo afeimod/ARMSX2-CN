@@ -459,6 +459,11 @@ static bool IsIOSBurnoutMetalCallbackGame(const std::string& name)
 	return IsIOSBurnoutRevengeGame(name) || IsIOSBurnout3Game(name);
 }
 
+static bool IsIOSBlackGame(const std::string& name)
+{
+	return name == "Black";
+}
+
 static std::string GetIOSCompatibilityLabProfileForGSPolicy()
 {
 	SettingsInterface* si = Host::GetSettingsInterface();
@@ -568,7 +573,7 @@ static bool IsIOSMetalHighRiskAutoGSHWFix(GameDatabaseSchema::GSHWFixId id)
 	}
 }
 
-static bool IsIOSMetalAllowedAutoGSHWCallback(GameDatabaseSchema::GSHWFixId id, int value)
+static bool IsIOSMetalAllowedAutoGSHWCallback(const GameDatabaseSchema::GameEntry& entry, GameDatabaseSchema::GSHWFixId id, int value)
 {
 	switch (id)
 	{
@@ -576,13 +581,14 @@ static bool IsIOSMetalAllowedAutoGSHWCallback(GameDatabaseSchema::GSHWFixId id, 
 		{
 			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
 			static const s16 burnout_sky = GSLookupGetSkipCountFunctionId("GSC_BlackAndBurnoutSky");
-			return value == burnout_games || value == burnout_sky;
+			return (IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_games) ||
+				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky);
 		}
 
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
 		{
 			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
-			return value == burnout_games;
+			return (IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games;
 		}
 
 		default:
@@ -595,21 +601,20 @@ static bool IsIOSMetalAllowedCompatLabOffGSHWFix(const GameDatabaseSchema::GameE
 	if (!IsIOSMetalHighRiskAutoGSHWFix(id))
 		return true;
 
-	if (!IsIOSBurnoutMetalCallbackGame(entry.name))
-		return false;
-
 	switch (id)
 	{
 		case GameDatabaseSchema::GSHWFixId::GetSkipCount:
 		{
 			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
-			return value == burnout_games;
+			static const s16 burnout_sky = GSLookupGetSkipCountFunctionId("GSC_BlackAndBurnoutSky");
+			return (IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_games) ||
+				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky);
 		}
 
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
 		{
 			static const s16 burnout_games = GSLookupBeforeDrawFunctionId("OI_BurnoutGames");
-			return value == burnout_games;
+			return (IsIOSBurnoutMetalCallbackGame(entry.name) || IsIOSBlackGame(entry.name)) && value == burnout_games;
 		}
 
 		default:
@@ -1016,9 +1021,9 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 
 		if (!block_ios_metal_gs_fixes && config.Renderer == GSRendererType::Metal && apply_auto_fixes && IsIOSMetalHighRiskAutoGSHWFix(id))
 		{
-			if (IsIOSMetalAllowedAutoGSHWCallback(id, value))
+			if (IsIOSMetalAllowedAutoGSHWCallback(*this, id, value))
 			{
-				Console.Warning("@@IOS_METAL_GS_CALLBACK_ALLOW@@ game=\"%s\" fix=%s requested=%d reason=burnout_callback_allowlist",
+				Console.Warning("@@IOS_METAL_GS_CALLBACK_ALLOW@@ game=\"%s\" fix=%s requested=%d reason=ios_metal_callback_allowlist",
 					name.c_str(), getHWFixName(id), value);
 			}
 			else
