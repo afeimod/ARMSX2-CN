@@ -207,6 +207,8 @@
     <string name="settings_intc_spin_detection">INTCスピン検出</string>
     <string name="settings_mvu_flag_hack">mVUフラグハック</string>
     <string name="settings_instant_vu1">Instant VU1</string>
+    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
+    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
     <string name="settings_fast_cdvd">高速CDVD</string>
     <string name="settings_performance_overlay">パフォーマンスオーバーレイ</string>
     <string name="settings_osd_scale_default">オンスクリーンディスプレイの拡大率: 100</string>
