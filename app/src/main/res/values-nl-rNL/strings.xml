@@ -207,6 +207,8 @@ Open het later vanuit Instellingen → Open ARMSX2 map.</string>
     <string name="settings_intc_spin_detection">INTC Spin Detectie</string>
     <string name="settings_mvu_flag_hack">mVU Vlag Hack</string>
     <string name="settings_instant_vu1">Directe VU1</string>
+    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
+    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
     <string name="settings_fast_cdvd">Snelle CDVD</string>
     <string name="settings_performance_overlay">Prestatie-overlay</string>
     <string name="settings_osd_scale_default">Schaal van schermweergave: 100</string>
