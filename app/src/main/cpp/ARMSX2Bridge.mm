@@ -1341,11 +1341,13 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     const int globalTextureFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "filter", 2) : 2;
     const bool globalHardwareMipmapping = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "hw_mipmap", true) : true;
     const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
+    const int globalInterlaceMode = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "deinterlace_mode", 7) : 7;
     const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
     const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
     const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
     const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
     const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
+    const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", false) : false;
     NSMutableDictionary<NSString*, id>* result = [@{
         @"enabled": @NO,
         @"path": @"",
@@ -1356,11 +1358,13 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         @"textureFiltering": @(globalTextureFiltering),
         @"hardwareMipmapping": @(globalHardwareMipmapping),
         @"blendingAccuracy": @(globalBlendingAccuracy),
+        @"interlaceMode": @(globalInterlaceMode),
         @"enableCheats": @(globalEnableCheats),
         @"enablePatches": @(globalEnablePatches),
         @"enableGameFixes": @(globalEnableGameFixes),
         @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
         @"eeCoreType": @(globalEECoreType),
+        @"mtvu": @(globalMTVU),
     } mutableCopy];
 
     if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
@@ -1384,12 +1388,14 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.ContainsValue("EmuCore/GS", "filter") ||
         si.ContainsValue("EmuCore/GS", "hw_mipmap") ||
         si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
+        si.ContainsValue("EmuCore/GS", "deinterlace_mode") ||
         si.ContainsValue("EmuCore", "EnableCheats") ||
         si.ContainsValue("EmuCore", "EnablePatches") ||
         si.ContainsValue("EmuCore", "EnableGameFixes") ||
         si.ContainsValue("EmuCore/GS", "UserHacks") ||
         si.ContainsValue("EmuCore/CPU", "CoreType") ||
-        si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec");
+        si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec") ||
+        si.ContainsValue("EmuCore/Speedhacks", "vuThread");
 
     result[@"enabled"] = @(hasKnownOverride);
     NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
@@ -1398,11 +1404,13 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     result[@"textureFiltering"] = @(si.GetIntValue("EmuCore/GS", "filter", [result[@"textureFiltering"] intValue]));
     result[@"hardwareMipmapping"] = @(si.GetBoolValue("EmuCore/GS", "hw_mipmap", [result[@"hardwareMipmapping"] boolValue]));
     result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
+    result[@"interlaceMode"] = @(si.GetIntValue("EmuCore/GS", "deinterlace_mode", [result[@"interlaceMode"] intValue]));
     result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
     result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
     result[@"enableGameFixes"] = @(si.GetBoolValue("EmuCore", "EnableGameFixes", [result[@"enableGameFixes"] boolValue]));
     result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
     result[@"eeCoreType"] = @(si.GetIntValue("EmuCore/CPU", "CoreType", [result[@"eeCoreType"] intValue]));
+    result[@"mtvu"] = @(si.GetBoolValue("EmuCore/Speedhacks", "vuThread", [result[@"mtvu"] boolValue]));
     return result;
 }
 
@@ -1413,7 +1421,9 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
               textureFiltering:(int)textureFiltering
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
+               interlaceMode:(int)interlaceMode
                     eeCoreType:(int)eeCoreType
+                          mtvu:(BOOL)mtvu
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
@@ -1438,12 +1448,14 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.SetIntValue("EmuCore/GS", "filter", textureFiltering);
         si.SetBoolValue("EmuCore/GS", "hw_mipmap", hardwareMipmapping);
         si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
+        si.SetIntValue("EmuCore/GS", "deinterlace_mode", interlaceMode);
         si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
         si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
         si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
         si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
         si.SetIntValue("EmuCore/CPU", "CoreType", eeCoreType);
         si.SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", eeCoreType == 2);
+        si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
     } else {
         si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
         si.DeleteValue("EmuCore/GS", "upscale_multiplier");
@@ -1451,12 +1463,14 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         si.DeleteValue("EmuCore/GS", "filter");
         si.DeleteValue("EmuCore/GS", "hw_mipmap");
         si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
+        si.DeleteValue("EmuCore/GS", "deinterlace_mode");
         si.DeleteValue("EmuCore", "EnableCheats");
         si.DeleteValue("EmuCore", "EnablePatches");
         si.DeleteValue("EmuCore", "EnableGameFixes");
         si.DeleteValue("EmuCore/GS", "UserHacks");
         si.DeleteValue("EmuCore/CPU", "CoreType");
         si.DeleteValue("EmuCore/CPU", "UseArm64Dynarec");
+        si.DeleteValue("EmuCore/Speedhacks", "vuThread");
         si.RemoveEmptySections();
     }
 

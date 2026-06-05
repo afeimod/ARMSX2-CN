@@ -1194,6 +1194,22 @@ struct PerGameSettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings = SettingsStore.shared
 
+    private struct PickerOption: Identifiable {
+        let id: Int
+        let title: String
+    }
+
+    private static let deinterlaceOptions = [
+        PickerOption(id: 0, title: "None"),
+        PickerOption(id: 1, title: "Weave (TFF)"),
+        PickerOption(id: 2, title: "Weave (BFF)"),
+        PickerOption(id: 3, title: "Bob (TFF)"),
+        PickerOption(id: 4, title: "Bob (BFF)"),
+        PickerOption(id: 5, title: "Blend (TFF)"),
+        PickerOption(id: 6, title: "Blend (BFF)"),
+        PickerOption(id: 7, title: "Adaptive (Default)")
+    ]
+
     let game: ISOEntry
     let onDone: (() -> Void)?
 
@@ -1203,7 +1219,9 @@ struct PerGameSettingsPanel: View {
     @State private var textureFiltering: Int
     @State private var hardwareMipmapping: Bool
     @State private var blendingAccuracy: Int
+    @State private var interlaceMode: Int
     @State private var eeCoreType: Int
+    @State private var mtvu: Bool
     @State private var enableCheats: Bool
     @State private var enablePatches: Bool
     @State private var enableGameFixes: Bool
@@ -1220,7 +1238,9 @@ struct PerGameSettingsPanel: View {
         _textureFiltering = State(initialValue: Self.intValue(info["textureFiltering"], defaultValue: 2))
         _hardwareMipmapping = State(initialValue: Self.boolValue(info["hardwareMipmapping"], defaultValue: true))
         _blendingAccuracy = State(initialValue: Self.intValue(info["blendingAccuracy"], defaultValue: 1))
+        _interlaceMode = State(initialValue: Self.intValue(info["interlaceMode"], defaultValue: 7))
         _eeCoreType = State(initialValue: Self.intValue(info["eeCoreType"], defaultValue: 2))
+        _mtvu = State(initialValue: Self.boolValue(info["mtvu"], defaultValue: false))
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
         _enablePatches = State(initialValue: Self.boolValue(info["enablePatches"], defaultValue: true))
         _enableGameFixes = State(initialValue: Self.boolValue(info["enableGameFixes"], defaultValue: true))
@@ -1245,6 +1265,12 @@ struct PerGameSettingsPanel: View {
                     .disabled(!enabled)
 
                     Text(settings.localized("Interpreter is slower, but can help isolate EE JIT crashes for specific games. Reset/relaunch after changing it."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Toggle("MTVU", isOn: $mtvu)
+                        .disabled(!enabled)
+                    Text(settings.localized("MTVU can improve performance in some games, but may cause compatibility issues. Reset/relaunch after changing it."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1291,6 +1317,13 @@ struct PerGameSettingsPanel: View {
                         Text("High").tag(3)
                         Text("Full").tag(4)
                         Text("Ultra").tag(5)
+                    }
+                    .disabled(!enabled)
+
+                    Picker(settings.localized("Deinterlace"), selection: $interlaceMode) {
+                        ForEach(Self.deinterlaceOptions) { option in
+                            Text(settings.localized(option.title)).tag(option.id)
+                        }
                     }
                     .disabled(!enabled)
                 }
@@ -1346,7 +1379,9 @@ struct PerGameSettingsPanel: View {
             textureFiltering: Int32(textureFiltering),
             hardwareMipmapping: hardwareMipmapping,
             blendingAccuracy: Int32(blendingAccuracy),
+            interlaceMode: Int32(interlaceMode),
             eeCoreType: Int32(eeCoreType),
+            mtvu: mtvu,
             enableCheats: enableCheats,
             enablePatches: enablePatches,
             enableGameFixes: enableGameFixes,
