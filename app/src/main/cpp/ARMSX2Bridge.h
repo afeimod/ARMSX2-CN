@@ -116,12 +116,14 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
               textureFiltering:(int)textureFiltering
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
+               interlaceMode:(int)interlaceMode
                     eeCoreType:(int)eeCoreType
+                          mtvu:(BOOL)mtvu
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
     enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
-    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:eeCoreType:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:interlaceMode:eeCoreType:mtvu:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
 + (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(clearCache(forISO:));
 + (nonnull NSString *)deleteGameDataForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(deleteGameData(forISO:));
 + (BOOL)deleteISO:(nonnull NSString *)isoName deleteGameData:(BOOL)deleteGameData NS_SWIFT_NAME(deleteISO(_:deleteGameData:));

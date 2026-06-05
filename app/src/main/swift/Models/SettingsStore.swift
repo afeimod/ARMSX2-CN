@@ -250,6 +250,12 @@ final class SettingsStore: @unchecked Sendable {
     var virtualPadSkin: VirtualPadSkin {
         didSet { ARMSX2Bridge.setINIInt("ARMSX2iOS/UI", key: "VirtualPadSkin", value: Int32(virtualPadSkin.rawValue)) }
     }
+    var autoHideVirtualPadWhenControllerConnected: Bool {
+        didSet {
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIBool("ARMSX2iOS/UI", key: "AutoHideVirtualPadWhenControllerConnected", value: autoHideVirtualPadWhenControllerConnected)
+        }
+    }
     var autoFullscreen: Bool {
         didSet {
             guard !suppressINIWrites else { return }
@@ -439,6 +445,7 @@ final class SettingsStore: @unchecked Sendable {
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
         virtualPadSkin = VirtualPadSkin(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "VirtualPadSkin", defaultValue: 0))) ?? .armsx2Refresh
+        autoHideVirtualPadWhenControllerConnected = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "AutoHideVirtualPadWhenControllerConnected", defaultValue: true)
         autoFullscreen = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "AutoFullscreen", defaultValue: false)
         hideMenuButton = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HideMenuButton", defaultValue: false)
         analogStickScale = Self.clampedAnalogStickScale(ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "AnalogStickScale", defaultValue: 1.0))
@@ -532,6 +539,7 @@ final class SettingsStore: @unchecked Sendable {
         padOpacity = ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "PadOpacity", defaultValue: 0.6)
         hapticFeedback = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HapticFeedback", defaultValue: true)
         virtualPadSkin = VirtualPadSkin(rawValue: Int(ARMSX2Bridge.getINIInt("ARMSX2iOS/UI", key: "VirtualPadSkin", defaultValue: 0))) ?? .armsx2Refresh
+        autoHideVirtualPadWhenControllerConnected = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "AutoHideVirtualPadWhenControllerConnected", defaultValue: true)
         autoFullscreen = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "AutoFullscreen", defaultValue: false)
         hideMenuButton = ARMSX2Bridge.getINIBool("ARMSX2iOS/UI", key: "HideMenuButton", defaultValue: false)
         analogStickScale = Self.clampedAnalogStickScale(ARMSX2Bridge.getINIFloat("ARMSX2iOS/UI", key: "AnalogStickScale", defaultValue: 1.0))

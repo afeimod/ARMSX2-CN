@@ -3,6 +3,7 @@
 
 import SwiftUI
 import UIKit
+import GameController
 
 private let runtimeMenuStateChangedNotification = Notification.Name("ARMSX2iOSRuntimeMenuStateChanged")
 
@@ -29,7 +30,8 @@ struct GameScreenView: View {
     @State private var appState = AppState.shared
     @State private var settings = SettingsStore.shared
     @State private var fileImporter = FileImportHandler.shared
-    @State private var padVisible = true
+    @State private var userVirtualPadVisible = true
+    @State private var externalControllerConnected = false
     @State private var fullScreen = false
     @State private var menuButtonHidden = false
     @State private var vmMenuAvailable = false
@@ -62,7 +64,7 @@ struct GameScreenView: View {
                 // so that pad coordinates match the layout editor exactly.
                 ZStack {
                     MetalGameView()
-                    if padVisible {
+                    if effectiveVirtualPadVisible {
                         VirtualControllerView(isLandscape: true)
                     }
                     menuOverlay(isLandscape: true)
@@ -77,7 +79,7 @@ struct GameScreenView: View {
                     VStack(spacing: 0) {
                         MetalGameView()
                             .frame(height: geo.size.height / 2)
-                        if padVisible {
+                        if effectiveVirtualPadVisible {
                             VirtualControllerView()
                                 .frame(height: geo.size.height / 2)
                         } else {
@@ -149,6 +151,7 @@ struct GameScreenView: View {
         .onAppear {
             enterGameplaySystemChromeMode()
             applyGameScreenPreferences()
+            refreshExternalControllerConnectionState()
             refreshRuntimeMenuState()
         }
         .onDisappear {
@@ -167,6 +170,12 @@ struct GameScreenView: View {
         .onChange(of: showPadLayoutEditor) { _, _ in updateRuntimeOverlayPause() }
         .onReceive(NotificationCenter.default.publisher(for: runtimeMenuStateChangedNotification)) { _ in
             refreshRuntimeMenuState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidConnect)) { _ in
+            refreshExternalControllerConnectionState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
+            refreshExternalControllerConnectionState()
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
             refreshRuntimeMenuState()
@@ -214,8 +223,11 @@ struct GameScreenView: View {
             )) {
                 Label(settings.localized("OSD"), systemImage: "speedometer")
             }
-            Toggle(isOn: $padVisible) {
+            Toggle(isOn: $userVirtualPadVisible) {
                 Label(settings.localized("Virtual Pad"), systemImage: "gamecontroller")
+            }
+            if virtualPadHiddenByController {
+                Text(settings.localized("Hidden while controller is connected"))
             }
             Toggle(isOn: $fullScreen) {
                 Label(settings.localized("Full Screen"), systemImage: "arrow.up.left.and.arrow.down.right")
@@ -361,6 +373,21 @@ struct GameScreenView: View {
         menuButtonHidden = false
         settings.hideMenuButton = false
         presentSaveStateStatus(settings.localized("Menu button shown"))
+    }
+
+    private var effectiveVirtualPadVisible: Bool {
+        userVirtualPadVisible && (!settings.autoHideVirtualPadWhenControllerConnected || !externalControllerConnected)
+    }
+
+    private var virtualPadHiddenByController: Bool {
+        userVirtualPadVisible && settings.autoHideVirtualPadWhenControllerConnected && externalControllerConnected
+    }
+
+    private func refreshExternalControllerConnectionState() {
+        let connected = !GCController.controllers().isEmpty
+        if externalControllerConnected != connected {
+            externalControllerConnected = connected
+        }
     }
 
     @ViewBuilder

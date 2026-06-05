@@ -32,6 +32,11 @@ struct VirtualPadSettingsView: View {
             }
 
             Section(settings.localized("Gameplay")) {
+                Toggle(settings.localized("Hide Virtual Pad When Controller Is Connected"), isOn: $settings.autoHideVirtualPadWhenControllerConnected)
+                Text(settings.localized("Automatically hides the on-screen controls while an external controller is connected."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Toggle(settings.localized("Auto Full Screen"), isOn: $settings.autoFullscreen)
                 Toggle(settings.localized("Hide Menu Button"), isOn: $settings.hideMenuButton)
 
