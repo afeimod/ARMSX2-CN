@@ -164,6 +164,9 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Models/VirtualPadSkin.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SettingsStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/FileImportHandler.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/ImportFileCopier.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/ARMSX2DeepLinkHandler.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/ImportDocumentPicker.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/CoverStore.swift
 	)
 
