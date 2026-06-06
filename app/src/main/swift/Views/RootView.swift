@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+import UIKit
 
 struct RootView: View {
     @State private var appState = AppState.shared
@@ -78,26 +79,34 @@ struct MenuTabView: View {
         .tint(.blue)
 #else
         TabView(selection: $selectedTab) {
-            GameListView()
+            SafeAreaProtectedMenuTabContent {
+                GameListView()
+            }
                 .tabItem {
                     Label(settings.localized("Games"), systemImage: "gamecontroller")
                 }
                 .tag(0)
 
-            BIOSListView()
+            SafeAreaProtectedMenuTabContent {
+                BIOSListView()
+            }
                 .tabItem {
                     Label(settings.localized("BIOS"), systemImage: "cpu")
                 }
                 .tag(1)
 
-            HelpView()
+            SafeAreaProtectedMenuTabContent {
+                HelpView()
+            }
                 .tabItem {
                     Label(settings.localized("Help"), systemImage: "questionmark.circle")
                 }
                 .tag(2)
 
-            NavigationStack {
-                SettingsRootView()
+            SafeAreaProtectedMenuTabContent {
+                NavigationStack {
+                    SettingsRootView()
+                }
             }
             .tabItem {
                 Label(settings.localized("Settings"), systemImage: "gearshape")
@@ -106,6 +115,84 @@ struct MenuTabView: View {
         }
         .tint(.blue)
 #endif
+    }
+}
+
+@MainActor
+private struct SafeAreaProtectedMenuTabContent<Content: View>: View {
+    @Environment(\.layoutDirection) private var layoutDirection
+    @State private var safeAreaInsets = KeyWindowSafeArea.horizontalInsets()
+    let content: Content
+
+    init(@ViewBuilder content: () -> Content) {
+        self.content = content()
+    }
+
+    var body: some View {
+        // SwiftUI's GeometryReader safe-area insets are unreliable inside a TabView
+        // page (the left/right notch/Dynamic Island insets read as zero in landscape),
+        // so read the real key-window insets instead and use the geometry size only as
+        // a reliable signal to recompute them on rotation. This keeps normal app tab
+        // content clear of the notch without touching gameplay or overlay surfaces.
+        GeometryReader { geometry in
+            let insets = NormalTabContentMargin.effectiveHorizontalInsets(
+                raw: safeAreaInsets,
+                isLandscape: geometry.size.width > geometry.size.height,
+                idiom: UIDevice.current.userInterfaceIdiom
+            )
+            content
+                .padding(.leading, layoutDirection == .rightToLeft ? insets.right : insets.left)
+                .padding(.trailing, layoutDirection == .rightToLeft ? insets.left : insets.right)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .onChange(of: geometry.size) { _, _ in
+                    safeAreaInsets = KeyWindowSafeArea.horizontalInsets()
+                }
+        }
+        .onAppear {
+            safeAreaInsets = KeyWindowSafeArea.horizontalInsets()
+        }
+    }
+}
+
+/// Reads the real left/right safe-area insets from the active key window. Used because
+/// SwiftUI-reported horizontal safe-area insets are unreliable inside a TabView page.
+private enum KeyWindowSafeArea {
+    @MainActor
+    static func horizontalInsets() -> (left: CGFloat, right: CGFloat) {
+        let insets = keyWindowInsets()
+        return (insets.left, insets.right)
+    }
+
+    @MainActor
+    private static func keyWindowInsets() -> UIEdgeInsets {
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            guard scene.activationState == .foregroundActive || scene.activationState == .foregroundInactive else { continue }
+            if let window = scene.windows.first(where: { $0.isKeyWindow }) ?? scene.windows.first {
+                return window.safeAreaInsets
+            }
+        }
+        return .zero
+    }
+}
+
+/// Adds a small readable horizontal margin for normal app tabs in iPhone landscape.
+///
+/// The raw key-window safe-area insets only clear the hardware cutout (notch / Dynamic
+/// Island / sensor housing) by the minimum amount, which still leaves tab content cramped
+/// against the cutout in landscape. This applies a small minimum content margin on each
+/// side so Games, BIOS, Help, and Settings sit in a balanced, readable column. Portrait and
+/// iPad keep the raw insets unchanged, and gameplay surfaces never use this helper.
+private enum NormalTabContentMargin {
+    /// Minimum horizontal content margin for normal app tabs on an iPhone in landscape.
+    static let minimumLandscapeMargin: CGFloat = 20
+
+    static func effectiveHorizontalInsets(
+        raw: (left: CGFloat, right: CGFloat),
+        isLandscape: Bool,
+        idiom: UIUserInterfaceIdiom
+    ) -> (left: CGFloat, right: CGFloat) {
+        guard isLandscape, idiom == .phone else { return raw }
+        return (max(raw.left, minimumLandscapeMargin), max(raw.right, minimumLandscapeMargin))
     }
 }
 

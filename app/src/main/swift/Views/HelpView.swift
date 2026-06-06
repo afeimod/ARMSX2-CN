@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 import SwiftUI
+import UIKit
 
 struct HelpSection: Identifiable {
     let id = UUID()
@@ -104,6 +105,7 @@ private let helpData: [HelpSection] = [
 
 struct HelpView: View {
     @State private var settings = SettingsStore.shared
+    @State private var copyStatusMessage: String?
 #if targetEnvironment(macCatalyst)
     @State private var selectedTopic: HelpTopic? = .item(section: 0, item: 0)
 #endif
@@ -168,6 +170,16 @@ struct HelpView: View {
                             .foregroundStyle(.secondary)
                             .font(.caption)
                     }
+                    Button {
+                        copyTroubleshootingInfo()
+                    } label: {
+                        Label(settings.localized("Copy Troubleshooting Info"), systemImage: "doc.on.doc")
+                    }
+                    if let copyStatusMessage {
+                        Text(settings.localized(copyStatusMessage))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 } header: {
                     Label(settings.localized("About"), systemImage: "info.circle")
                 }
@@ -212,6 +224,16 @@ struct HelpView: View {
                             .foregroundStyle(.secondary)
                             .font(.caption)
                     }
+                    Button {
+                        copyTroubleshootingInfo()
+                    } label: {
+                        Label(settings.localized("Copy Troubleshooting Info"), systemImage: "doc.on.doc")
+                    }
+                    if let copyStatusMessage {
+                        Text(settings.localized(copyStatusMessage))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
             }
             .navigationTitle(settings.localized("About"))
@@ -228,5 +250,29 @@ struct HelpView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func copyTroubleshootingInfo() {
+        UIPasteboard.general.string = troubleshootingInfoText()
+        copyStatusMessage = "Troubleshooting info copied."
+    }
+
+    private func troubleshootingInfoText() -> String {
+        let bundle = Bundle.main
+        let appName = bundle.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
+            ?? bundle.object(forInfoDictionaryKey: "CFBundleName") as? String
+            ?? "ARMSX2 iOS"
+        let appVersion = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "Unknown"
+        let buildNumber = bundle.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "Unknown"
+        let device = UIDevice.current
+
+        return [
+            "App: \(appName)",
+            "Version: \(appVersion)",
+            "Build: \(buildNumber)",
+            "Platform: iOS",
+            "iOS Version: \(device.systemVersion)",
+            "Device Type: \(device.model)"
+        ].joined(separator: "\n")
     }
 }

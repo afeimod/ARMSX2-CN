@@ -6,6 +6,29 @@ import SwiftUI
 struct GraphicsSettingsView: View {
     @State private var settings = SettingsStore.shared
 
+    private var manualAdvancedHacks: Bool {
+        !settings.enableGameDBHardwareFixes
+    }
+
+    private var skipDrawStartBinding: Binding<Int> {
+        Binding(
+            get: { settings.skipDrawStart },
+            set: { newValue in
+                settings.skipDrawStart = min(max(newValue, SettingsStore.skipDrawRange.lowerBound), SettingsStore.skipDrawRange.upperBound)
+                settings.skipDrawEnd = SettingsStore.normalizedSkipDrawEnd(start: settings.skipDrawStart, end: settings.skipDrawEnd)
+            }
+        )
+    }
+
+    private var skipDrawEndBinding: Binding<Int> {
+        Binding(
+            get: { settings.skipDrawEnd },
+            set: { newValue in
+                settings.skipDrawEnd = SettingsStore.normalizedSkipDrawEnd(start: settings.skipDrawStart, end: newValue)
+            }
+        )
+    }
+
     var body: some View {
         Form {
             Section(settings.localized("Renderer")) {
@@ -25,6 +48,13 @@ struct GraphicsSettingsView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
 #endif
+#if !targetEnvironment(macCatalyst)
+                if settings.renderer == 11 {
+                    Text(settings.localized("Null renderer may show no video output or a black screen. It is mainly useful for testing. Switch back to Metal and restart if selected by mistake."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+#endif
             }
 
             Section(settings.localized("Upscaling")) {
@@ -43,6 +73,11 @@ struct GraphicsSettingsView: View {
                 Text(settings.localized("Lower values can help performance on heavy games. Higher values improve visual quality but reduce performance significantly. Requires restart."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if settings.upscaleMultiplier >= 4.0 {
+                    Text(settings.localized("4x and higher can cause poor performance, heat, stutter, or instability on iPhone and iPad."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section(settings.localized("Filtering")) {
@@ -125,9 +160,67 @@ struct GraphicsSettingsView: View {
                 }
             }
 
+            Section(settings.localized("Advanced Upscaling Hacks")) {
+                Toggle(settings.localized("Manual Advanced Hacks"), isOn: Binding(
+                    get: { manualAdvancedHacks },
+                    set: { settings.enableGameDBHardwareFixes = !$0 }
+                ))
+                Text(settings.localized("GameDB Graphics Fixes are safest for most games. Manual Advanced Hacks disable those automatic graphics fixes and allow the sprite, texture-offset, and Skipdraw values below. Reset/relaunch may be needed."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Picker(settings.localized("Trilinear Filtering"), selection: $settings.trilinearFiltering) {
+                    Text(settings.localized("Automatic / Default")).tag(-1)
+                    Text(settings.localized("Off")).tag(0)
+                    Text("PS2").tag(1)
+                    Text(settings.localized("Forced")).tag(2)
+                }
+                if settings.trilinearFiltering != -1 {
+                    Text(settings.localized("Non-automatic trilinear filtering may break textures in some games."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
+
+                Picker(settings.localized("Half-pixel Offset"), selection: $settings.halfPixelOffset) {
+                    Text(settings.localized("Off")).tag(0)
+                    Text(settings.localized("Normal / Vertex")).tag(1)
+                    Text(settings.localized("Special / Texture")).tag(2)
+                    Text(settings.localized("Special / Texture Aggressive")).tag(3)
+                    Text(settings.localized("Align to Native")).tag(4)
+                    Text(settings.localized("Align to Native + Texture Offset")).tag(5)
+                }
+                .disabled(!manualAdvancedHacks)
+
+                Picker(settings.localized("Round Sprite"), selection: $settings.roundSprite) {
+                    Text(settings.localized("Off")).tag(0)
+                    Text(settings.localized("Half")).tag(1)
+                    Text(settings.localized("Full")).tag(2)
+                }
+                .disabled(!manualAdvancedHacks)
+
+                Toggle(settings.localized("Align Sprite"), isOn: $settings.alignSprite)
+                    .disabled(!manualAdvancedHacks)
+                Toggle(settings.localized("Merge Sprite"), isOn: $settings.mergeSprite)
+                    .disabled(!manualAdvancedHacks)
+                Toggle(settings.localized("Wild Arms Offset"), isOn: $settings.wildArmsOffset)
+                    .disabled(!manualAdvancedHacks)
+
+                ClampedIntField(title: settings.localized("Texture Offset X"), value: $settings.textureOffsetX, range: SettingsStore.textureOffsetRange, isEnabled: manualAdvancedHacks)
+                ClampedIntField(title: settings.localized("Texture Offset Y"), value: $settings.textureOffsetY, range: SettingsStore.textureOffsetRange, isEnabled: manualAdvancedHacks)
+                Text(settings.localized("Texture offsets are advanced troubleshooting values. Type a value and clamp to range. Default is 0."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                ClampedIntField(title: settings.localized("Skipdraw Start"), value: skipDrawStartBinding, range: SettingsStore.skipDrawRange, isEnabled: manualAdvancedHacks)
+                ClampedIntField(title: settings.localized("Skipdraw End"), value: skipDrawEndBinding, range: SettingsStore.skipDrawRange, isEnabled: manualAdvancedHacks)
+                Text(settings.localized("For Skipdraw 1, use Start 1 and End 1. Changes apply after reset/relaunch."))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+
             Section(settings.localized("Texture Replacement")) {
                 Toggle(settings.localized("Load Replacement Textures"), isOn: $settings.loadTextureReplacements)
-                Text(settings.localized("Loads PNG or DDS texture packs from Documents/textures/[Game Serial]/replacements/. Requires restart."))
+                Text(settings.localized("Loads PNG or DDS texture packs from Documents/textures/[Game Serial]/replacements/. Texture packs use app storage and may be large. Requires restart."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -151,13 +244,23 @@ struct GraphicsSettingsView: View {
                 Text(settings.localized("Core texture preloading mode. Full can improve replacement behavior but may increase memory use."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if settings.loadTextureReplacements && (settings.precacheTextureReplacements || settings.texturePreloading > 0) {
+                    Text(settings.localized("Large texture packs can use a lot of RAM when preload/precache is active and may cause stalls or crashes."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section(settings.localized("Texture Dumping")) {
                 Toggle(settings.localized("Dump Replaceable Textures"), isOn: $settings.dumpReplaceableTextures)
-                Text(settings.localized("Writes discovered textures to Documents/textures/[Game Serial]/dumps/. This can heavily reduce performance."))
+                Text(settings.localized("Writes discovered textures to Documents/textures/[Game Serial]/dumps/. This can heavily reduce performance and grow app storage quickly."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if settings.dumpReplaceableTextures {
+                    Text(settings.localized("Texture dumping can heavily slow games and create very large dump folders. Turn it off after collecting the textures you need."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 Toggle(settings.localized("Dump Mipmaps"), isOn: $settings.dumpReplaceableMipmaps)
                     .disabled(!settings.dumpReplaceableTextures)
@@ -174,6 +277,11 @@ struct GraphicsSettingsView: View {
                 Text(settings.localized("Higher values reduce frame drops but increase latency."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if settings.vsyncQueueSize >= 12 {
+                    Text(settings.localized("Large queues can make controls feel delayed and may increase stutter. The default is 8."))
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
             }
 
             Section {
@@ -185,5 +293,45 @@ struct GraphicsSettingsView: View {
         }
         .navigationTitle(settings.localized("Graphics"))
         .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+/// A typeable integer field for advanced/manual hack values. Text is committed when
+/// editing ends: valid input is clamped to `range`, and invalid input reverts to the
+/// last good value so a bad string can never be written or crash the field.
+struct ClampedIntField: View {
+    let title: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    var isEnabled: Bool = true
+
+    @State private var text: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer()
+            TextField("0", text: $text)
+                .keyboardType(.numbersAndPunctuation)
+                .multilineTextAlignment(.trailing)
+                .frame(maxWidth: 110)
+                .focused($focused)
+                .disabled(!isEnabled)
+        }
+        .onAppear { text = String(value) }
+        .onChange(of: value) { _, newValue in
+            if !focused { text = String(newValue) }
+        }
+        .onChange(of: focused) { _, isFocused in
+            if !isFocused { commit() }
+        }
+    }
+
+    private func commit() {
+        if let parsed = Int(text.trimmingCharacters(in: .whitespaces)) {
+            value = min(max(parsed, range.lowerBound), range.upperBound)
+        }
+        text = String(value)
     }
 }

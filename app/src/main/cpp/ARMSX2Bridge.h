@@ -109,6 +109,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (nonnull NSArray<NSString *> *)availableISOs;
 + (nonnull NSDictionary<NSString *, NSString *> *)gameMetadataForISO:(nonnull NSString *)isoName;
 + (nonnull NSDictionary<NSString *, id> *)gameSettingsForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(gameSettings(forISO:));
++ (nullable NSDictionary<NSString *, id> *)gameSettingsForCurrentGame;
 + (void)setGameSettingsForISO:(nonnull NSString *)isoName
                        enabled:(BOOL)enabled
              upscaleMultiplier:(float)upscaleMultiplier
@@ -117,13 +118,61 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
                interlaceMode:(int)interlaceMode
+        trilinearFiltering:(int)trilinearFiltering
+          halfPixelOffset:(int)halfPixelOffset
+              roundSprite:(int)roundSprite
+      alignSpriteOverride:(BOOL)alignSpriteOverride
+              alignSprite:(BOOL)alignSprite
+      mergeSpriteOverride:(BOOL)mergeSpriteOverride
+              mergeSprite:(BOOL)mergeSprite
+    wildArmsOffsetOverride:(BOOL)wildArmsOffsetOverride
+           wildArmsOffset:(BOOL)wildArmsOffset
+    textureOffsetXOverride:(BOOL)textureOffsetXOverride
+           textureOffsetX:(int)textureOffsetX
+    textureOffsetYOverride:(BOOL)textureOffsetYOverride
+           textureOffsetY:(int)textureOffsetY
+     skipDrawStartOverride:(BOOL)skipDrawStartOverride
+            skipDrawStart:(int)skipDrawStart
+       skipDrawEndOverride:(BOOL)skipDrawEndOverride
+              skipDrawEnd:(int)skipDrawEnd
                     eeCoreType:(int)eeCoreType
                           mtvu:(BOOL)mtvu
                   enableCheats:(BOOL)enableCheats
                  enablePatches:(BOOL)enablePatches
               enableGameFixes:(BOOL)enableGameFixes
     enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
-    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:interlaceMode:eeCoreType:mtvu:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
+    NS_SWIFT_NAME(setGameSettings(forISO:enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:interlaceMode:trilinearFiltering:halfPixelOffset:roundSprite:alignSpriteOverride:alignSprite:mergeSpriteOverride:mergeSprite:wildArmsOffsetOverride:wildArmsOffset:textureOffsetXOverride:textureOffsetX:textureOffsetYOverride:textureOffsetY:skipDrawStartOverride:skipDrawStart:skipDrawEndOverride:skipDrawEnd:eeCoreType:mtvu:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
++ (void)setGameSettingsForCurrentGameWithEnabled:(BOOL)enabled
+                               upscaleMultiplier:(float)upscaleMultiplier
+                                     aspectRatio:(nonnull NSString *)aspectRatio
+                                textureFiltering:(int)textureFiltering
+                              hardwareMipmapping:(BOOL)hardwareMipmapping
+                                blendingAccuracy:(int)blendingAccuracy
+                                   interlaceMode:(int)interlaceMode
+                              trilinearFiltering:(int)trilinearFiltering
+                                 halfPixelOffset:(int)halfPixelOffset
+                                     roundSprite:(int)roundSprite
+                             alignSpriteOverride:(BOOL)alignSpriteOverride
+                                     alignSprite:(BOOL)alignSprite
+                             mergeSpriteOverride:(BOOL)mergeSpriteOverride
+                                     mergeSprite:(BOOL)mergeSprite
+                           wildArmsOffsetOverride:(BOOL)wildArmsOffsetOverride
+                                  wildArmsOffset:(BOOL)wildArmsOffset
+                           textureOffsetXOverride:(BOOL)textureOffsetXOverride
+                                  textureOffsetX:(int)textureOffsetX
+                           textureOffsetYOverride:(BOOL)textureOffsetYOverride
+                                  textureOffsetY:(int)textureOffsetY
+                            skipDrawStartOverride:(BOOL)skipDrawStartOverride
+                                   skipDrawStart:(int)skipDrawStart
+                              skipDrawEndOverride:(BOOL)skipDrawEndOverride
+                                     skipDrawEnd:(int)skipDrawEnd
+                                      eeCoreType:(int)eeCoreType
+                                            mtvu:(BOOL)mtvu
+                                    enableCheats:(BOOL)enableCheats
+                                   enablePatches:(BOOL)enablePatches
+                                 enableGameFixes:(BOOL)enableGameFixes
+                      enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes
+    NS_SWIFT_NAME(setGameSettingsForCurrentGame(enabled:upscaleMultiplier:aspectRatio:textureFiltering:hardwareMipmapping:blendingAccuracy:interlaceMode:trilinearFiltering:halfPixelOffset:roundSprite:alignSpriteOverride:alignSprite:mergeSpriteOverride:mergeSprite:wildArmsOffsetOverride:wildArmsOffset:textureOffsetXOverride:textureOffsetX:textureOffsetYOverride:textureOffsetY:skipDrawStartOverride:skipDrawStart:skipDrawEndOverride:skipDrawEnd:eeCoreType:mtvu:enableCheats:enablePatches:enableGameFixes:enableGameDBHardwareFixes:));
 + (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(clearCache(forISO:));
 + (nonnull NSString *)deleteGameDataForISO:(nonnull NSString *)isoName NS_SWIFT_NAME(deleteGameData(forISO:));
 + (BOOL)deleteISO:(nonnull NSString *)isoName deleteGameData:(BOOL)deleteGameData NS_SWIFT_NAME(deleteISO(_:deleteGameData:));

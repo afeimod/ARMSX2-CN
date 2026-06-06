@@ -336,6 +336,9 @@ struct GameListView: View {
             .sheet(item: $gameSettingsTarget) { game in
                 PerGameSettingsPanel(game: game)
                     .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
+                    .presentationBackground(.regularMaterial)
+                    .presentationCornerRadius(34)
             }
             .sheet(item: $gameCompatibilityTarget) { game in
                 GameCompatibilityPanel(game: game)
@@ -1199,6 +1202,9 @@ struct PerGameSettingsPanel: View {
         let title: String
     }
 
+    private static let useGlobalSentinel = -1
+    private static let trilinearUseGlobalSentinel = Int(Int32.min)
+
     private static let deinterlaceOptions = [
         PickerOption(id: 0, title: "None"),
         PickerOption(id: 1, title: "Weave (TFF)"),
@@ -1209,9 +1215,32 @@ struct PerGameSettingsPanel: View {
         PickerOption(id: 6, title: "Blend (BFF)"),
         PickerOption(id: 7, title: "Adaptive (Default)")
     ]
+    private static let trilinearFilteringOptions = [
+        PickerOption(id: trilinearUseGlobalSentinel, title: "Use Global"),
+        PickerOption(id: -1, title: "Automatic / Default"),
+        PickerOption(id: 0, title: "Off"),
+        PickerOption(id: 1, title: "PS2"),
+        PickerOption(id: 2, title: "Forced")
+    ]
+    private static let halfPixelOffsetOptions = [
+        PickerOption(id: useGlobalSentinel, title: "Use Global"),
+        PickerOption(id: 0, title: "Off"),
+        PickerOption(id: 1, title: "Normal / Vertex"),
+        PickerOption(id: 2, title: "Special / Texture"),
+        PickerOption(id: 3, title: "Special / Texture Aggressive"),
+        PickerOption(id: 4, title: "Align to Native"),
+        PickerOption(id: 5, title: "Align to Native + Texture Offset")
+    ]
+    private static let roundSpriteOptions = [
+        PickerOption(id: useGlobalSentinel, title: "Use Global"),
+        PickerOption(id: 0, title: "Off"),
+        PickerOption(id: 1, title: "Half"),
+        PickerOption(id: 2, title: "Full")
+    ]
 
     let game: ISOEntry
     let onDone: (() -> Void)?
+    let savesToRunningGame: Bool
 
     @State private var enabled: Bool
     @State private var upscaleMultiplier: Float
@@ -1220,6 +1249,23 @@ struct PerGameSettingsPanel: View {
     @State private var hardwareMipmapping: Bool
     @State private var blendingAccuracy: Int
     @State private var interlaceMode: Int
+    @State private var trilinearFiltering: Int
+    @State private var halfPixelOffset: Int
+    @State private var roundSprite: Int
+    @State private var alignSpriteOverride: Bool
+    @State private var alignSprite: Bool
+    @State private var mergeSpriteOverride: Bool
+    @State private var mergeSprite: Bool
+    @State private var wildArmsOffsetOverride: Bool
+    @State private var wildArmsOffset: Bool
+    @State private var textureOffsetXOverride: Bool
+    @State private var textureOffsetX: Int
+    @State private var textureOffsetYOverride: Bool
+    @State private var textureOffsetY: Int
+    @State private var skipDrawStartOverride: Bool
+    @State private var skipDrawStart: Int
+    @State private var skipDrawEndOverride: Bool
+    @State private var skipDrawEnd: Int
     @State private var eeCoreType: Int
     @State private var mtvu: Bool
     @State private var enableCheats: Bool
@@ -1228,10 +1274,18 @@ struct PerGameSettingsPanel: View {
     @State private var enableGameDBHardwareFixes: Bool
     @State private var statusMessage: String?
 
-    init(game: ISOEntry, onDone: (() -> Void)? = nil) {
+    init(
+        game: ISOEntry,
+        preloadedSettings: [String: Any]? = nil,
+        savesToRunningGame: Bool = false,
+        onDone: (() -> Void)? = nil
+    ) {
         self.game = game
         self.onDone = onDone
-        let info = ARMSX2Bridge.gameSettings(forISO: game.name)
+        self.savesToRunningGame = savesToRunningGame
+        // The runtime caller passes settings it already loaded through a VM-safe path so
+        // this view never re-scans the disc image during init while a game is running.
+        let info = preloadedSettings ?? ARMSX2Bridge.gameSettings(forISO: game.name)
         _enabled = State(initialValue: Self.boolValue(info["enabled"], defaultValue: false))
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
         _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
@@ -1239,6 +1293,32 @@ struct PerGameSettingsPanel: View {
         _hardwareMipmapping = State(initialValue: Self.boolValue(info["hardwareMipmapping"], defaultValue: true))
         _blendingAccuracy = State(initialValue: Self.intValue(info["blendingAccuracy"], defaultValue: 1))
         _interlaceMode = State(initialValue: Self.intValue(info["interlaceMode"], defaultValue: 7))
+        _trilinearFiltering = State(initialValue: Self.boolValue(info["hasTrilinearFilteringOverride"], defaultValue: false) ? Self.intValue(info["trilinearFiltering"], defaultValue: -1) : Self.trilinearUseGlobalSentinel)
+        _halfPixelOffset = State(initialValue: Self.boolValue(info["hasHalfPixelOffsetOverride"], defaultValue: false) ? Self.intValue(info["halfPixelOffset"], defaultValue: 0) : Self.useGlobalSentinel)
+        _roundSprite = State(initialValue: Self.boolValue(info["hasRoundSpriteOverride"], defaultValue: false) ? Self.intValue(info["roundSprite"], defaultValue: 0) : Self.useGlobalSentinel)
+        _alignSpriteOverride = State(initialValue: Self.boolValue(info["hasAlignSpriteOverride"], defaultValue: false))
+        _alignSprite = State(initialValue: Self.boolValue(info["alignSprite"], defaultValue: false))
+        _mergeSpriteOverride = State(initialValue: Self.boolValue(info["hasMergeSpriteOverride"], defaultValue: false))
+        _mergeSprite = State(initialValue: Self.boolValue(info["mergeSprite"], defaultValue: false))
+        _wildArmsOffsetOverride = State(initialValue: Self.boolValue(info["hasWildArmsOffsetOverride"], defaultValue: false))
+        _wildArmsOffset = State(initialValue: Self.boolValue(info["wildArmsOffset"], defaultValue: false))
+        _textureOffsetXOverride = State(initialValue: Self.boolValue(info["hasTextureOffsetXOverride"], defaultValue: false))
+        _textureOffsetX = State(initialValue: Self.clampedTextureOffset(Self.intValue(info["textureOffsetX"], defaultValue: 0)))
+        _textureOffsetYOverride = State(initialValue: Self.boolValue(info["hasTextureOffsetYOverride"], defaultValue: false))
+        _textureOffsetY = State(initialValue: Self.clampedTextureOffset(Self.intValue(info["textureOffsetY"], defaultValue: 0)))
+        let hasSkipDrawStartOverride = Self.boolValue(info["hasSkipDrawStartOverride"], defaultValue: false)
+        let hasSkipDrawEndOverride = Self.boolValue(info["hasSkipDrawEndOverride"], defaultValue: false)
+        let initialSkipDrawStart = Self.clampedSkipDraw(Self.intValue(info["skipDrawStart"], defaultValue: 0))
+        let initialSkipDrawEnd = Self.normalizedSkipDrawEnd(
+            start: initialSkipDrawStart,
+            end: Self.intValue(info["skipDrawEnd"], defaultValue: 0),
+            startOverride: hasSkipDrawStartOverride,
+            endOverride: hasSkipDrawEndOverride
+        )
+        _skipDrawStartOverride = State(initialValue: hasSkipDrawStartOverride)
+        _skipDrawStart = State(initialValue: initialSkipDrawStart)
+        _skipDrawEndOverride = State(initialValue: hasSkipDrawEndOverride)
+        _skipDrawEnd = State(initialValue: initialSkipDrawEnd)
         _eeCoreType = State(initialValue: Self.intValue(info["eeCoreType"], defaultValue: 2))
         _mtvu = State(initialValue: Self.boolValue(info["mtvu"], defaultValue: false))
         _enableCheats = State(initialValue: Self.boolValue(info["enableCheats"], defaultValue: false))
@@ -1247,9 +1327,58 @@ struct PerGameSettingsPanel: View {
         _enableGameDBHardwareFixes = State(initialValue: Self.boolValue(info["enableGameDBHardwareFixes"], defaultValue: true))
     }
 
+    private var manualAdvancedHacksEnabled: Bool {
+        enabled && !enableGameDBHardwareFixes
+    }
+
+    private var skipDrawStartBinding: Binding<Int> {
+        Binding(
+            get: { skipDrawStart },
+            set: { newValue in
+                skipDrawStart = Self.clampedSkipDraw(newValue)
+                normalizeSkipDrawRangeIfNeeded()
+            }
+        )
+    }
+
+    private var skipDrawEndBinding: Binding<Int> {
+        Binding(
+            get: { skipDrawEnd },
+            set: { newValue in
+                skipDrawEnd = Self.normalizedSkipDrawEnd(
+                    start: skipDrawStart,
+                    end: newValue,
+                    startOverride: skipDrawStartOverride,
+                    endOverride: skipDrawEndOverride
+                )
+            }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: enabled ? "slider.horizontal.3" : "power")
+                            .font(.title3)
+                            .foregroundStyle(enabled ? Color.accentColor : Color.secondary)
+                            .frame(width: 32, height: 32)
+                            .background(Color.accentColor.opacity(enabled ? 0.14 : 0), in: Circle())
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(displayName)
+                                .font(.headline)
+                                .lineLimit(2)
+                            Text(settings.localized("Saved changes apply to this game only. Done leaves without saving."))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .padding(.vertical, 4)
+                }
+
                 Section {
                     Toggle(settings.localized("Use Per-Game Overrides"), isOn: $enabled)
                     Text(settings.localized("Overrides are saved for this game only and apply on the next boot/reset of this title."))
@@ -1270,7 +1399,7 @@ struct PerGameSettingsPanel: View {
 
                     Toggle("MTVU", isOn: $mtvu)
                         .disabled(!enabled)
-                    Text(settings.localized("MTVU can improve performance in some games, but may cause compatibility issues. Reset/relaunch after changing it."))
+                    Text(settings.localized("MTVU can improve performance and may help some visual issues, but can cause compatibility problems. Reset/relaunch after changing it."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1328,6 +1457,95 @@ struct PerGameSettingsPanel: View {
                     .disabled(!enabled)
                 }
 
+                Section(settings.localized("Advanced Upscaling Hacks")) {
+                    Text(settings.localized("Manual advanced hacks only apply when Use Per-Game Overrides is on and GameDB Graphics Fixes is off. Save, then reset or relaunch the game."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if enabled && enableGameDBHardwareFixes {
+                        Text(settings.localized("GameDB Graphics Fixes is on, so manual advanced hacks are saved but ignored until it is turned off for this game."))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    Picker(settings.localized("Trilinear Filtering"), selection: $trilinearFiltering) {
+                        ForEach(Self.trilinearFilteringOptions) { option in
+                            Text(settings.localized(option.title)).tag(option.id)
+                        }
+                    }
+                    .disabled(!enabled)
+
+                    if trilinearFiltering != Self.trilinearUseGlobalSentinel && trilinearFiltering != -1 {
+                        Text(settings.localized("Non-automatic trilinear filtering may break textures in some games."))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+
+                    Picker(settings.localized("Half-pixel Offset"), selection: $halfPixelOffset) {
+                        ForEach(Self.halfPixelOffsetOptions) { option in
+                            Text(settings.localized(option.title)).tag(option.id)
+                        }
+                    }
+                    .disabled(!manualAdvancedHacksEnabled)
+
+                    Picker(settings.localized("Round Sprite"), selection: $roundSprite) {
+                        ForEach(Self.roundSpriteOptions) { option in
+                            Text(settings.localized(option.title)).tag(option.id)
+                        }
+                    }
+                    .disabled(!manualAdvancedHacksEnabled)
+
+                    Toggle(settings.localized("Override Align Sprite"), isOn: $alignSpriteOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if alignSpriteOverride {
+                        Toggle(settings.localized("Align Sprite"), isOn: $alignSprite)
+                            .disabled(!manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Merge Sprite"), isOn: $mergeSpriteOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if mergeSpriteOverride {
+                        Toggle(settings.localized("Merge Sprite"), isOn: $mergeSprite)
+                            .disabled(!manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Wild Arms Offset"), isOn: $wildArmsOffsetOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if wildArmsOffsetOverride {
+                        Toggle(settings.localized("Wild Arms Offset"), isOn: $wildArmsOffset)
+                            .disabled(!manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Texture Offset X"), isOn: $textureOffsetXOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if textureOffsetXOverride {
+                        ClampedIntField(title: settings.localized("Texture Offset X"), value: $textureOffsetX, range: SettingsStore.textureOffsetRange, isEnabled: manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Texture Offset Y"), isOn: $textureOffsetYOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if textureOffsetYOverride {
+                        ClampedIntField(title: settings.localized("Texture Offset Y"), value: $textureOffsetY, range: SettingsStore.textureOffsetRange, isEnabled: manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Skipdraw Start"), isOn: $skipDrawStartOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if skipDrawStartOverride {
+                        ClampedIntField(title: settings.localized("Skipdraw Start"), value: skipDrawStartBinding, range: SettingsStore.skipDrawRange, isEnabled: manualAdvancedHacksEnabled)
+                    }
+
+                    Toggle(settings.localized("Override Skipdraw End"), isOn: $skipDrawEndOverride)
+                        .disabled(!manualAdvancedHacksEnabled)
+                    if skipDrawEndOverride {
+                        ClampedIntField(title: settings.localized("Skipdraw End"), value: skipDrawEndBinding, range: SettingsStore.skipDrawRange, isEnabled: manualAdvancedHacksEnabled)
+                    }
+                    if skipDrawStartOverride || skipDrawEndOverride {
+                        Text(settings.localized("For Skipdraw 1, use Start 1 and End 1. Changes apply after reset/relaunch."))
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                    }
+                }
+
                 Section(settings.localized("Patches & Cheats")) {
                     Toggle(settings.localized("Enable PNACH Cheats"), isOn: $enableCheats)
                         .disabled(!enabled)
@@ -1350,7 +1568,10 @@ struct PerGameSettingsPanel: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(Color(.systemGroupedBackground))
             .navigationTitle(settings.localized("Per-Game Settings"))
+            .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button(settings.localized("Done")) {
@@ -1368,26 +1589,121 @@ struct PerGameSettingsPanel: View {
                 }
             }
         }
+        .background(Color(.systemGroupedBackground))
+    }
+
+    private var displayName: String {
+        let name = ((game.name as NSString).deletingPathExtension as String).trimmingCharacters(in: .whitespacesAndNewlines)
+        let serial = game.metadata["serial"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+        if name.isEmpty {
+            return serial.isEmpty ? settings.localized("Current Game") : serial
+        }
+        if serial.isEmpty {
+            return name
+        }
+        return "\(name) - \(serial)"
     }
 
     private func save() {
-        ARMSX2Bridge.setGameSettings(
-            forISO: game.name,
-            enabled: enabled,
-            upscaleMultiplier: upscaleMultiplier,
-            aspectRatio: aspectRatio,
-            textureFiltering: Int32(textureFiltering),
-            hardwareMipmapping: hardwareMipmapping,
-            blendingAccuracy: Int32(blendingAccuracy),
-            interlaceMode: Int32(interlaceMode),
-            eeCoreType: Int32(eeCoreType),
-            mtvu: mtvu,
-            enableCheats: enableCheats,
-            enablePatches: enablePatches,
-            enableGameFixes: enableGameFixes,
-            enableGameDBHardwareFixes: enableGameDBHardwareFixes
-        )
+        let normalizedSkipDraw = normalizedSkipDrawValues()
+        if skipDrawStart != normalizedSkipDraw.start {
+            skipDrawStart = normalizedSkipDraw.start
+        }
+        if skipDrawEnd != normalizedSkipDraw.end {
+            skipDrawEnd = normalizedSkipDraw.end
+        }
+
+        if savesToRunningGame {
+            ARMSX2Bridge.setGameSettingsForCurrentGame(
+                enabled: enabled,
+                upscaleMultiplier: upscaleMultiplier,
+                aspectRatio: aspectRatio,
+                textureFiltering: Int32(textureFiltering),
+                hardwareMipmapping: hardwareMipmapping,
+                blendingAccuracy: Int32(blendingAccuracy),
+                interlaceMode: Int32(interlaceMode),
+                trilinearFiltering: Int32(trilinearFiltering),
+                halfPixelOffset: Int32(halfPixelOffset),
+                roundSprite: Int32(roundSprite),
+                alignSpriteOverride: alignSpriteOverride,
+                alignSprite: alignSprite,
+                mergeSpriteOverride: mergeSpriteOverride,
+                mergeSprite: mergeSprite,
+                wildArmsOffsetOverride: wildArmsOffsetOverride,
+                wildArmsOffset: wildArmsOffset,
+                textureOffsetXOverride: textureOffsetXOverride,
+                textureOffsetX: Int32(textureOffsetX),
+                textureOffsetYOverride: textureOffsetYOverride,
+                textureOffsetY: Int32(textureOffsetY),
+                skipDrawStartOverride: skipDrawStartOverride,
+                skipDrawStart: Int32(normalizedSkipDraw.start),
+                skipDrawEndOverride: skipDrawEndOverride,
+                skipDrawEnd: Int32(normalizedSkipDraw.end),
+                eeCoreType: Int32(eeCoreType),
+                mtvu: mtvu,
+                enableCheats: enableCheats,
+                enablePatches: enablePatches,
+                enableGameFixes: enableGameFixes,
+                enableGameDBHardwareFixes: enableGameDBHardwareFixes
+            )
+        } else {
+            ARMSX2Bridge.setGameSettings(
+                forISO: game.name,
+                enabled: enabled,
+                upscaleMultiplier: upscaleMultiplier,
+                aspectRatio: aspectRatio,
+                textureFiltering: Int32(textureFiltering),
+                hardwareMipmapping: hardwareMipmapping,
+                blendingAccuracy: Int32(blendingAccuracy),
+                interlaceMode: Int32(interlaceMode),
+                trilinearFiltering: Int32(trilinearFiltering),
+                halfPixelOffset: Int32(halfPixelOffset),
+                roundSprite: Int32(roundSprite),
+                alignSpriteOverride: alignSpriteOverride,
+                alignSprite: alignSprite,
+                mergeSpriteOverride: mergeSpriteOverride,
+                mergeSprite: mergeSprite,
+                wildArmsOffsetOverride: wildArmsOffsetOverride,
+                wildArmsOffset: wildArmsOffset,
+                textureOffsetXOverride: textureOffsetXOverride,
+                textureOffsetX: Int32(textureOffsetX),
+                textureOffsetYOverride: textureOffsetYOverride,
+                textureOffsetY: Int32(textureOffsetY),
+                skipDrawStartOverride: skipDrawStartOverride,
+                skipDrawStart: Int32(normalizedSkipDraw.start),
+                skipDrawEndOverride: skipDrawEndOverride,
+                skipDrawEnd: Int32(normalizedSkipDraw.end),
+                eeCoreType: Int32(eeCoreType),
+                mtvu: mtvu,
+                enableCheats: enableCheats,
+                enablePatches: enablePatches,
+                enableGameFixes: enableGameFixes,
+                enableGameDBHardwareFixes: enableGameDBHardwareFixes
+            )
+        }
         statusMessage = enabled ? "\(settings.localized("Saved for")) \(game.metadata["serial"] ?? game.name). \(settings.localized("Reset or relaunch the game to apply."))" : settings.localized("Per-game overrides cleared.")
+    }
+
+    private func normalizeSkipDrawRangeIfNeeded() {
+        let normalized = normalizedSkipDrawValues()
+        if skipDrawStart != normalized.start {
+            skipDrawStart = normalized.start
+        }
+        if skipDrawEnd != normalized.end {
+            skipDrawEnd = normalized.end
+        }
+    }
+
+    private func normalizedSkipDrawValues() -> (start: Int, end: Int) {
+        let start = Self.clampedSkipDraw(skipDrawStart)
+        let end = Self.normalizedSkipDrawEnd(
+            start: start,
+            end: skipDrawEnd,
+            startOverride: skipDrawStartOverride,
+            endOverride: skipDrawEndOverride
+        )
+        return (start, end)
     }
 
     private static func normalizedAspect(_ value: String?) -> String {
@@ -1421,6 +1737,22 @@ struct PerGameSettingsPanel: View {
             return number.floatValue
         }
         return defaultValue
+    }
+
+    private static func clampedTextureOffset(_ offset: Int) -> Int {
+        min(max(offset, SettingsStore.textureOffsetRange.lowerBound), SettingsStore.textureOffsetRange.upperBound)
+    }
+
+    private static func clampedSkipDraw(_ value: Int) -> Int {
+        min(max(value, SettingsStore.skipDrawRange.lowerBound), SettingsStore.skipDrawRange.upperBound)
+    }
+
+    private static func normalizedSkipDrawEnd(start: Int, end: Int, startOverride: Bool, endOverride: Bool) -> Int {
+        let clampedEnd = clampedSkipDraw(end)
+        guard startOverride && endOverride else {
+            return clampedEnd
+        }
+        return SettingsStore.normalizedSkipDrawEnd(start: start, end: clampedEnd)
     }
 }
 

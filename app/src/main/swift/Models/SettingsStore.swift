@@ -27,6 +27,8 @@ final class SettingsStore: @unchecked Sendable {
     static let minTargetFPS: Float = 15.0
     static let maxTargetFPS: Float = 120.0
     static let defaultTargetFPS: Float = 60.0
+    static let textureOffsetRange = -4096...4096
+    static let skipDrawRange = 0...5000
 
     @ObservationIgnored private var suppressINIWrites = false
 
@@ -158,6 +160,64 @@ final class SettingsStore: @unchecked Sendable {
     }
     var dithering: Int {
         didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "dithering_ps2", value: Int32(dithering)) }
+    }
+    var trilinearFiltering: Int {
+        didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "TriFilter", value: Int32(trilinearFiltering)) }
+    }
+    var halfPixelOffset: Int {
+        didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_HalfPixelOffset", value: Int32(halfPixelOffset)) }
+    }
+    var roundSprite: Int {
+        didSet { ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_round_sprite_offset", value: Int32(roundSprite)) }
+    }
+    var alignSprite: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "UserHacks_align_sprite_X", value: alignSprite) }
+    }
+    var mergeSprite: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "UserHacks_merge_pp_sprite", value: mergeSprite) }
+    }
+    var wildArmsOffset: Bool {
+        didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "UserHacks_ForceEvenSpritePosition", value: wildArmsOffset) }
+    }
+    var textureOffsetX: Int {
+        didSet {
+            let normalized = Self.clampedTextureOffset(textureOffsetX)
+            guard textureOffsetX == normalized else {
+                textureOffsetX = normalized
+                return
+            }
+            ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_TCOffsetX", value: Int32(textureOffsetX))
+        }
+    }
+    var textureOffsetY: Int {
+        didSet {
+            let normalized = Self.clampedTextureOffset(textureOffsetY)
+            guard textureOffsetY == normalized else {
+                textureOffsetY = normalized
+                return
+            }
+            ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_TCOffsetY", value: Int32(textureOffsetY))
+        }
+    }
+    var skipDrawStart: Int {
+        didSet {
+            let normalized = Self.clampedSkipDraw(skipDrawStart)
+            guard skipDrawStart == normalized else {
+                skipDrawStart = normalized
+                return
+            }
+            ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_Start", value: Int32(skipDrawStart))
+        }
+    }
+    var skipDrawEnd: Int {
+        didSet {
+            let normalized = Self.clampedSkipDraw(skipDrawEnd)
+            guard skipDrawEnd == normalized else {
+                skipDrawEnd = normalized
+                return
+            }
+            ARMSX2Bridge.setINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_End", value: Int32(skipDrawEnd))
+        }
     }
     var loadTextureReplacements: Bool {
         didSet { ARMSX2Bridge.setINIBool("EmuCore/GS", key: "LoadTextureReplacements", value: loadTextureReplacements) }
@@ -414,6 +474,20 @@ final class SettingsStore: @unchecked Sendable {
         aspectRatio = Self.aspectRatioValue(from: ARMSX2Bridge.getINIString("EmuCore/GS", key: "AspectRatio", defaultValue: "Auto 4:3/3:2"))
         blendingAccuracy = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "accurate_blending_unit", defaultValue: 1))
         dithering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "dithering_ps2", defaultValue: 2))
+        trilinearFiltering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "TriFilter", defaultValue: -1))
+        halfPixelOffset = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_HalfPixelOffset", defaultValue: 0))
+        roundSprite = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_round_sprite_offset", defaultValue: 0))
+        alignSprite = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_align_sprite_X", defaultValue: false)
+        mergeSprite = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_merge_pp_sprite", defaultValue: false)
+        wildArmsOffset = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_ForceEvenSpritePosition", defaultValue: false)
+        textureOffsetX = Self.clampedTextureOffset(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_TCOffsetX", defaultValue: 0)))
+        textureOffsetY = Self.clampedTextureOffset(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_TCOffsetY", defaultValue: 0)))
+        let loadedSkipDrawStart = Self.clampedSkipDraw(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_Start", defaultValue: 0)))
+        skipDrawStart = loadedSkipDrawStart
+        skipDrawEnd = Self.normalizedSkipDrawEnd(
+            start: loadedSkipDrawStart,
+            end: Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_End", defaultValue: 0))
+        )
         loadTextureReplacements = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "LoadTextureReplacements", defaultValue: false)
         loadTextureReplacementsAsync = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "LoadTextureReplacementsAsync", defaultValue: true)
         precacheTextureReplacements = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "PrecacheTextureReplacements", defaultValue: false)
@@ -511,6 +585,20 @@ final class SettingsStore: @unchecked Sendable {
         aspectRatio = Self.aspectRatioValue(from: ARMSX2Bridge.getINIString("EmuCore/GS", key: "AspectRatio", defaultValue: "Auto 4:3/3:2"))
         blendingAccuracy = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "accurate_blending_unit", defaultValue: 1))
         dithering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "dithering_ps2", defaultValue: 2))
+        trilinearFiltering = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "TriFilter", defaultValue: -1))
+        halfPixelOffset = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_HalfPixelOffset", defaultValue: 0))
+        roundSprite = Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_round_sprite_offset", defaultValue: 0))
+        alignSprite = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_align_sprite_X", defaultValue: false)
+        mergeSprite = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_merge_pp_sprite", defaultValue: false)
+        wildArmsOffset = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "UserHacks_ForceEvenSpritePosition", defaultValue: false)
+        textureOffsetX = Self.clampedTextureOffset(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_TCOffsetX", defaultValue: 0)))
+        textureOffsetY = Self.clampedTextureOffset(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_TCOffsetY", defaultValue: 0)))
+        let loadedSkipDrawStart = Self.clampedSkipDraw(Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_Start", defaultValue: 0)))
+        skipDrawStart = loadedSkipDrawStart
+        skipDrawEnd = Self.normalizedSkipDrawEnd(
+            start: loadedSkipDrawStart,
+            end: Int(ARMSX2Bridge.getINIInt("EmuCore/GS", key: "UserHacks_SkipDraw_End", defaultValue: 0))
+        )
         loadTextureReplacements = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "LoadTextureReplacements", defaultValue: false)
         loadTextureReplacementsAsync = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "LoadTextureReplacementsAsync", defaultValue: true)
         precacheTextureReplacements = ARMSX2Bridge.getINIBool("EmuCore/GS", key: "PrecacheTextureReplacements", defaultValue: false)
@@ -572,6 +660,20 @@ final class SettingsStore: @unchecked Sendable {
     private static func clampedAnalogStickScale(_ scale: Float) -> Float {
         guard scale.isFinite else { return 1.0 }
         return min(max(scale, 0.8), 1.6)
+    }
+
+    private static func clampedTextureOffset(_ offset: Int) -> Int {
+        min(max(offset, textureOffsetRange.lowerBound), textureOffsetRange.upperBound)
+    }
+
+    private static func clampedSkipDraw(_ value: Int) -> Int {
+        min(max(value, skipDrawRange.lowerBound), skipDrawRange.upperBound)
+    }
+
+    static func normalizedSkipDrawEnd(start: Int, end: Int) -> Int {
+        let clampedStart = clampedSkipDraw(start)
+        let clampedEnd = clampedSkipDraw(end)
+        return clampedStart > 0 && clampedEnd < clampedStart ? clampedStart : clampedEnd
     }
 
     private static func targetFPS(fromNominalScalar scalar: Float, baseFramerate: Float) -> Float {
@@ -701,6 +803,16 @@ final class SettingsStore: @unchecked Sendable {
         aspectRatio = 1         // Auto 4:3/3:2
         blendingAccuracy = 1    // Basic
         dithering = 2           // Scaled
+        trilinearFiltering = -1 // Automatic
+        halfPixelOffset = 0
+        roundSprite = 0
+        alignSprite = false
+        mergeSprite = false
+        wildArmsOffset = false
+        textureOffsetX = 0
+        textureOffsetY = 0
+        skipDrawStart = 0
+        skipDrawEnd = 0
         // Texture pack and dump toggles are intentionally preserved.
     }
 }

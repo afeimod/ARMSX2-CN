@@ -34,6 +34,7 @@ extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
 #include <cstring>
 #include <functional>
 #include <future>
+#include <limits>
 #include <optional>
 #include <string_view>
 #include <vector>
@@ -65,6 +66,13 @@ static NSString* const ARMSX2CompatibilityProfileMoves = @"moves";
 static NSString* const ARMSX2CompatibilityProfileIntegerALU = @"integeralu";
 static NSString* const ARMSX2CompatibilityProfileBranches = @"branches";
 static NSString* const ARMSX2CompatibilityProfileCustom = @"custom";
+static constexpr int ARMSX2UseGlobalIntSentinel = -1;
+static constexpr int ARMSX2TriFilterUseGlobalSentinel = std::numeric_limits<int>::min();
+
+static int ARMSX2ClampInt(int value, int minValue, int maxValue)
+{
+    return std::min(std::max(value, minValue), maxValue);
+}
 
 static NSString* ARMSX2NSStringFromStdString(const std::string& value);
 
@@ -974,6 +982,288 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
     }
 }
 
+// Builds the per-game settings dictionary seeded with the current global values.
+static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
+{
+    const float globalUpscale = g_p44_settings_interface ? g_p44_settings_interface->GetFloatValue("EmuCore/GS", "upscale_multiplier", 1.0f) : 1.0f;
+    const std::string globalAspect = g_p44_settings_interface ? g_p44_settings_interface->GetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2") : std::string("Auto 4:3/3:2");
+    const int globalTextureFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "filter", 2) : 2;
+    const bool globalHardwareMipmapping = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "hw_mipmap", true) : true;
+    const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
+    const int globalInterlaceMode = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "deinterlace_mode", 7) : 7;
+    const int globalTrilinearFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "TriFilter", -1) : -1;
+    const int globalHalfPixelOffset = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_HalfPixelOffset", 0) : 0;
+    const int globalRoundSprite = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_round_sprite_offset", 0) : 0;
+    const bool globalAlignSprite = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks_align_sprite_X", false) : false;
+    const bool globalMergeSprite = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks_merge_pp_sprite", false) : false;
+    const bool globalWildArmsOffset = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition", false) : false;
+    const int globalTextureOffsetX = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_TCOffsetX", 0) : 0;
+    const int globalTextureOffsetY = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_TCOffsetY", 0) : 0;
+    const int globalSkipDrawStart = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_SkipDraw_Start", 0) : 0;
+    const int globalSkipDrawEnd = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "UserHacks_SkipDraw_End", 0) : 0;
+    const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
+    const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
+    const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
+    const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
+    const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
+    const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", false) : false;
+    return [@{
+        @"enabled": @NO,
+        @"path": @"",
+        @"serial": @"",
+        @"crc": @"",
+        @"upscaleMultiplier": @(globalUpscale),
+        @"aspectRatio": ARMSX2NSStringFromStdString(globalAspect),
+        @"textureFiltering": @(globalTextureFiltering),
+        @"hardwareMipmapping": @(globalHardwareMipmapping),
+        @"blendingAccuracy": @(globalBlendingAccuracy),
+        @"interlaceMode": @(globalInterlaceMode),
+        @"trilinearFiltering": @(globalTrilinearFiltering),
+        @"hasTrilinearFilteringOverride": @NO,
+        @"halfPixelOffset": @(globalHalfPixelOffset),
+        @"hasHalfPixelOffsetOverride": @NO,
+        @"roundSprite": @(globalRoundSprite),
+        @"hasRoundSpriteOverride": @NO,
+        @"alignSprite": @(globalAlignSprite),
+        @"hasAlignSpriteOverride": @NO,
+        @"mergeSprite": @(globalMergeSprite),
+        @"hasMergeSpriteOverride": @NO,
+        @"wildArmsOffset": @(globalWildArmsOffset),
+        @"hasWildArmsOffsetOverride": @NO,
+        @"textureOffsetX": @(ARMSX2ClampInt(globalTextureOffsetX, -4096, 4096)),
+        @"hasTextureOffsetXOverride": @NO,
+        @"textureOffsetY": @(ARMSX2ClampInt(globalTextureOffsetY, -4096, 4096)),
+        @"hasTextureOffsetYOverride": @NO,
+        @"skipDrawStart": @(ARMSX2ClampInt(globalSkipDrawStart, 0, 5000)),
+        @"hasSkipDrawStartOverride": @NO,
+        @"skipDrawEnd": @(ARMSX2ClampInt(globalSkipDrawEnd, 0, 5000)),
+        @"hasSkipDrawEndOverride": @NO,
+        @"enableCheats": @(globalEnableCheats),
+        @"enablePatches": @(globalEnablePatches),
+        @"enableGameFixes": @(globalEnableGameFixes),
+        @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
+        @"eeCoreType": @(globalEECoreType),
+        @"mtvu": @(globalMTVU),
+    } mutableCopy];
+}
+
+// Overlays per-game INI overrides for the given serial/crc onto a globals-seeded result.
+// Sourcing serial/crc from the caller avoids re-scanning the disc image (which is unsafe
+// while the VM is actively reading the same disc).
+static void ARMSX2ApplyPerGameSettingsOverrides(NSMutableDictionary<NSString*, id>* result, const std::string& serial, u32 crc)
+{
+    const std::string settingsPath = VMManager::GetGameSettingsPath(serial, crc);
+    result[@"path"] = ARMSX2NSStringFromStdString(settingsPath);
+    result[@"serial"] = ARMSX2NSStringFromStdString(serial);
+    result[@"crc"] = [NSString stringWithFormat:@"%08X", crc];
+
+    INISettingsInterface si(settingsPath);
+    if (!si.Load())
+        return;
+
+    const bool hasKnownOverride =
+        si.GetBoolValue("ARMSX2iOS/PerGame", "Enabled", false) ||
+        si.ContainsValue("EmuCore/GS", "upscale_multiplier") ||
+        si.ContainsValue("EmuCore/GS", "AspectRatio") ||
+        si.ContainsValue("EmuCore/GS", "filter") ||
+        si.ContainsValue("EmuCore/GS", "hw_mipmap") ||
+        si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
+        si.ContainsValue("EmuCore/GS", "deinterlace_mode") ||
+        si.ContainsValue("EmuCore/GS", "TriFilter") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_HalfPixelOffset") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_round_sprite_offset") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_align_sprite_X") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_merge_pp_sprite") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_TCOffsetX") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_TCOffsetY") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_SkipDraw_Start") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks_SkipDraw_End") ||
+        si.ContainsValue("EmuCore", "EnableCheats") ||
+        si.ContainsValue("EmuCore", "EnablePatches") ||
+        si.ContainsValue("EmuCore", "EnableGameFixes") ||
+        si.ContainsValue("EmuCore/GS", "UserHacks") ||
+        si.ContainsValue("EmuCore/CPU", "CoreType") ||
+        si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec") ||
+        si.ContainsValue("EmuCore/Speedhacks", "vuThread");
+
+    result[@"enabled"] = @(hasKnownOverride);
+    NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
+    result[@"upscaleMultiplier"] = @(si.GetFloatValue("EmuCore/GS", "upscale_multiplier", [result[@"upscaleMultiplier"] floatValue]));
+    result[@"aspectRatio"] = ARMSX2NSStringFromStdString(si.GetStringValue("EmuCore/GS", "AspectRatio", currentAspect.UTF8String));
+    result[@"textureFiltering"] = @(si.GetIntValue("EmuCore/GS", "filter", [result[@"textureFiltering"] intValue]));
+    result[@"hardwareMipmapping"] = @(si.GetBoolValue("EmuCore/GS", "hw_mipmap", [result[@"hardwareMipmapping"] boolValue]));
+    result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
+    result[@"interlaceMode"] = @(si.GetIntValue("EmuCore/GS", "deinterlace_mode", [result[@"interlaceMode"] intValue]));
+    result[@"hasTrilinearFilteringOverride"] = @(si.ContainsValue("EmuCore/GS", "TriFilter"));
+    result[@"trilinearFiltering"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "TriFilter", [result[@"trilinearFiltering"] intValue]), -1, 2));
+    result[@"hasHalfPixelOffsetOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_HalfPixelOffset"));
+    result[@"halfPixelOffset"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_HalfPixelOffset", [result[@"halfPixelOffset"] intValue]), 0, 5));
+    result[@"hasRoundSpriteOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_round_sprite_offset"));
+    result[@"roundSprite"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_round_sprite_offset", [result[@"roundSprite"] intValue]), 0, 2));
+    result[@"hasAlignSpriteOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_align_sprite_X"));
+    result[@"alignSprite"] = @(si.GetBoolValue("EmuCore/GS", "UserHacks_align_sprite_X", [result[@"alignSprite"] boolValue]));
+    result[@"hasMergeSpriteOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_merge_pp_sprite"));
+    result[@"mergeSprite"] = @(si.GetBoolValue("EmuCore/GS", "UserHacks_merge_pp_sprite", [result[@"mergeSprite"] boolValue]));
+    result[@"hasWildArmsOffsetOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition"));
+    result[@"wildArmsOffset"] = @(si.GetBoolValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition", [result[@"wildArmsOffset"] boolValue]));
+    result[@"hasTextureOffsetXOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_TCOffsetX"));
+    result[@"textureOffsetX"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_TCOffsetX", [result[@"textureOffsetX"] intValue]), -4096, 4096));
+    result[@"hasTextureOffsetYOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_TCOffsetY"));
+    result[@"textureOffsetY"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_TCOffsetY", [result[@"textureOffsetY"] intValue]), -4096, 4096));
+    result[@"hasSkipDrawStartOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_SkipDraw_Start"));
+    result[@"skipDrawStart"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_SkipDraw_Start", [result[@"skipDrawStart"] intValue]), 0, 5000));
+    result[@"hasSkipDrawEndOverride"] = @(si.ContainsValue("EmuCore/GS", "UserHacks_SkipDraw_End"));
+    result[@"skipDrawEnd"] = @(ARMSX2ClampInt(si.GetIntValue("EmuCore/GS", "UserHacks_SkipDraw_End", [result[@"skipDrawEnd"] intValue]), 0, 5000));
+    result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
+    result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
+    result[@"enableGameFixes"] = @(si.GetBoolValue("EmuCore", "EnableGameFixes", [result[@"enableGameFixes"] boolValue]));
+    result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
+    result[@"eeCoreType"] = @(si.GetIntValue("EmuCore/CPU", "CoreType", [result[@"eeCoreType"] intValue]));
+    result[@"mtvu"] = @(si.GetBoolValue("EmuCore/Speedhacks", "vuThread", [result[@"mtvu"] boolValue]));
+}
+
+static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
+                                                u32 crc,
+                                                BOOL enabled,
+                                                float upscaleMultiplier,
+                                                NSString* aspectRatio,
+                                                int textureFiltering,
+                                                BOOL hardwareMipmapping,
+                                                int blendingAccuracy,
+                                                int interlaceMode,
+                                                int trilinearFiltering,
+                                                int halfPixelOffset,
+                                                int roundSprite,
+                                                BOOL alignSpriteOverride,
+                                                BOOL alignSprite,
+                                                BOOL mergeSpriteOverride,
+                                                BOOL mergeSprite,
+                                                BOOL wildArmsOffsetOverride,
+                                                BOOL wildArmsOffset,
+                                                BOOL textureOffsetXOverride,
+                                                int textureOffsetX,
+                                                BOOL textureOffsetYOverride,
+                                                int textureOffsetY,
+                                                BOOL skipDrawStartOverride,
+                                                int skipDrawStart,
+                                                BOOL skipDrawEndOverride,
+                                                int skipDrawEnd,
+                                                int eeCoreType,
+                                                BOOL mtvu,
+                                                BOOL enableCheats,
+                                                BOOL enablePatches,
+                                                BOOL enableGameFixes,
+                                                BOOL enableGameDBHardwareFixes)
+{
+    FileSystem::CreateDirectoryPath(EmuFolders::GameSettings.c_str(), false);
+
+    const std::string settingsPath = VMManager::GetGameSettingsPath(serial, crc);
+    INISettingsInterface si(settingsPath);
+    si.Load();
+
+    if (enabled) {
+        si.SetBoolValue("ARMSX2iOS/PerGame", "Enabled", true);
+        si.SetFloatValue("EmuCore/GS", "upscale_multiplier", upscaleMultiplier);
+        si.SetStringValue("EmuCore/GS", "AspectRatio", aspectRatio.UTF8String ?: "Auto 4:3/3:2");
+        si.SetIntValue("EmuCore/GS", "filter", textureFiltering);
+        si.SetBoolValue("EmuCore/GS", "hw_mipmap", hardwareMipmapping);
+        si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
+        si.SetIntValue("EmuCore/GS", "deinterlace_mode", interlaceMode);
+        if (trilinearFiltering == ARMSX2TriFilterUseGlobalSentinel)
+            si.DeleteValue("EmuCore/GS", "TriFilter");
+        else
+            si.SetIntValue("EmuCore/GS", "TriFilter", ARMSX2ClampInt(trilinearFiltering, -1, 2));
+
+        if (halfPixelOffset == ARMSX2UseGlobalIntSentinel)
+            si.DeleteValue("EmuCore/GS", "UserHacks_HalfPixelOffset");
+        else
+            si.SetIntValue("EmuCore/GS", "UserHacks_HalfPixelOffset", ARMSX2ClampInt(halfPixelOffset, 0, 5));
+
+        if (roundSprite == ARMSX2UseGlobalIntSentinel)
+            si.DeleteValue("EmuCore/GS", "UserHacks_round_sprite_offset");
+        else
+            si.SetIntValue("EmuCore/GS", "UserHacks_round_sprite_offset", ARMSX2ClampInt(roundSprite, 0, 2));
+
+        if (alignSpriteOverride)
+            si.SetBoolValue("EmuCore/GS", "UserHacks_align_sprite_X", alignSprite);
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_align_sprite_X");
+
+        if (mergeSpriteOverride)
+            si.SetBoolValue("EmuCore/GS", "UserHacks_merge_pp_sprite", mergeSprite);
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_merge_pp_sprite");
+
+        if (wildArmsOffsetOverride)
+            si.SetBoolValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition", wildArmsOffset);
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition");
+
+        if (textureOffsetXOverride)
+            si.SetIntValue("EmuCore/GS", "UserHacks_TCOffsetX", ARMSX2ClampInt(textureOffsetX, -4096, 4096));
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_TCOffsetX");
+
+        if (textureOffsetYOverride)
+            si.SetIntValue("EmuCore/GS", "UserHacks_TCOffsetY", ARMSX2ClampInt(textureOffsetY, -4096, 4096));
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_TCOffsetY");
+
+        if (skipDrawStartOverride)
+            si.SetIntValue("EmuCore/GS", "UserHacks_SkipDraw_Start", ARMSX2ClampInt(skipDrawStart, 0, 5000));
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_SkipDraw_Start");
+
+        if (skipDrawEndOverride)
+            si.SetIntValue("EmuCore/GS", "UserHacks_SkipDraw_End", ARMSX2ClampInt(skipDrawEnd, 0, 5000));
+        else
+            si.DeleteValue("EmuCore/GS", "UserHacks_SkipDraw_End");
+
+        si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
+        si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
+        si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
+        si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
+        si.SetIntValue("EmuCore/CPU", "CoreType", eeCoreType);
+        si.SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", eeCoreType == 2);
+        si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
+    } else {
+        si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
+        si.DeleteValue("EmuCore/GS", "upscale_multiplier");
+        si.DeleteValue("EmuCore/GS", "AspectRatio");
+        si.DeleteValue("EmuCore/GS", "filter");
+        si.DeleteValue("EmuCore/GS", "hw_mipmap");
+        si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
+        si.DeleteValue("EmuCore/GS", "deinterlace_mode");
+        si.DeleteValue("EmuCore/GS", "TriFilter");
+        si.DeleteValue("EmuCore/GS", "UserHacks_HalfPixelOffset");
+        si.DeleteValue("EmuCore/GS", "UserHacks_round_sprite_offset");
+        si.DeleteValue("EmuCore/GS", "UserHacks_align_sprite_X");
+        si.DeleteValue("EmuCore/GS", "UserHacks_merge_pp_sprite");
+        si.DeleteValue("EmuCore/GS", "UserHacks_ForceEvenSpritePosition");
+        si.DeleteValue("EmuCore/GS", "UserHacks_TCOffsetX");
+        si.DeleteValue("EmuCore/GS", "UserHacks_TCOffsetY");
+        si.DeleteValue("EmuCore/GS", "UserHacks_SkipDraw_Start");
+        si.DeleteValue("EmuCore/GS", "UserHacks_SkipDraw_End");
+        si.DeleteValue("EmuCore", "EnableCheats");
+        si.DeleteValue("EmuCore", "EnablePatches");
+        si.DeleteValue("EmuCore", "EnableGameFixes");
+        si.DeleteValue("EmuCore/GS", "UserHacks");
+        si.DeleteValue("EmuCore/CPU", "CoreType");
+        si.DeleteValue("EmuCore/CPU", "UseArm64Dynarec");
+        si.DeleteValue("EmuCore/Speedhacks", "vuThread");
+        si.RemoveEmptySections();
+    }
+
+    Error error;
+    const bool saved = si.Save(&error);
+    NSLog(@"[ARMSX2Bridge] Game settings %@ serial=%@ crc=%08X path=%@ result=%d",
+          enabled ? @"saved" : @"cleared", ARMSX2NSStringFromStdString(serial),
+          crc, ARMSX2NSStringFromStdString(settingsPath), saved ? 1 : 0);
+    if (!saved)
+        NSLog(@"[ARMSX2Bridge] Game settings save error: %@", ARMSX2NSStringFromStdString(error.GetDescription()));
+}
+
 @implementation ARMSX2Bridge
 
 + (UIView *)gameRenderView {
@@ -1334,83 +1624,33 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
 }
 
 + (nonnull NSDictionary<NSString *, id> *)gameSettingsForISO:(nonnull NSString *)isoName {
+    NSMutableDictionary<NSString*, id>* result = ARMSX2BuildGlobalGameSettingsResult();
+
     GameList::Entry entry;
     NSString* resolvedPath = nil;
-    const float globalUpscale = g_p44_settings_interface ? g_p44_settings_interface->GetFloatValue("EmuCore/GS", "upscale_multiplier", 1.0f) : 1.0f;
-    const std::string globalAspect = g_p44_settings_interface ? g_p44_settings_interface->GetStringValue("EmuCore/GS", "AspectRatio", "Auto 4:3/3:2") : std::string("Auto 4:3/3:2");
-    const int globalTextureFiltering = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "filter", 2) : 2;
-    const bool globalHardwareMipmapping = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/GS", "hw_mipmap", true) : true;
-    const int globalBlendingAccuracy = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "accurate_blending_unit", 1) : 1;
-    const int globalInterlaceMode = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/GS", "deinterlace_mode", 7) : 7;
-    const bool globalEnableCheats = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableCheats", false) : false;
-    const bool globalEnablePatches = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnablePatches", true) : true;
-    const bool globalEnableGameFixes = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore", "EnableGameFixes", true) : true;
-    const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
-    const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
-    const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", false) : false;
-    NSMutableDictionary<NSString*, id>* result = [@{
-        @"enabled": @NO,
-        @"path": @"",
-        @"serial": @"",
-        @"crc": @"",
-        @"upscaleMultiplier": @(globalUpscale),
-        @"aspectRatio": ARMSX2NSStringFromStdString(globalAspect),
-        @"textureFiltering": @(globalTextureFiltering),
-        @"hardwareMipmapping": @(globalHardwareMipmapping),
-        @"blendingAccuracy": @(globalBlendingAccuracy),
-        @"interlaceMode": @(globalInterlaceMode),
-        @"enableCheats": @(globalEnableCheats),
-        @"enablePatches": @(globalEnablePatches),
-        @"enableGameFixes": @(globalEnableGameFixes),
-        @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
-        @"eeCoreType": @(globalEECoreType),
-        @"mtvu": @(globalMTVU),
-    } mutableCopy];
-
     if (!ARMSX2PopulateGameListEntryForISO(isoName, &entry, &resolvedPath) || entry.crc == 0) {
         NSLog(@"[ARMSX2Bridge] Game settings unavailable for %@ path=%@", isoName, resolvedPath ?: @"");
         return result;
     }
 
-    const std::string settingsPath = VMManager::GetGameSettingsPath(entry.serial, entry.crc);
-    result[@"path"] = ARMSX2NSStringFromStdString(settingsPath);
-    result[@"serial"] = ARMSX2NSStringFromStdString(entry.serial);
-    result[@"crc"] = [NSString stringWithFormat:@"%08X", entry.crc];
+    ARMSX2ApplyPerGameSettingsOverrides(result, entry.serial, entry.crc);
+    return result;
+}
 
-    INISettingsInterface si(settingsPath);
-    if (!si.Load())
+// VM-safe per-game settings for the running title. Reads the serial/crc the VM already
+// holds in memory instead of re-scanning the disc image, which is what previously
+// disturbed audio/loading when the runtime panel was opened over an active game.
++ (nullable NSDictionary<NSString *, id> *)gameSettingsForCurrentGame {
+    if (!VMManager::HasValidVM())
+        return nil;
+
+    NSMutableDictionary<NSString*, id>* result = ARMSX2BuildGlobalGameSettingsResult();
+    const std::string serial = VMManager::GetDiscSerial();
+    const u32 crc = VMManager::GetDiscCRC();
+    if (serial.empty() && crc == 0)
         return result;
 
-    const bool hasKnownOverride =
-        si.GetBoolValue("ARMSX2iOS/PerGame", "Enabled", false) ||
-        si.ContainsValue("EmuCore/GS", "upscale_multiplier") ||
-        si.ContainsValue("EmuCore/GS", "AspectRatio") ||
-        si.ContainsValue("EmuCore/GS", "filter") ||
-        si.ContainsValue("EmuCore/GS", "hw_mipmap") ||
-        si.ContainsValue("EmuCore/GS", "accurate_blending_unit") ||
-        si.ContainsValue("EmuCore/GS", "deinterlace_mode") ||
-        si.ContainsValue("EmuCore", "EnableCheats") ||
-        si.ContainsValue("EmuCore", "EnablePatches") ||
-        si.ContainsValue("EmuCore", "EnableGameFixes") ||
-        si.ContainsValue("EmuCore/GS", "UserHacks") ||
-        si.ContainsValue("EmuCore/CPU", "CoreType") ||
-        si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec") ||
-        si.ContainsValue("EmuCore/Speedhacks", "vuThread");
-
-    result[@"enabled"] = @(hasKnownOverride);
-    NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
-    result[@"upscaleMultiplier"] = @(si.GetFloatValue("EmuCore/GS", "upscale_multiplier", [result[@"upscaleMultiplier"] floatValue]));
-    result[@"aspectRatio"] = ARMSX2NSStringFromStdString(si.GetStringValue("EmuCore/GS", "AspectRatio", currentAspect.UTF8String));
-    result[@"textureFiltering"] = @(si.GetIntValue("EmuCore/GS", "filter", [result[@"textureFiltering"] intValue]));
-    result[@"hardwareMipmapping"] = @(si.GetBoolValue("EmuCore/GS", "hw_mipmap", [result[@"hardwareMipmapping"] boolValue]));
-    result[@"blendingAccuracy"] = @(si.GetIntValue("EmuCore/GS", "accurate_blending_unit", [result[@"blendingAccuracy"] intValue]));
-    result[@"interlaceMode"] = @(si.GetIntValue("EmuCore/GS", "deinterlace_mode", [result[@"interlaceMode"] intValue]));
-    result[@"enableCheats"] = @(si.GetBoolValue("EmuCore", "EnableCheats", [result[@"enableCheats"] boolValue]));
-    result[@"enablePatches"] = @(si.GetBoolValue("EmuCore", "EnablePatches", [result[@"enablePatches"] boolValue]));
-    result[@"enableGameFixes"] = @(si.GetBoolValue("EmuCore", "EnableGameFixes", [result[@"enableGameFixes"] boolValue]));
-    result[@"enableGameDBHardwareFixes"] = @(!si.GetBoolValue("EmuCore/GS", "UserHacks", ![result[@"enableGameDBHardwareFixes"] boolValue]));
-    result[@"eeCoreType"] = @(si.GetIntValue("EmuCore/CPU", "CoreType", [result[@"eeCoreType"] intValue]));
-    result[@"mtvu"] = @(si.GetBoolValue("EmuCore/Speedhacks", "vuThread", [result[@"mtvu"] boolValue]));
+    ARMSX2ApplyPerGameSettingsOverrides(result, serial, crc);
     return result;
 }
 
@@ -1422,6 +1662,23 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
             hardwareMipmapping:(BOOL)hardwareMipmapping
               blendingAccuracy:(int)blendingAccuracy
                interlaceMode:(int)interlaceMode
+        trilinearFiltering:(int)trilinearFiltering
+          halfPixelOffset:(int)halfPixelOffset
+              roundSprite:(int)roundSprite
+      alignSpriteOverride:(BOOL)alignSpriteOverride
+              alignSprite:(BOOL)alignSprite
+      mergeSpriteOverride:(BOOL)mergeSpriteOverride
+              mergeSprite:(BOOL)mergeSprite
+    wildArmsOffsetOverride:(BOOL)wildArmsOffsetOverride
+           wildArmsOffset:(BOOL)wildArmsOffset
+    textureOffsetXOverride:(BOOL)textureOffsetXOverride
+           textureOffsetX:(int)textureOffsetX
+    textureOffsetYOverride:(BOOL)textureOffsetYOverride
+           textureOffsetY:(int)textureOffsetY
+     skipDrawStartOverride:(BOOL)skipDrawStartOverride
+            skipDrawStart:(int)skipDrawStart
+       skipDrawEndOverride:(BOOL)skipDrawEndOverride
+              skipDrawEnd:(int)skipDrawEnd
                     eeCoreType:(int)eeCoreType
                           mtvu:(BOOL)mtvu
                   enableCheats:(BOOL)enableCheats
@@ -1435,52 +1692,67 @@ static void ARMSX2ApplyLiveFloatSetting(const char* section, const char* key, fl
         return;
     }
 
-    FileSystem::CreateDirectoryPath(EmuFolders::GameSettings.c_str(), false);
+    ARMSX2WriteGameSettingsForIdentity(entry.serial, entry.crc, enabled, upscaleMultiplier, aspectRatio,
+                                        textureFiltering, hardwareMipmapping, blendingAccuracy, interlaceMode,
+                                        trilinearFiltering, halfPixelOffset, roundSprite, alignSpriteOverride,
+                                        alignSprite, mergeSpriteOverride, mergeSprite, wildArmsOffsetOverride,
+                                        wildArmsOffset, textureOffsetXOverride, textureOffsetX,
+                                        textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
+                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd, eeCoreType, mtvu,
+                                        enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
+}
 
-    const std::string settingsPath = VMManager::GetGameSettingsPath(entry.serial, entry.crc);
-    INISettingsInterface si(settingsPath);
-    si.Load();
-
-    if (enabled) {
-        si.SetBoolValue("ARMSX2iOS/PerGame", "Enabled", true);
-        si.SetFloatValue("EmuCore/GS", "upscale_multiplier", upscaleMultiplier);
-        si.SetStringValue("EmuCore/GS", "AspectRatio", aspectRatio.UTF8String ?: "Auto 4:3/3:2");
-        si.SetIntValue("EmuCore/GS", "filter", textureFiltering);
-        si.SetBoolValue("EmuCore/GS", "hw_mipmap", hardwareMipmapping);
-        si.SetIntValue("EmuCore/GS", "accurate_blending_unit", blendingAccuracy);
-        si.SetIntValue("EmuCore/GS", "deinterlace_mode", interlaceMode);
-        si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
-        si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
-        si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
-        si.SetBoolValue("EmuCore/GS", "UserHacks", !enableGameDBHardwareFixes);
-        si.SetIntValue("EmuCore/CPU", "CoreType", eeCoreType);
-        si.SetBoolValue("EmuCore/CPU", "UseArm64Dynarec", eeCoreType == 2);
-        si.SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu);
-    } else {
-        si.DeleteValue("ARMSX2iOS/PerGame", "Enabled");
-        si.DeleteValue("EmuCore/GS", "upscale_multiplier");
-        si.DeleteValue("EmuCore/GS", "AspectRatio");
-        si.DeleteValue("EmuCore/GS", "filter");
-        si.DeleteValue("EmuCore/GS", "hw_mipmap");
-        si.DeleteValue("EmuCore/GS", "accurate_blending_unit");
-        si.DeleteValue("EmuCore/GS", "deinterlace_mode");
-        si.DeleteValue("EmuCore", "EnableCheats");
-        si.DeleteValue("EmuCore", "EnablePatches");
-        si.DeleteValue("EmuCore", "EnableGameFixes");
-        si.DeleteValue("EmuCore/GS", "UserHacks");
-        si.DeleteValue("EmuCore/CPU", "CoreType");
-        si.DeleteValue("EmuCore/CPU", "UseArm64Dynarec");
-        si.DeleteValue("EmuCore/Speedhacks", "vuThread");
-        si.RemoveEmptySections();
++ (void)setGameSettingsForCurrentGameWithEnabled:(BOOL)enabled
+                               upscaleMultiplier:(float)upscaleMultiplier
+                                     aspectRatio:(nonnull NSString *)aspectRatio
+                                textureFiltering:(int)textureFiltering
+                              hardwareMipmapping:(BOOL)hardwareMipmapping
+                                blendingAccuracy:(int)blendingAccuracy
+                                   interlaceMode:(int)interlaceMode
+                              trilinearFiltering:(int)trilinearFiltering
+                                 halfPixelOffset:(int)halfPixelOffset
+                                     roundSprite:(int)roundSprite
+                             alignSpriteOverride:(BOOL)alignSpriteOverride
+                                     alignSprite:(BOOL)alignSprite
+                             mergeSpriteOverride:(BOOL)mergeSpriteOverride
+                                     mergeSprite:(BOOL)mergeSprite
+                           wildArmsOffsetOverride:(BOOL)wildArmsOffsetOverride
+                                  wildArmsOffset:(BOOL)wildArmsOffset
+                           textureOffsetXOverride:(BOOL)textureOffsetXOverride
+                                  textureOffsetX:(int)textureOffsetX
+                           textureOffsetYOverride:(BOOL)textureOffsetYOverride
+                                  textureOffsetY:(int)textureOffsetY
+                            skipDrawStartOverride:(BOOL)skipDrawStartOverride
+                                   skipDrawStart:(int)skipDrawStart
+                              skipDrawEndOverride:(BOOL)skipDrawEndOverride
+                                     skipDrawEnd:(int)skipDrawEnd
+                                      eeCoreType:(int)eeCoreType
+                                            mtvu:(BOOL)mtvu
+                                    enableCheats:(BOOL)enableCheats
+                                   enablePatches:(BOOL)enablePatches
+                                 enableGameFixes:(BOOL)enableGameFixes
+                      enableGameDBHardwareFixes:(BOOL)enableGameDBHardwareFixes {
+    if (!VMManager::HasValidVM()) {
+        NSLog(@"[ARMSX2Bridge] Current game settings save rejected: no valid VM");
+        return;
     }
 
-    Error error;
-    const bool saved = si.Save(&error);
-    NSLog(@"[ARMSX2Bridge] Game settings %@ iso=%@ serial=%@ crc=%08X path=%@ result=%d",
-          enabled ? @"saved" : @"cleared", isoName, ARMSX2NSStringFromStdString(entry.serial),
-          entry.crc, ARMSX2NSStringFromStdString(settingsPath), saved ? 1 : 0);
-    if (!saved)
-        NSLog(@"[ARMSX2Bridge] Game settings save error: %@", ARMSX2NSStringFromStdString(error.GetDescription()));
+    const std::string serial = VMManager::GetDiscSerial();
+    const u32 crc = VMManager::GetDiscCRC();
+    if (crc == 0) {
+        NSLog(@"[ARMSX2Bridge] Current game settings save rejected serial=%@ crc=%08X",
+              ARMSX2NSStringFromStdString(serial), crc);
+        return;
+    }
+
+    ARMSX2WriteGameSettingsForIdentity(serial, crc, enabled, upscaleMultiplier, aspectRatio,
+                                        textureFiltering, hardwareMipmapping, blendingAccuracy, interlaceMode,
+                                        trilinearFiltering, halfPixelOffset, roundSprite, alignSpriteOverride,
+                                        alignSprite, mergeSpriteOverride, mergeSprite, wildArmsOffsetOverride,
+                                        wildArmsOffset, textureOffsetXOverride, textureOffsetX,
+                                        textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
+                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd, eeCoreType, mtvu,
+                                        enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
 }
 
 + (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName {

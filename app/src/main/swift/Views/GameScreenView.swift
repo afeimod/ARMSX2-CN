@@ -44,6 +44,7 @@ struct GameScreenView: View {
     @State private var showPadLayoutEditor = false
     @State private var showResetConfirmation = false
     @State private var runtimePerGameSettingsEntry: ISOEntry?
+    @State private var runtimePerGameSettings: [String: Any]?
     @State private var compatibilityPresetKey = "off"
     @State private var compatibilityIdentity = ""
     @State private var compatibilityAutoPresets = true
@@ -134,11 +135,12 @@ struct GameScreenView: View {
         .overlay(alignment: .bottom) {
             saveStateToast
         }
-        .overlay {
-            if showPerGameSettings {
-                runtimePerGameSettingsOverlay
-                    .transition(.opacity)
-            }
+        .sheet(isPresented: $showPerGameSettings) {
+            runtimePerGameSettingsContent
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+                .presentationBackground(.regularMaterial)
+                .presentationCornerRadius(34)
         }
         .alert(settings.localized("Reset ROM?"), isPresented: $showResetConfirmation) {
             Button(settings.localized("Cancel"), role: .cancel) {}
@@ -393,7 +395,7 @@ struct GameScreenView: View {
     @ViewBuilder
     private var runtimePerGameSettingsContent: some View {
         if let runtimePerGameSettingsEntry {
-            PerGameSettingsPanel(game: runtimePerGameSettingsEntry) {
+            PerGameSettingsPanel(game: runtimePerGameSettingsEntry, preloadedSettings: runtimePerGameSettings, savesToRunningGame: true) {
                 closePerGameSettingsOverlay()
             }
         } else {
@@ -415,25 +417,6 @@ struct GameScreenView: View {
         }
     }
 
-    private var runtimePerGameSettingsOverlay: some View {
-        GeometryReader { geo in
-            let isLandscape = geo.size.width > geo.size.height
-
-            ZStack {
-                Color.black.opacity(0.42)
-                    .ignoresSafeArea()
-
-                runtimePerGameSettingsContent
-                    .frame(maxWidth: isLandscape ? 760 : .infinity, maxHeight: isLandscape ? 560 : .infinity)
-                    .background(Color(.systemBackground), in: RoundedRectangle(cornerRadius: 34, style: .continuous))
-                    .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
-                    .shadow(color: .black.opacity(0.35), radius: 24, y: 12)
-                    .padding(.horizontal, isLandscape ? 28 : 12)
-                    .padding(.vertical, isLandscape ? 18 : 8)
-            }
-        }
-    }
-
     private func refreshRuntimeMenuState() {
         let vmRunning = ARMSX2Bridge.isVMRunning()
         let gameReady = ARMSX2Bridge.hasValidSaveStateGame()
@@ -447,29 +430,43 @@ struct GameScreenView: View {
     }
 
     private func openPerGameSettingsForCurrentGame() {
-        guard let entry = makeRuntimePerGameSettingsEntry() else {
+        // Load the running game's settings through the VM-safe bridge path (no disc-image
+        // scan) and build a lightweight entry from data the VM already holds, so opening
+        // the panel does not disturb audio/loading on the active game.
+        guard let gameName = currentRuntimeGameName(),
+              let info = ARMSX2Bridge.gameSettingsForCurrentGame() else {
             runtimePerGameSettingsEntry = nil
-            showPerGameSettings = true
+            runtimePerGameSettings = nil
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+                showPerGameSettings = true
+            }
             presentImportantSaveStateStatus(settings.localized("Per-game settings need a running game."))
             return
         }
 
-        runtimePerGameSettingsEntry = entry
-        showPerGameSettings = true
+        let serial = (info["serial"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        runtimePerGameSettingsEntry = ISOEntry(
+            name: gameName,
+            fileURL: nil,
+            coverURL: nil,
+            coverSignature: nil,
+            metadata: serial.isEmpty ? [:] : ["serial": serial],
+            size: 0,
+            isFavorite: false
+        )
+        runtimePerGameSettings = info
+        withAnimation(.spring(response: 0.32, dampingFraction: 0.88)) {
+            showPerGameSettings = true
+        }
     }
 
     private func closePerGameSettingsOverlay() {
-        runtimePerGameSettingsEntry = nil
-        showPerGameSettings = false
-        refreshRuntimeMenuState()
-        ARMSX2Bridge.setFullScreen(fullScreen)
-        ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
-
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-            ARMSX2Bridge.setFullScreen(fullScreen)
-            ARMSX2Bridge.prepareGameRenderViewForCurrentRenderer()
-            refreshRuntimeMenuState()
+        withAnimation(.easeInOut(duration: 0.2)) {
+            showPerGameSettings = false
         }
+        runtimePerGameSettingsEntry = nil
+        runtimePerGameSettings = nil
+        refreshRuntimeMenuState()
     }
 
     private func updateRuntimeOverlayPause() {
@@ -480,34 +477,6 @@ struct GameScreenView: View {
         if ARMSX2Bridge.isVMRunning() {
             ARMSX2Bridge.setVMPaused(shouldPause)
         }
-    }
-
-    private func makeRuntimePerGameSettingsEntry() -> ISOEntry? {
-        guard let gameName = currentRuntimeGameName() else {
-            return nil
-        }
-
-        let isoDir = ARMSX2Bridge.isoDirectory()
-        let docsDir = ARMSX2Bridge.documentsDirectory()
-        let fm = FileManager.default
-        var path = (isoDir as NSString).appendingPathComponent(gameName)
-        if !fm.fileExists(atPath: path) {
-            path = (docsDir as NSString).appendingPathComponent(gameName)
-        }
-
-        let fileURL = fm.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
-        let attrs = try? fm.attributesOfItem(atPath: path)
-        let size = attrs?[.size] as? UInt64 ?? 0
-        let metadata = ARMSX2Bridge.gameMetadata(forISO: gameName)
-        return ISOEntry(
-            name: gameName,
-            fileURL: fileURL,
-            coverURL: nil,
-            coverSignature: nil,
-            metadata: metadata,
-            size: size,
-            isFavorite: ARMSX2Bridge.isFavorite(gameName)
-        )
     }
 
     private func currentRuntimeGameName() -> String? {
