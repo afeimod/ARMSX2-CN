@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -8,15 +8,10 @@ __fi void mVUdivSet(mV)
 {
 	if (mVUinfo.doDivFlag)
 	{
-        auto reg32 = getFlagReg(sFLAG.write);
-		if (!sFLAG.doFlag) {
-//            xMOV(getFlagReg(sFLAG.write), getFlagReg(sFLAG.lastWrite));
-            armAsm->Mov(reg32, getFlagReg(sFLAG.lastWrite));
-        }
-//		xAND(getFlagReg(sFLAG.write), 0xfff3ffff);
-        armAsm->And(reg32, reg32, 0xfff3ffff);
-//		xOR(getFlagReg(sFLAG.write), ptr32[&mVU.divFlag]);
-        armAsm->Orr(reg32, reg32, armLoadPtr(PTR_MVU(microVU[mVU.index].divFlag)));
+		if (!sFLAG.doFlag)
+			xMOV(getFlagReg(sFLAG.write), getFlagReg(sFLAG.lastWrite));
+		xAND(getFlagReg(sFLAG.write), 0xfff3ffff);
+		xOR(getFlagReg(sFLAG.write), ptr32[&mVU.divFlag]);
 	}
 }
 
@@ -34,7 +29,7 @@ __fi void mVUstatusFlagOp(mV)
 	}
 	else
 	{
-		for (; i > 0; --i)
+		for (; i > 0; i--)
 		{
 			incPC2(-2);
 			if (sFLAG.doNonSticky)
@@ -51,7 +46,7 @@ __fi void mVUstatusFlagOp(mV)
 	}
 	if (runLoop)
 	{
-		for (; i > 0; --i)
+		for (; i > 0; i--)
 		{
 			incPC2(-2);
 
@@ -67,8 +62,8 @@ __fi void mVUstatusFlagOp(mV)
 
 int findFlagInst(int* fFlag, int cycles)
 {
-	int i, j = 0, jValue = -1;
-	for (i = 0; i < 4; ++i)
+	int j = 0, jValue = -1;
+	for (int i = 0; i < 4; i++)
 	{
 		if ((fFlag[i] <= cycles) && (fFlag[i] > jValue))
 		{
@@ -83,8 +78,8 @@ int findFlagInst(int* fFlag, int cycles)
 int sortFlag(int* fFlag, int* bFlag, int cycles)
 {
 	int lFlag = -5;
-	int i, x = 0;
-	for (i = 0; i < 4; ++i)
+	int x = 0;
+	for (int i = 0; i < 4; i++)
 	{
 		bFlag[i] = findFlagInst(fFlag, cycles);
 		if (lFlag != bFlag[i])
@@ -98,10 +93,9 @@ int sortFlag(int* fFlag, int* bFlag, int cycles)
 void sortFullFlag(int* fFlag, int* bFlag)
 {
 	int m = std::max(std::max(fFlag[0], fFlag[1]), std::max(fFlag[2], fFlag[3]));
-    int i, t;
-	for (i = 0; i < 4; ++i)
+	for (int i = 0; i < 4; i++)
 	{
-		t = 3 - (m - fFlag[i]);
+		int t = 3 - (m - fFlag[i]);
 		bFlag[i] = (t < 0) ? 0 : t + 1;
 	}
 }
@@ -117,8 +111,7 @@ __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 	//bool writeProtect = false;
 
 	// Ensure last ~4+ instructions update mac/status flags (if next block's first 4 instructions will read them)
-    int i;
-	for (i = mVUcount; i > 0; --i, ++aCount)
+	for (int i = mVUcount; i > 0; i--, aCount++)
 	{
 		if (sFLAG.doFlag)
 		{
@@ -145,9 +138,8 @@ __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 
 	// Status/Mac Flags Setup Code
 	int xS = 0, xM = 0, xC = 0;
-    int cyclesAddFour;
 
-	for (i = 0; i < 4; ++i)
+	for (int i = 0; i < 4; i++)
 	{
 		mFC.xStatus[i] = i;
 		mFC.xMac   [i] = i;
@@ -185,7 +177,7 @@ __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 	mFC.cycles = 0;
 	u32 xCount = mVUcount; // Backup count
 	iPC = mVUstartPC;
-	for (mVUcount = 0; mVUcount < xCount; ++mVUcount)
+	for (mVUcount = 0; mVUcount < xCount; mVUcount++)
 	{
 		if (mVUlow.isFSSET && !noFlagOpts)
 		{
@@ -225,23 +217,21 @@ __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 			}
 		}
 
-        cyclesAddFour = mFC.cycles + 4;
-
 		if (sFlagCond)
 		{
-			mFC.xStatus[xS] = cyclesAddFour;
+			mFC.xStatus[xS] = mFC.cycles + 4;
 			xS = (xS + 1) & 3;
 		}
 
 		if (mFLAG.doFlag)
 		{
-			mFC.xMac[xM] = cyclesAddFour;
+			mFC.xMac[xM] = mFC.cycles + 4;
 			xM = (xM + 1) & 3;
 		}
 
 		if (cFLAG.doFlag)
 		{
-			mFC.xClip[xC] = cyclesAddFour;
+			mFC.xClip[xC] = mFC.cycles + 4;
 			xC = (xC + 1) & 3;
 		}
 
@@ -264,6 +254,7 @@ __fi void mVUsetFlags(mV, microFlagCycles& mFC)
 // Recompiles Code for Proper Flags on Block Linkings
 __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 {
+
 	if (mVUregs.flagInfo & 1)
 	{
 		if (mVUregs.needExactMatch)
@@ -283,66 +274,43 @@ __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 		int sortRegs = sortFlag(mFC.xStatus, bStatus, mFC.cycles);
 		// DevCon::Status("sortRegs = %d", params sortRegs);
 		// Note: Emitter will optimize out mov(reg1, reg1) cases...
-        if (sortRegs == 1)
-        {
-//			xMOV(gprF0, getFlagReg(bStatus[0]));
-            armAsm->Mov(gprF0, getFlagReg(bStatus[0]));
-//			xMOV(gprF1, getFlagReg(bStatus[1]));
-            armAsm->Mov(gprF1, getFlagReg(bStatus[1]));
-//			xMOV(gprF2, getFlagReg(bStatus[2]));
-            armAsm->Mov(gprF2, getFlagReg(bStatus[2]));
-//			xMOV(gprF3, getFlagReg(bStatus[3]));
-            armAsm->Mov(gprF3, getFlagReg(bStatus[3]));
-        }
-        else if (sortRegs == 2)
-        {
-//			xMOV(gprT1, getFlagReg (bStatus[3]));
-            armAsm->Mov(gprT1, getFlagReg (bStatus[3]));
-//			xMOV(gprF0, getFlagReg (bStatus[0]));
-            armAsm->Mov(gprF0, getFlagReg (bStatus[0]));
-//			xMOV(gprF1, getFlagReg2(bStatus[1]));
-            armAsm->Mov(gprF1, getFlagReg2(bStatus[1]));
-//			xMOV(gprF2, getFlagReg2(bStatus[2]));
-            armAsm->Mov(gprF2, getFlagReg2(bStatus[2]));
-//			xMOV(gprF3, gprT1);
-            armAsm->Mov(gprF3, gprT1);
-        }
-        else if (sortRegs == 3)
-        {
-            int gFlag = (bStatus[0] == bStatus[1]) ? bStatus[2] : bStatus[1];
-//			xMOV(gprT1, getFlagReg (gFlag));
-            armAsm->Mov(gprT1, getFlagReg (gFlag));
-//			xMOV(gprT2, getFlagReg (bStatus[3]));
-            armAsm->Mov(gprT2, getFlagReg (bStatus[3]));
-//			xMOV(gprF0, getFlagReg (bStatus[0]));
-            armAsm->Mov(gprF0, getFlagReg (bStatus[0]));
-//			xMOV(gprF1, getFlagReg3(bStatus[1]));
-            armAsm->Mov(gprF1, getFlagReg3(bStatus[1]));
-//			xMOV(gprF2, getFlagReg4(bStatus[2]));
-            armAsm->Mov(gprF2, getFlagReg4(bStatus[2]));
-//			xMOV(gprF3, gprT2);
-            armAsm->Mov(gprF3, gprT2);
-        }
-        else
-        {
-//			const xRegister32& temp3 = mVU.regAlloc->allocGPR();
-            const a64::Register& temp3 = mVU.regAlloc->allocGPR();
-//			xMOV(gprT1, getFlagReg(bStatus[0]));
-            armAsm->Mov(gprT1, getFlagReg(bStatus[0]));
-//			xMOV(gprT2, getFlagReg(bStatus[1]));
-            armAsm->Mov(gprT2, getFlagReg(bStatus[1]));
-//			xMOV(temp3, getFlagReg(bStatus[2]));
-            armAsm->Mov(temp3, getFlagReg(bStatus[2]));
-//			xMOV(gprF3, getFlagReg(bStatus[3]));
-            armAsm->Mov(gprF3, getFlagReg(bStatus[3]));
-//			xMOV(gprF0, gprT1);
-            armAsm->Mov(gprF0, gprT1);
-//			xMOV(gprF1, gprT2);
-            armAsm->Mov(gprF1, gprT2);
-//			xMOV(gprF2, temp3);
-            armAsm->Mov(gprF2, temp3);
-            mVU.regAlloc->clearNeeded(temp3);
-        }
+		if (sortRegs == 1)
+		{
+			xMOV(gprF0, getFlagReg(bStatus[0]));
+			xMOV(gprF1, getFlagReg(bStatus[1]));
+			xMOV(gprF2, getFlagReg(bStatus[2]));
+			xMOV(gprF3, getFlagReg(bStatus[3]));
+		}
+		else if (sortRegs == 2)
+		{
+			xMOV(gprT1, getFlagReg (bStatus[3]));
+			xMOV(gprF0, getFlagReg (bStatus[0]));
+			xMOV(gprF1, getFlagReg2(bStatus[1]));
+			xMOV(gprF2, getFlagReg2(bStatus[2]));
+			xMOV(gprF3, gprT1);
+		}
+		else if (sortRegs == 3)
+		{
+			int gFlag = (bStatus[0] == bStatus[1]) ? bStatus[2] : bStatus[1];
+			xMOV(gprT1, getFlagReg (gFlag));
+			xMOV(gprT2, getFlagReg (bStatus[3]));
+			xMOV(gprF0, getFlagReg (bStatus[0]));
+			xMOV(gprF1, getFlagReg3(bStatus[1]));
+			xMOV(gprF2, getFlagReg4(bStatus[2]));
+			xMOV(gprF3, gprT2);
+		}
+		else
+		{
+			const xRegister32& temp3 = mVU.regAlloc->allocGPR();
+			xMOV(gprT1, getFlagReg(bStatus[0]));
+			xMOV(gprT2, getFlagReg(bStatus[1]));
+			xMOV(temp3, getFlagReg(bStatus[2]));
+			xMOV(gprF3, getFlagReg(bStatus[3]));
+			xMOV(gprF0, gprT1);
+			xMOV(gprF1, gprT2);
+			xMOV(gprF2, temp3);
+			mVU.regAlloc->clearNeeded(temp3);
+		}
 	}
 
 	if (doMFlagInsts && __Mac)
@@ -351,12 +319,9 @@ __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 			DevCon.WriteLn("mVU%d - Mac Flag", mVU.index);
 		int bMac[4];
 		sortFlag(mFC.xMac, bMac, mFC.cycles);
-//		xMOVAPS(xmmT1, ptr128[mVU.macFlag]);
-        armAsm->Ldr(xmmT1.Q(), PTR_MVU(microVU[mVU.index].macFlag));
-//		xSHUF.PS(xmmT1, xmmT1, shuffleMac);
-        armSHUFPS(xmmT1, xmmT1, shuffleMac);
-//		xMOVAPS(ptr128[mVU.macFlag], xmmT1);
-        armAsm->Str(xmmT1.Q(), PTR_MVU(microVU[mVU.index].macFlag));
+		xMOVAPS(xmmT1, ptr128[mVU.macFlag]);
+		xSHUF.PS(xmmT1, xmmT1, shuffleMac);
+		xMOVAPS(ptr128[mVU.macFlag], xmmT1);
 	}
 
 	if (doCFlagInsts && __Clip)
@@ -365,12 +330,9 @@ __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 			DevCon.WriteLn("mVU%d - Clip Flag", mVU.index);
 		int bClip[4];
 		sortFlag(mFC.xClip, bClip, mFC.cycles);
-//		xMOVAPS(xmmT2, ptr128[mVU.clipFlag]);
-        armAsm->Ldr(xmmT2.Q(), PTR_MVU(microVU[mVU.index].clipFlag));
-//		xSHUF.PS(xmmT2, xmmT2, shuffleClip);
-        armSHUFPS(xmmT2, xmmT2, shuffleClip);
-//		xMOVAPS(ptr128[mVU.clipFlag], xmmT2);
-        armAsm->Str(xmmT2.Q(), PTR_MVU(microVU[mVU.index].clipFlag));
+		xMOVAPS(xmmT2, ptr128[mVU.clipFlag]);
+		xSHUF.PS(xmmT2, xmmT2, shuffleClip);
+		xMOVAPS(ptr128[mVU.clipFlag], xmmT2);
 	}
 }
 
@@ -396,8 +358,8 @@ __fi void mVUsetupFlags(mV, microFlagCycles& mFC)
 // Scan through instructions and check if flags are read (FSxxx, FMxxx, FCxxx opcodes)
 void _mVUflagPass(mV, u32 startPC, u32 sCount, u32 found, std::vector<u32>& v)
 {
-    u32 i, e = v.size();
-	for (i = 0; i < e; ++i)
+
+	for (u32 i = 0; i < v.size(); i++)
 	{
 		if (v[i] == startPC)
 			return; // Prevent infinite recursion
@@ -407,10 +369,9 @@ void _mVUflagPass(mV, u32 startPC, u32 sCount, u32 found, std::vector<u32>& v)
 	int oldPC = iPC;
 	int oldBranch = mVUbranch;
 	int aBranchAddr = 0;
-	iPC = startPC >> 2; // startPC / 4
+	iPC = startPC / 4;
 	mVUbranch = 0;
-    int branch;
-	for (branch = 0; sCount < 4; sCount += found)
+	for (int branch = 0; sCount < 4; sCount += found)
 	{
 		mVUregs.needExactMatch &= 7;
 		incPC(1);

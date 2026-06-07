@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 /*
@@ -30,11 +30,9 @@
 #pragma once
 
 #include "common/emitter/x86types.h"
-#if !(defined(__ANDROID__) || defined(_M_ARM64))
 #include "common/emitter/instructions.h"
 
 // Including legacy items for now, but these should be removed eventually,
 // once most code is no longer dependent on them.
 #include "common/emitter/legacy_types.h"
 #include "common/emitter/legacy_instructions.h"
-#endif

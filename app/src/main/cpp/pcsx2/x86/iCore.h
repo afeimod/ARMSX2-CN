@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -152,7 +152,7 @@ int _checkX86reg(int type, int reg, int mode);
 bool _hasX86reg(int type, int reg, int required_mode = 0);
 void _addNeededX86reg(int type, int reg);
 void _clearNeededX86regs();
-void _freeX86reg(const a64::Register& x86reg);
+void _freeX86reg(const x86Emitter::xRegister32& x86reg);
 void _freeX86reg(int x86reg);
 void _freeX86regWithoutWriteback(int x86reg);
 void _freeX86regs();

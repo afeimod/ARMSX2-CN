@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Console.h"
@@ -11,16 +11,11 @@
 
 #include <mutex>
 #include <vector>
-#include <utility>
 
 #ifdef _WIN32
 #include "common/RedtapeWindows.h"
 #else
 #include <unistd.h>
-#endif
-
-#if defined(__ANDROID__)
-#include <android/log.h>
 #endif
 
 using namespace std::string_view_literals;
@@ -43,9 +38,6 @@ namespace Log
 	static void WriteToConsole(LOGLEVEL level, ConsoleColors color, std::string_view message);
 	static void WriteToDebug(LOGLEVEL level, ConsoleColors color, std::string_view message);
 	static void WriteToFile(LOGLEVEL level, ConsoleColors color, std::string_view message);
-#if defined(__ANDROID__)
-	static void WriteToAndroidFile(LOGLEVEL level, ConsoleColors color, std::string_view message);
-#endif
 
 	static void UpdateMaxLevel();
 
@@ -71,12 +63,6 @@ namespace Log
 	static HANDLE s_hConsoleStdOut = NULL;
 	static HANDLE s_hConsoleStdErr = NULL;
 #endif
-#if defined(__ANDROID__)
-	static FileSystem::ManagedCFilePtr s_android_file_handle;
-	static std::string s_android_file_path;
-	static std::mutex s_android_file_mutex;
-	static LOGLEVEL s_android_file_level = LOGLEVEL_NONE;
-#endif
 } // namespace Log
 
 float Log::GetCurrentMessageTime()
@@ -86,9 +72,6 @@ float Log::GetCurrentMessageTime()
 
 __ri void Log::WriteToConsole(LOGLEVEL level, ConsoleColors color, std::string_view message)
 {
-#if defined(__ANDROID__)
-    __android_log_print(ANDROID_LOG_DEBUG, "NDK_LOG", "%s", std::string(message).c_str());
-#else
 	static constexpr std::string_view s_ansi_color_codes[ConsoleColors_Count] = {
 		"\033[0m"sv, // default
 		"\033[30m\033[1m"sv, // black
@@ -115,14 +98,25 @@ __ri void Log::WriteToConsole(LOGLEVEL level, ConsoleColors color, std::string_v
 
 	static constexpr size_t BUFFER_SIZE = 512;
 
+#ifdef _WIN32
+	constexpr bool supports_color_codes = true;
+#else
+	const int fd = (level <= LOGLEVEL_WARNING) ? STDERR_FILENO : STDOUT_FILENO;
+	const bool supports_color_codes = static_cast<bool>(isatty(fd));
+#endif
+
 	SmallStackString<BUFFER_SIZE> buffer;
-	buffer.reserve(32 + static_cast<u32>(message.length()));
-	buffer.append(s_ansi_color_codes[color]);
+	buffer.reserve(static_cast<u32>(32 + message.length()));
+	if (supports_color_codes)
+		buffer.append(s_ansi_color_codes[color]);
 
 	if (s_log_timestamps)
 		buffer.append_format(TIMESTAMP_FORMAT_STRING, Log::GetCurrentMessageTime());
 
 	buffer.append(message);
+
+	if (supports_color_codes)
+		buffer.append(s_ansi_color_codes[Color_Default]);
 	buffer.append('\n');
 
 #ifdef _WIN32
@@ -151,10 +145,7 @@ cleanup:
 	if (wmessage_buf != wbuf)
 		std::free(wmessage_buf);
 #else
-	const int fd = (level <= LOGLEVEL_WARNING) ? STDERR_FILENO : STDOUT_FILENO;
 	write(fd, buffer.data(), buffer.length());
-#endif
-
 #endif
 }
 
@@ -176,7 +167,7 @@ void Log::SetConsoleOutputLevel(LOGLEVEL level)
 	if (was_enabled == now_enabled)
 		return;
 
-		// Worst that happens here is we write to a bad handle..
+	// Worst that happens here is we write to a bad handle..
 
 #if defined(_WIN32)
 	static constexpr auto enable_virtual_terminal_processing = [](HANDLE hConsole) {
@@ -354,7 +345,7 @@ bool Log::SetFileOutputLevel(LOGLEVEL level, std::string path)
 
 	const bool was_enabled = (s_file_level > LOGLEVEL_NONE);
 	const bool new_enabled = (level > LOGLEVEL_NONE && !path.empty());
-	if (was_enabled != new_enabled || (new_enabled && path == s_file_path))
+	if (was_enabled != new_enabled || (new_enabled && path != s_file_path))
 	{
 		if (new_enabled)
 		{
@@ -393,51 +384,6 @@ std::FILE* Log::GetFileLogHandle()
 	return s_file_handle.get();
 }
 
-#if defined(__ANDROID__)
-bool Log::SetAndroidFileOutputLevel(LOGLEVEL level, std::string path)
-{
-	std::unique_lock lock(s_android_file_mutex);
-
-	const bool enable = (level > LOGLEVEL_NONE) && !path.empty();
-	if (!enable)
-	{
-		s_android_file_handle.reset();
-		s_android_file_path.clear();
-		s_android_file_level = LOGLEVEL_NONE;
-		UpdateMaxLevel();
-		return false;
-	}
-
-	if (!s_android_file_handle || s_android_file_path != path)
-	{
-		s_android_file_handle.reset();
-
-		const size_t slash_pos = path.find_last_of(FS_OSPATH_SEPARATOR_CHARACTER);
-		if (slash_pos != std::string::npos)
-		{
-			std::string directory = path.substr(0, slash_pos);
-			FileSystem::EnsureDirectoryExists(directory.c_str(), true);
-		}
-
-		s_android_file_handle = FileSystem::OpenManagedSharedCFile(path.c_str(), "wb", FileSystem::FileShareMode::DenyWrite);
-		if (!s_android_file_handle)
-		{
-			s_android_file_path.clear();
-			s_android_file_level = LOGLEVEL_NONE;
-			UpdateMaxLevel();
-			__android_log_print(ANDROID_LOG_ERROR, "NDK_LOG", "Failed to open Android log file '%s'", path.c_str());
-			return false;
-		}
-
-		s_android_file_path = std::move(path);
-	}
-
-	s_android_file_level = level;
-	UpdateMaxLevel();
-	return true;
-}
-#endif
-
 bool Log::IsHostOutputEnabled()
 {
 	return (s_host_level > LOGLEVEL_NONE);
@@ -467,216 +413,52 @@ LOGLEVEL Log::GetMaxLevel()
 
 __ri void Log::UpdateMaxLevel()
 {
-#if defined(__ANDROID__)
-	s_max_level = std::max(s_console_level, std::max(s_debug_level, std::max(s_file_level, std::max(s_host_level, s_android_file_level))));
-#else
 	s_max_level = std::max(s_console_level, std::max(s_debug_level, std::max(s_file_level, s_host_level)));
-#endif
 }
 
-// [iPSX2] Log Limiting Logic (moved to Global scope/Log Namespace)
-	namespace LogLimiter
+void Log::ExecuteCallbacks(LOGLEVEL level, ConsoleColors color, std::string_view message)
+{
+	// TODO: Cache the message time.
+
+	// Split newlines into separate messages.
+	std::string_view::size_type start_pos = 0;
+	if (std::string_view::size_type end_pos = message.find('\n'); end_pos != std::string::npos) [[unlikely]]
 	{
-		struct LimiterEntry {
-			std::string_view tag;
-			std::atomic<int> count{0};
-			std::atomic<bool> notified{false};
-		};
-
-		static LimiterEntry s_entries[] = {
-			{"@@RECOMPILE@@", {}, {}},
-			{"@@IOP_RECOMPILE@@", {}, {}},
-			{"@@EE_TICK@@", {}, {}},
-			{"@@RECSTUB_CALL@@", {}, {}},
-			{"@@VMODE_OK@@", {}, {}},
-			{"@@VTLB_DUMMY@@", {}, {}},
-			{"@@REC_BLOCK@@", {}, {}},
-			{"@@SITE_MAP@@", {}, {}},
-			{"@@DEBUG@@", {}, {}},
-			{"[DEBUG-VERIFY]", {}, {}}
-		};
-
-		static bool ShouldSuppress(std::string_view message)
+		for (;;)
 		{
-            // [P52] Suppress all @@ probe tags except essential startup/fatal.
-            // Debug builds can enable verbose probes via iPSX2_VERBOSE_LOG=1.
-            static bool s_verbose = [](){
-#if defined(DEBUG) || defined(_DEBUG)
-                const char* e = std::getenv("iPSX2_VERBOSE_LOG");
-                return e && std::atoi(e);
-#else
-                return false;
-#endif
-            }();
-            if (!s_verbose && message.find("@@") != std::string_view::npos) {
-                if (message.find("@@LOG_") != std::string_view::npos ||
-                    message.find("@@BUNDLE_ID") != std::string_view::npos ||
-                    message.find("@@BUILD_ID") != std::string_view::npos ||
-                    message.find("@@BIOS_PICK") != std::string_view::npos ||
-                    message.find("@@BIOS_DIR") != std::string_view::npos ||
-                    message.find("@@BIOS_ENV") != std::string_view::npos ||
-                    message.find("@@BIOS_SCAN") != std::string_view::npos ||
-                    message.find("@@ISO_BOOT") != std::string_view::npos ||
-                    message.find("@@CFG") != std::string_view::npos ||
-                    message.find("@@JIT_GATE") != std::string_view::npos ||
-                    message.find("@@AUTO_BOOT") != std::string_view::npos ||
-                    message.find("@@SIG") != std::string_view::npos ||
-                    message.find("@@EE_SEL") != std::string_view::npos ||
-                    message.find("@@IOP_SEL") != std::string_view::npos ||
-                    message.find("@@TEST") != std::string_view::npos ||
-                    message.find("@@ELF") != std::string_view::npos ||
-                    message.find("@@BOOT") != std::string_view::npos ||
-                    // [V10 Phase 3.2.1] backport: 新 tag for Step 5 / SW fastmem / auto-press / GIF dump 等
-                    message.find("@@VU_SEL") != std::string_view::npos ||
-                    message.find("@@AUTO_PRESS") != std::string_view::npos ||
-                    message.find("@@SW_FASTMEM_FIX") != std::string_view::npos ||
-                    message.find("@@FASTMEM_DBG") != std::string_view::npos ||
-                    message.find("@@DIE_BIT_CHECK") != std::string_view::npos ||
-                    message.find("@@GIF_DUMP") != std::string_view::npos ||
-                    message.find("@@GIF_PKT") != std::string_view::npos ||
-                    message.find("@@BLOCKCYCLE_MASK") != std::string_view::npos ||
-                    message.find("@@REC_NULL") != std::string_view::npos ||
-                    // [V34] QA probe tags (eval_bench.py / ss_compare.py / gif_diff.py consume these)
-                    message.find("@@BL_FRAME") != std::string_view::npos ||
-                    message.find("@@QA_") != std::string_view::npos ||
-                    message.find("FATAL") != std::string_view::npos)
-                    return false;
-                return true;
-            }
-            // Lazy initialization of limits
-			static int s_max_per_tag = [](){
-				const char* env = std::getenv("iPSX2_LOG_MAX_PER_TAG");
-                int val = env ? std::atoi(env) : 50;
-                fprintf(stderr, "@@CFG@@ iPSX2_LOG_MAX_PER_TAG=%d (env=%s)\n", val, env ? env : "null");
-				return val;
-			}();
+			std::string_view message_line;
+			if (start_pos != end_pos)
+				message_line = message.substr(start_pos, (end_pos == std::string_view::npos) ? end_pos : end_pos - start_pos);
 
-            static int s_max_total_lines = [](){
-                const char* env = std::getenv("iPSX2_LOG_MAX_LINES");
-                int val = env ? std::atoi(env) : 0;
-                fprintf(stderr, "@@CFG@@ iPSX2_LOG_MAX_LINES=%d (env=%s)\n", val, env ? env : "null");
-                return val;
-            }();
-            
-            static std::atomic<int> s_total_lines{0};
-            static std::atomic<bool> s_global_notified{false};
+			ExecuteCallbacks(level, color, message_line);
 
-            if (message.find("@@SIG") != std::string_view::npos ||
-                message.find("FATAL") != std::string_view::npos ||
-                message.find("@@CT_MIN") != std::string_view::npos ||
-                message.find("Aborting application") != std::string_view::npos ||
-                message.find("assert") != std::string_view::npos ||
-                message.find("Assertion") != std::string_view::npos ||
-                message.find("@@BUILD_ID") != std::string_view::npos ||
-                message.find("@@LOG_TAG_CUTOFF@@") != std::string_view::npos ||
-                message.find("@@LOG_GLOBAL_CUTOFF@@") != std::string_view::npos) 
-            {
-                return false;
-            }
+			if (end_pos == std::string_view::npos)
+				return;
 
-            if (s_max_total_lines > 0) {
-                int lines = s_total_lines.fetch_add(1, std::memory_order_relaxed);
-                if (lines >= s_max_total_lines) {
-                    bool expected = false;
-                    if (s_global_notified.compare_exchange_strong(expected, true)) {
-                         TinyString msg = TinyString::from_format("@@LOG_GLOBAL_CUTOFF@@ max_lines={} suppressed=1", s_max_total_lines);
-                         Log::Write(LOGLEVEL_INFO, Color_Red, msg.c_str());
-                    }
-                    return true;
-                }
-            }
-
-			for (auto& entry : s_entries)
-			{
-				if (message.find(entry.tag) != std::string_view::npos)
-				{
-					int current = entry.count.fetch_add(1, std::memory_order_relaxed) + 1;
-					if (current <= s_max_per_tag) {
-						return false;
-					} else {
-						bool expected = false;
-						if (entry.notified.compare_exchange_strong(expected, true)) {
-                            TinyString msg = TinyString::from_format("@@LOG_TAG_CUTOFF@@ tag=\"{}\" max={} suppressed=1", 
-                                entry.tag, s_max_per_tag);
-                            Log::Write(LOGLEVEL_INFO, Color_Red, msg.c_str());
-						}
-						return true;
-					}
-				}
-			}
-			return false;
+			start_pos = end_pos + 1;
+			end_pos = message.find('\n', start_pos);
 		}
+		return;
 	}
 
-    // Move definition INSIDE namespace Log to match static declaration
-    namespace Log {
-        static void ExecuteCallbacks(LOGLEVEL level, ConsoleColors color, std::string_view message)
-        {
-            if (LogLimiter::ShouldSuppress(message)) {
-                return;
-            }
+	pxAssert(level > LOGLEVEL_NONE);
+	if (level <= s_console_level)
+		WriteToConsole(level, color, message);
 
-            // TODO: Cache the message time.
+	if (level <= s_debug_level)
+		WriteToDebug(level, color, message);
 
-        #if defined(__ANDROID__)
-            __android_log_print(ANDROID_LOG_DEBUG, "NDK_LOG", "%s", std::string(message).c_str());
+	if (level <= s_file_level)
+		WriteToFile(level, color, message);
 
-            if (level <= s_android_file_level)
-                WriteToAndroidFile(level, color, message);
-
-            if (level <= s_file_level)
-                WriteToFile(level, color, message);
-
-            if (level <= s_host_level)
-            {
-                const HostCallbackType callback = s_host_callback;
-                if (callback)
-                    s_host_callback(level, color, message);
-            }
-
-            return;
-        #else
-            // Split newlines into separate messages.
-            std::string_view::size_type start_pos = 0;
-            if (std::string_view::size_type end_pos = message.find('\n'); end_pos != std::string::npos) [[unlikely]]
-            {
-                for (;;)
-                {
-                    std::string_view message_line;
-                    if (start_pos != end_pos)
-                        message_line = message.substr(start_pos, (end_pos == std::string_view::npos) ? end_pos : end_pos - start_pos);
-
-                    ExecuteCallbacks(level, color, message_line);
-
-                    if (end_pos == std::string_view::npos)
-                        return;
-
-                    start_pos = end_pos + 1;
-                    end_pos = message.find('\n', start_pos);
-                }
-                return;
-            }
-
-            pxAssert(level > LOGLEVEL_NONE);
-            if (level <= s_console_level)
-                WriteToConsole(level, color, message);
-
-            if (level <= s_debug_level)
-                WriteToDebug(level, color, message);
-
-            if (level <= s_file_level)
-                WriteToFile(level, color, message);
-
-            if (level <= s_host_level)
-            {
-                // double check in case of race here
-                const HostCallbackType callback = s_host_callback;
-                if (callback)
-                    s_host_callback(level, color, message);
-            }
-        #endif
-        }
-    } // namespace Log
+	if (level <= s_host_level)
+	{
+		// double check in case of race here
+		const HostCallbackType callback = s_host_callback;
+		if (callback)
+			s_host_callback(level, color, message);
+	}
+}
 
 void Log::Write(LOGLEVEL level, ConsoleColors color, std::string_view message)
 {

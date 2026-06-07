@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "FileSystem.h"
@@ -28,7 +28,7 @@
 #endif
 
 #if defined(_WIN32)
-#include "RedtapeWindows.h"
+#include "common/RedtapeWindows.h"
 #include <io.h>
 #include <malloc.h>
 #include <pathcch.h>
@@ -42,6 +42,7 @@
 #include <limits.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #endif
 
@@ -85,7 +86,7 @@ static inline bool FileSystemCharacterIsSane(char32_t c, bool strip_slashes)
 	if (c == '*')
 		return false;
 
-		// macos doesn't allow colons, apparently
+	// macos doesn't allow colons, apparently
 #ifdef __APPLE__
 	if (c == U':')
 		return false;
@@ -998,16 +999,7 @@ std::FILE* FileSystem::OpenCFile(const char* filename, const char* mode, Error* 
 
 	return fp;
 #else
-
-	std::FILE* fp;
-    ////
-    std::string _filename(filename);
-    if (_filename.rfind("content://", 0) == 0) {
-        fp = fdopen(FileSystem::OpenFDFileContent(_filename.c_str()), "rb");
-    } else {
-        fp = std::fopen(_filename.c_str(), mode);
-    }
-    ////
+	std::FILE* fp = std::fopen(filename, mode);
 	if (!fp)
 		Error::SetErrno(error, errno);
 	return fp;
@@ -1019,15 +1011,7 @@ std::FILE* FileSystem::OpenCFileTryIgnoreCase(const char* filename, const char* 
 #if defined(_WIN32) || defined(__APPLE__)
 	return OpenCFile(filename, mode, error);
 #else
-	std::FILE* fp;
-    ////
-    std::string _filename(filename);
-    if (_filename.rfind("content://", 0) == 0) {
-        fp = fdopen(FileSystem::OpenFDFileContent(_filename.c_str()), "rb");
-    } else {
-        fp = std::fopen(_filename.c_str(), mode);
-    }
-    ////
+	std::FILE* fp = std::fopen(filename, mode);
 	const auto cur_errno = errno;
 
 	if (!fp)
@@ -1040,13 +1024,7 @@ std::FILE* FileSystem::OpenCFileTryIgnoreCase(const char* filename, const char* 
 			{
 				if (StringUtil::compareNoCase(file.FileName, filename))
 				{
-                    ////
-                    if (file.FileName.rfind("content://", 0) == 0) {
-                        fp = fdopen(FileSystem::OpenFDFileContent(file.FileName.c_str()), "rb");
-                    } else {
-                        fp = std::fopen(file.FileName.c_str(), mode);
-                    }
-                    ////
+					fp = std::fopen(file.FileName.c_str(), mode);
 					break;
 				}
 			}
@@ -1068,16 +1046,7 @@ int FileSystem::OpenFDFile(const char* filename, int flags, int mode, Error* err
 
 	return -1;
 #else
-
-    int fd;
-    ////
-    std::string _filename(filename);
-    if (_filename.rfind("content://", 0) == 0) {
-        fd = FileSystem::OpenFDFileContent(_filename.c_str());
-    } else {
-        fd = open(_filename.c_str(), flags, mode);
-    }
-    ////
+	const int fd = open(filename, flags, mode);
 	if (fd < 0)
 		Error::SetErrno(error, errno);
 	return fd;
@@ -1127,16 +1096,7 @@ std::FILE* FileSystem::OpenSharedCFile(const char* filename, const char* mode, F
 	Error::SetErrno(error, errno);
 	return nullptr;
 #else
-
-    std::FILE* fp;
-    ////
-    std::string _filename(filename);
-    if (_filename.rfind("content://", 0) == 0) {
-        fp = fdopen(FileSystem::OpenFDFileContent(_filename.c_str()), "rb");
-    } else {
-        fp = std::fopen(_filename.c_str(), mode);
-    }
-    ////
+	std::FILE* fp = std::fopen(filename, mode);
 	if (!fp)
 		Error::SetErrno(error, errno);
 	return fp;
@@ -1303,6 +1263,71 @@ size_t FileSystem::ReadFileWithPartialProgress(std::FILE* fp, void* dst, size_t 
 	}
 
 	return done;
+}
+
+#ifdef _WIN32
+static std::span<const u8> MapBinaryFileForRead(HANDLE handle)
+{
+	LARGE_INTEGER size;
+	if (!GetFileSizeEx(handle, &size) || size.QuadPart == 0)
+		return {};
+	HANDLE mapping = CreateFileMappingW(handle, nullptr, PAGE_READONLY, size.HighPart, size.LowPart, nullptr);
+	if (!mapping)
+		return {};
+	void* ptr = MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+	CloseHandle(mapping);
+	return {static_cast<const u8*>(ptr), static_cast<size_t>(size.QuadPart)};
+}
+#else
+static std::span<const u8> MapBinaryFileForRead(int fd)
+{
+	struct stat s;
+	if (0 != fstat(fd, &s) || s.st_size == 0)
+		return {};
+	size_t size = static_cast<size_t>(s.st_size);
+	void* ptr = mmap(nullptr, size, PROT_READ, MAP_FILE | MAP_SHARED, fd, 0);
+	if (ptr == MAP_FAILED)
+		return {};
+	return {static_cast<const u8*>(ptr), size};
+}
+#endif
+
+std::span<const u8> FileSystem::MapBinaryFileForRead(const char* path)
+{
+#ifdef _WIN32
+	const std::wstring wpath = GetWin32Path(path);
+	HANDLE handle = CreateFileW(wpath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+	if (handle == INVALID_HANDLE_VALUE)
+		return {};
+	std::span<const u8> result = ::MapBinaryFileForRead(handle);
+	CloseHandle(handle);
+	return result;
+#else
+	int fd = open(path, O_RDONLY);
+	if (fd <= 0)
+		return {};
+	std::span<const u8> result = ::MapBinaryFileForRead(fd);
+	close(fd);
+	return result;
+#endif
+}
+
+std::span<const u8> FileSystem::MapBinaryFileForRead(std::FILE* fp)
+{
+#ifdef _WIN32
+	return ::MapBinaryFileForRead(reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(fp))));
+#else
+	return ::MapBinaryFileForRead(fileno(fp));
+#endif
+}
+
+void FileSystem::UnmapFile(std::span<const u8> file)
+{
+#ifdef _WIN32
+	UnmapViewOfFile(const_cast<u8*>(file.data()));
+#else
+	munmap(const_cast<u8*>(file.data()), file.size());
+#endif
 }
 
 bool FileSystem::EnsureDirectoryExists(const char* path, bool recursive, Error* error)
@@ -2529,6 +2554,21 @@ bool FileSystem::DeleteDirectory(const char* path)
 		return false;
 
 	return (rmdir(path) == 0);
+}
+
+std::string FileSystem::GetPackagePath()
+{
+	// NOTE: The reason this function is separated from FileSystem::GetProgramPath() is because
+	// This path check breaks other usages of FileSystem::GetProgramPath for the AppImage.
+	// Notably the CI-generated AppImage fails to start because PCSX2 can't find its resources
+	// since it tries to look for them relative to the .AppImage file instead of relative to the actual executable.
+
+	// Check if we are running inside appimage. If so, return the path to the appimage instead.
+	if (const char* appimage_path = getenv("APPIMAGE"))
+		return std::string(appimage_path);
+
+	// Otherwise, find the executable file directly
+	return GetProgramPath();
 }
 
 std::string FileSystem::GetProgramPath()

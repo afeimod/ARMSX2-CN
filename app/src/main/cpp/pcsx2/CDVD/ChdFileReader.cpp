@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "ChdFileReader.h"
@@ -370,22 +370,7 @@ bool ChdFileReader::Open2(std::string filename, Error* error)
 
 	m_filename = std::move(filename);
 
-	// Support Android Storage Access Framework content:// URIs
-	FileSystem::ManagedCFilePtr fp;
-	if (m_filename.rfind("content://", 0) == 0) {
-		int fd = FileSystem::OpenFDFileContent(m_filename.c_str());
-		if (fd >= 0) {
-			FILE* f = fdopen(fd, "rb");
-			if (f)
-				fp.reset(f);
-		}
-		if (!fp) {
-			Error::SetStringView(error, "Failed to open content URI for CHD");
-			return false;
-		}
-	} else {
-		fp = FileSystem::OpenManagedSharedCFile(m_filename.c_str(), "rb", FileSystem::FileShareMode::DenyWrite, error);
-	}
+	auto fp = FileSystem::OpenManagedSharedCFile(m_filename.c_str(), "rb", FileSystem::FileShareMode::DenyWrite, error);
 	if (!fp)
 		return false;
 

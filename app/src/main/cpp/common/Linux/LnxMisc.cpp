@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Pcsx2Types.h"
@@ -13,16 +13,14 @@
 
 #include "fmt/format.h"
 
+#include <dbus/dbus.h>
 #include <spawn.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#if !defined(__ANDROID__)
-#include <dbus/dbus.h>
 #include <X11/Xlib.h>
 #include <X11/extensions/XInput2.h>
-#endif
 
 #include <cstdlib>
 #include <cstring>
@@ -142,7 +140,6 @@ std::string GetOSVersionString()
 #endif
 }
 
-#if !defined(__ANDROID__)
 static bool SetScreensaverInhibitDBus(const bool inhibit_requested, const char* program_name, const char* reason)
 {
 	static dbus_uint32_t s_cookie;
@@ -368,7 +365,6 @@ bool Common::PlaySoundAsync(const char* path)
 	return false;
 #endif
 }
-#endif
 
 void Threading::Sleep(int ms)
 {

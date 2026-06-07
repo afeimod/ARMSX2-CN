@@ -1,10 +1,12 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
 #include "vtlb.h"
-#include <atomic>
+#include "MemoryTypes.h"
+#include "common/BitUtils.h"
+#include "common/MemoryInterface.h"
 
 // This is a table of default virtual map addresses for ps2vm components.  These locations
 // are provided and used to assist in debugging and possibly hacking; as it makes it possible
@@ -23,13 +25,15 @@ namespace HostMemoryMap
 	// Main
 	//////////////////////////////////////////////////////////////////////////
 
-	// PS2 main memory, SPR, and ROMs (approximately 138.5MB, but we round up to 139MB for simplicity).
+	// PS2 main memory, SPR, and ROMs (approximately 143MB).
+	// Needs to be big enough to fit the EEVM_MemoryAllocMess struct
 	static constexpr u32 EEmemOffset = 0x00000000;
-	static constexpr u32 EEmemSize = 0x8B00000;
+	static constexpr u32 EEmemSize = Common::AlignUp(sizeof(EEVM_MemoryAllocMess), _1mb);
 
-	// IOP main memory (2MB + 64K + 256b, rounded up to 3MB for simplicity).
+	// IOP main memory (approximately 3MB).
+	// Needs to be big enough to fit the IopVM_MemoryAllocMess struct
 	static constexpr u32 IOPmemOffset = EEmemOffset + EEmemSize;
-	static constexpr u32 IOPmemSize = 0x300000;
+	static constexpr u32 IOPmemSize = Common::AlignUp(sizeof(IopVM_MemoryAllocMess), _1mb);
 
 	// VU0 and VU1 memory (40KB, rounded up to 1MB for simplicity).
 	static constexpr u32 VUmemOffset = IOPmemOffset + IOPmemSize;
@@ -50,9 +54,9 @@ namespace HostMemoryMap
 	// Code
 	//////////////////////////////////////////////////////////////////////////
 
-	// EE recompiler code cache area (128mb)
+	// EE recompiler code cache area (64mb)
 	static constexpr u32 EErecOffset = 0x00000000;
-	static constexpr u32 EErecSize = 0x8000000;
+	static constexpr u32 EErecSize = 0x4000000;
 
 	// IOP recompiler code cache area (32mb)
 	static constexpr u32 IOPrecOffset = EErecOffset + EErecSize;
@@ -143,31 +147,7 @@ namespace SysMemory
 } // namespace SysMemory
 
 
-#ifndef iPSX2_ENABLE_PSM_SAFE
-#define iPSX2_ENABLE_PSM_SAFE 0
-#endif
-#ifndef DEBUG_ONLY_PSM_SAFE
-#define DEBUG_ONLY_PSM_SAFE 0
-#endif
-#define P0_PSM_SAFE_ACTIVE ((iPSX2_ENABLE_PSM_SAFE == 1) && (DEBUG_ONLY_PSM_SAFE == 1))
-
-extern "C" void LogUnified(const char* fmt, ...);
-inline std::atomic<bool> g_p0_psm_logged{false};
-
-static __fi void* PSM_Impl(u32 mem)
-{
-	if (!g_p0_psm_logged.exchange(true))
-		LogUnified("@@P0_PSM_SAFE@@ active=%d dbg=%d\n", iPSX2_ENABLE_PSM_SAFE, DEBUG_ONLY_PSM_SAFE);
-#if P0_PSM_SAFE_ACTIVE
-	// [DEBUG_ONLY] SafePSM handles ROM pointers when using Handlers (fixes JIT crash)
-	extern void* SafePSM(u32 mem);
-	return SafePSM(mem);
-#else
-	return vtlb_GetPhyPtr((mem)&0x1fffffff);
-#endif
-}
-
-#define PSM(mem) (PSM_Impl(mem))
+#define PSM(mem) (vtlb_GetPhyPtr((mem)&0x1fffffff))
 
 #define psHu8(mem) (*(u8*)&eeHw[(mem)&0xffff])
 #define psHu16(mem) (*(u16*)&eeHw[(mem)&0xffff])
@@ -210,3 +190,23 @@ static __fi void memWrite128(u32 mem, const mem128_t& val) { vtlb_memWrite128(me
 
 extern void ba0W16(u32 mem, u16 value);
 extern u16 ba0R16(u32 mem);
+
+class EEMemoryInterface final : public MemoryInterface
+{
+public:
+	u8 Read8(u32 address, bool* valid = nullptr) override;
+	u16 Read16(u32 address, bool* valid = nullptr) override;
+	u32 Read32(u32 address, bool* valid = nullptr) override;
+	u64 Read64(u32 address, bool* valid = nullptr) override;
+	u128 Read128(u32 address, bool* valid = nullptr) override;
+	bool ReadBytes(u32 address, void* dest, u32 size) override;
+
+	bool Write8(u32 address, u8 value) override;
+	bool Write16(u32 address, u16 value) override;
+	bool Write32(u32 address, u32 value) override;
+	bool Write64(u32 address, u64 value) override;
+	bool Write128(u32 address, u128 value) override;
+	bool WriteBytes(u32 address, void* src, u32 size) override;
+
+	bool CompareBytes(u32 address, void* src, u32 size) override;
+};

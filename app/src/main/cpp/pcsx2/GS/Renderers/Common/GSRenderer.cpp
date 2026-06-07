@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "ImGui/FullscreenUI.h"
@@ -20,10 +20,9 @@
 #include "common/Path.h"
 #include "common/StringUtil.h"
 #include "common/Timer.h"
-#include "common/Console.h"
 
 #include "fmt/format.h"
-#include "IconsFontAwesome5.h"
+#include "IconsFontAwesome.h"
 
 #include <algorithm>
 #include <array>
@@ -90,25 +89,7 @@ bool GSRenderer::Merge(int field)
 
 	if (!PCRTCDisplays.PCRTCDisplays[0].enabled && !PCRTCDisplays.PCRTCDisplays[1].enabled)
 	{
-		// [iter253] Merge failcauseダンプ
-		static u32 s_merge_dis = 0;
-		if (s_merge_dis < 5)
-			Console.WriteLn("@@MERGE_FAIL_DISABLED@@ n=%u en0=%d en1=%d pmode_en1=%d pmode_en2=%d",
-				s_merge_dis++,
-				(int)PCRTCDisplays.PCRTCDisplays[0].enabled,
-				(int)PCRTCDisplays.PCRTCDisplays[1].enabled,
-				(int)m_regs->PMODE.EN1, (int)m_regs->PMODE.EN2);
 		m_real_size = GSVector2i(0, 0);
-
-		// [P48] Clear MAD buffer during disabled-display blank period
-		// to prevent stale GPU data from bleeding into the first valid frame
-		if (GSConfig.InterlaceMode == GSInterlaceMode::Automatic || GSConfig.InterlaceMode >= GSInterlaceMode::AdaptiveTFF)
-		{
-			GSTexture* mad_tex = g_gs_device->GetMAD();
-			if (mad_tex)
-				g_gs_device->ClearRenderTarget(mad_tex, 0);
-		}
-
 		return false;
 	}
 
@@ -131,12 +112,20 @@ bool GSRenderer::Merge(int field)
 				(!(m_regs->PMODE.MMOD == 1 && m_regs->PMODE.ALP == 0) || // Blend RC1 with non-zero alpha.
 				(m_regs->PMODE.AMOD == 0) ||                             // Use alpha of RC1.
 				(feedback_merge && m_regs->EXTBUF.FBIN == 0));           // Use RC1 for feedback merge.
+
+		// The following two flags determine if RC1 output completely overwrites RC2 output
+		// due to the alpha used for blending and the respective rectangles of the outputs.
+		const bool rc1_contains_rc2 =
+			PCRTCDisplays.PCRTCDisplays[0].displayRect.rcontains(PCRTCDisplays.PCRTCDisplays[1].displayRect);
+
+		const bool rc1_overwrites_rc2 = use_rc1 && rc1_contains_rc2 && m_regs->PMODE.MMOD == 1 && m_regs->PMODE.ALP == 255;
+
 		const bool use_rc2 =
-			PCRTCDisplays.PCRTCDisplays[1].enabled &&          // RC2 enabled.
-				// Blending RC2 and not overwriting completely with RC1.
-				((m_regs->PMODE.SLBG == 0 && !(use_rc1 && m_regs->PMODE.MMOD == 1 && m_regs->PMODE.ALP == 255)) ||
-				(m_regs->PMODE.AMOD == 1) ||                   // Use alpha of RC2.
-				(feedback_merge && m_regs->EXTBUF.FBIN == 1)); // Use RC2 for feedback merge.
+			PCRTCDisplays.PCRTCDisplays[1].enabled &&                // RC2 enabled.
+				((m_regs->PMODE.SLBG == 0 && !rc1_overwrites_rc2) || // Blending RC2 and not overwritten by RC1.
+				(m_regs->PMODE.AMOD == 1) ||                         // Use alpha of RC2.
+				(feedback_merge && m_regs->EXTBUF.FBIN == 1));       // Use RC2 for feedback merge.
+
 		if (use_rc1)
 			tex[0] = GetOutput(0, tex_scale[0], y_offset[0]);
 		if (use_rc2)
@@ -145,19 +134,8 @@ bool GSRenderer::Merge(int field)
 			tex[2] = GetFeedbackOutput(tex_scale[2]);
 	}
 
-
-
 	if (!tex[0] && !tex[1])
 	{
-		// [iter253] GetOutput null ダンプ
-		static u32 s_merge_tex = 0;
-		if (s_merge_tex < 10)
-			Console.WriteLn("@@MERGE_FAIL_NOTEX@@ n=%u en0=%d en1=%d fbw0=%d fbw1=%d",
-				s_merge_tex++,
-				(int)PCRTCDisplays.PCRTCDisplays[0].enabled,
-				(int)PCRTCDisplays.PCRTCDisplays[1].enabled,
-				(int)PCRTCDisplays.PCRTCDisplays[0].FBW,
-				(int)PCRTCDisplays.PCRTCDisplays[1].FBW);
 		m_real_size = GSVector2i(0, 0);
 
 		// Clear out the MAD buffer as some remnants of the previously shown frame came be left over, causing a flash for one frame.
@@ -206,7 +184,7 @@ bool GSRenderer::Merge(int field)
 
 		// src_gs_read is the size which we're really reading from GS memory.
 		src_gs_read[i] = ((GSVector4(curCircuit.framebufferRect) + GSVector4(0, y_offset[i], 0, y_offset[i])) * scale) / GSVector4(tex[i]->GetSize()).xyxy();
-		
+
 		float interlace_offset = 0.0f;
 		if (isReallyInterlaced() && m_regs->SMODE2.FFMD && !is_bob && !GSConfig.DisableInterlaceOffset && GSConfig.InterlaceMode != GSInterlaceMode::Off)
 		{
@@ -216,7 +194,7 @@ bool GSRenderer::Merge(int field)
 		if (m_scanmask_used)
 		{
 			int displayIntOffset = PCRTCDisplays.PCRTCDisplays[i].displayRect.y - PCRTCDisplays.PCRTCDisplays[1 - i].displayRect.y;
-			
+
 			if (displayIntOffset > 0)
 			{
 				displayIntOffset &= 1;
@@ -259,20 +237,6 @@ bool GSRenderer::Merge(int field)
 
 	const u32 c = (m_regs->BGCOLOR.U32[0] & 0x00FFFFFFu) | (m_regs->PMODE.ALP << 24);
 	g_gs_device->Merge(tex, src_gs_read, dst, fs, m_regs->PMODE, m_regs->EXTBUF, c);
-
-	// [P48] @@INTERLACE_PARAMS@@ — log interlace parameters per frame for A/B comparison
-	// Removal condition: P48 horizontal line artifacts root cause identified
-	{
-		static u32 s_interlace_n = 0;
-		if (s_interlace_n <= 120 || (s_interlace_n % 60 == 0)) {
-			const bool really_int = isReallyInterlaced();
-			Console.WriteLn("@@INTERLACE_PARAMS@@ n=%u field=%d field2=%d mode=%d really_int=%d ffmd=%d int=%d imode=%d fs=%dx%d",
-				s_interlace_n, field, field2, mode, (int)really_int,
-				(int)m_regs->SMODE2.FFMD, (int)m_regs->SMODE2.INT,
-				(int)GSConfig.InterlaceMode, fs.x, fs.y);
-		}
-		s_interlace_n++;
-	}
 
 	if (isReallyInterlaced() && GSConfig.InterlaceMode != GSInterlaceMode::Off)
 	{
@@ -596,7 +560,7 @@ bool GSRenderer::BeginPresentFrame(bool frame_skip)
 	}
 
 	// First frame after reopening is definitely going to be trash, so skip it.
-	Host::AddIconOSDMessage("GSDeviceLost", ICON_FA_EXCLAMATION_TRIANGLE,
+	Host::AddIconOSDMessage("GSDeviceLost", ICON_FA_TRIANGLE_EXCLAMATION,
 		TRANSLATE_SV("GS", "Host GPU device encountered an error and was recovered. This may have broken rendering."),
 		Host::OSD_CRITICAL_ERROR_DURATION);
 	return false;
@@ -615,9 +579,24 @@ void GSRenderer::EndPresentFrame()
 
 void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 {
-	if (GSConfig.SaveInfo && GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
+	if (GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()))
 	{
-		DumpGSPrivRegs(*m_regs, GetDrawDumpPath("%05d_f%05lld_vsync_gs_reg.txt", s_n, g_perfmon.GetFrame()));
+		if (GSConfig.SaveInfo)
+		{
+			DumpGSPrivRegs(*m_regs, GetDrawDumpPath("%05lld_f%05lld_vsync_gs_reg.txt", s_n, g_perfmon.GetFrame()));
+
+			DumpDrawInfo(false, false, true);
+		}
+
+		if (GSConfig.SaveTransferImages)
+			DumpTransferImages();
+
+		if (GSConfig.SaveFrameStats)
+		{
+			m_perfmon_frame = g_perfmon - m_perfmon_frame;
+			m_perfmon_frame.Dump(GetDrawDumpPath("%05lld_f%05lld_frame_stats.txt", s_n, g_perfmon.GetFrame()), GSIsHardwareRenderer());
+			m_perfmon_frame = g_perfmon;
+		}
 	}
 
 	const int fb_sprite_blits = g_perfmon.GetDisplayFramebufferSpriteBlits();
@@ -678,7 +657,6 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 		GSVector4i src_rect;
 		GSVector4 src_uv, draw_rect;
 		GSTexture* current = g_gs_device->GetCurrent();
-		bool present_frame = (current != nullptr) && !blank_frame;
 		if (current && !blank_frame)
 		{
 			src_rect = CalculateDrawSrcRect(current, m_real_size);
@@ -701,7 +679,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				}
 				else if (!cas_log_once)
 				{
-					Host::AddIconOSDMessage("CASUnsupported", ICON_FA_EXCLAMATION_TRIANGLE,
+					Host::AddIconOSDMessage("CASUnsupported", ICON_FA_TRIANGLE_EXCLAMATION,
 						TRANSLATE_SV("GS", "CAS is not available, your graphics driver does not support the required functionality."),
 						10.0f);
 					cas_log_once = true;
@@ -711,18 +689,18 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 
 		if (BeginPresentFrame(false))
 		{
-			if (present_frame)
+			if (current && !blank_frame)
 			{
 				const u64 current_time = Common::Timer::GetCurrentValue();
 				const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 				g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-					s_tv_shader_indices[GSConfig.TVShader], shader_time, GSConfig.LinearPresent != GSPostBilinearMode::Off);
+					s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
 			}
 
 			EndPresentFrame();
 
-			if (GSConfig.OsdShowGPU)
+			if (GSConfig.OsdShowGPU || GSDumpReplayer::IsReplayingDump())
 				PerformanceMetrics::OnGPUPresent(g_gs_device->GetAndResetAccumulatedGPUTime());
 		}
 
@@ -734,6 +712,15 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 	{
 		u32 screenshot_width, screenshot_height;
 		std::vector<u32> screenshot_pixels;
+
+		if (GSConfig.LinearPresent == GSPostBilinearMode::BilinearSharp)
+		{
+			const GSTexture* current = g_gs_device->GetCurrent();
+			const GSVector2i internal_res = GetInternalResolution();
+
+			if (current && (current->GetWidth() > internal_res.x || current->GetHeight() > internal_res.y))
+				g_gs_device->Resize(internal_res.x, internal_res.y);
+		}
 
 		if (!m_dump && m_dump_frames > 0)
 		{
@@ -831,7 +818,7 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 				GSTexture* temp = g_gs_device->CreateRenderTarget(size.x, size.y, GSTexture::Format::Color, false);
 				if (temp)
 				{
-					g_gs_device->StretchRect(current, temp, GSVector4(0, 0, size.x, size.y));
+					g_gs_device->StretchRect(current, temp, GSVector4(0, 0, size.x, size.y), ShaderConvert::COPY, Biln);
 					GSCapture::DeliverVideoFrame(temp);
 					g_gs_device->Recycle(temp);
 				}
@@ -853,22 +840,21 @@ void GSRenderer::VSync(u32 field, bool registers_written, bool idle_frame)
 			}
 		}
 	}
+
+	if (GSConfig.ShouldDump(s_n, g_perfmon.GetFrame()) && GSConfig.SaveTransferImages)
+		DumpTransferImages();
 }
 
-void GSRenderer::QueueSnapshot(const std::string& path, u32 gsdump_frames)
+void GSRenderer::QueueSnapshot(const std::string& path, const u32 gsdump_frames)
 {
 	if (!m_snapshot.empty())
 		return;
 
 	// Allows for providing a complete path
 	if (path.size() > 4 && StringUtil::EndsWithNoCase(path, ".png"))
-	{
 		m_snapshot = path.substr(0, path.size() - 4);
-	}
 	else
-	{
 		m_snapshot = GSGetBaseSnapshotFilename();
-	}
 
 	// this is really gross, but wx we get the snapshot request after shift...
 	m_dump_frames = gsdump_frames;
@@ -922,12 +908,42 @@ static std::string GSGetBaseFilename()
 
 std::string GSGetBaseSnapshotFilename()
 {
-	// prepend snapshots directory
+	// If organize by game is enabled, use or create a game-specific folder.
+	if (GSConfig.OrganizeSnapshotsByGame)
+	{
+		const bool prefer_english = Host::GetBaseBoolSettingValue("UI", "PreferEnglishGameList", false);
+		std::string game_name = VMManager::GetTitle(prefer_english);
+		if (!game_name.empty())
+		{
+			Path::SanitizeFileName(&game_name);
+			const std::string game_dir = Path::Combine(EmuFolders::Snapshots, game_name);
+
+			// Make sure the per-game directory exists or that we can successfully create it.
+			if (FileSystem::DirectoryExists(game_dir.c_str()) || FileSystem::CreateDirectoryPath(game_dir.c_str(), false))
+				return Path::Combine(game_dir, GSGetBaseFilename());
+		}
+	}
+
 	return Path::Combine(EmuFolders::Snapshots, GSGetBaseFilename());
 }
 
 std::string GSGetBaseVideoFilename()
 {
+	// If organize by game is enabled, use or create a game-specific folder.
+	if (GSConfig.OrganizeVideoCaptureByGame)
+	{
+		const bool prefer_english = Host::GetBaseBoolSettingValue("UI", "PreferEnglishGameList", false);
+		std::string game_name = VMManager::GetTitle(prefer_english);
+		if (!game_name.empty())
+		{
+			Path::SanitizeFileName(&game_name);
+			const std::string game_dir = Path::Combine(EmuFolders::Videos, game_name);
+
+			// Make sure the per-game directory exists or that we can successfully create it.
+			if (FileSystem::DirectoryExists(game_dir.c_str()) || FileSystem::CreateDirectoryPath(game_dir.c_str(), false))
+				return Path::Combine(game_dir, GSGetBaseFilename());
+		}
+	}
 	// prepend video directory
 	return Path::Combine(EmuFolders::Videos, GSGetBaseFilename());
 }
@@ -956,7 +972,7 @@ void GSRenderer::PresentCurrentFrame()
 			const float shader_time = static_cast<float>(Common::Timer::ConvertValueToSeconds(current_time - m_shader_time_start));
 
 			g_gs_device->PresentRect(current, src_uv, nullptr, draw_rect,
-				s_tv_shader_indices[GSConfig.TVShader], shader_time, GSConfig.LinearPresent != GSPostBilinearMode::Off);
+				s_tv_shader_indices[GSConfig.TVShader], shader_time, BilnIf(GSConfig.LinearPresent != GSPostBilinearMode::Off));
 		}
 
 		EndPresentFrame();
@@ -1070,7 +1086,7 @@ bool GSRenderer::SaveSnapshotToMemory(u32 window_width, u32 window_height, bool 
 		if (dl)
 		{
 			const GSVector4i rc(0, 0, draw_width, draw_height);
-			g_gs_device->StretchRect(current, src_uv, rt, GSVector4(rc), ShaderConvert::TRANSPARENCY_FILTER);
+			g_gs_device->StretchRect(current, src_uv, rt, GSVector4(rc), ShaderConvert::TRANSPARENCY_FILTER, Biln);
 			dl->CopyFromTexture(rc, rt, rc, 0);
 			dl->Flush();
 
@@ -1112,7 +1128,7 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 		if (i == 1 && !r.PMODE.EN2)
 			continue;
 
-		std::fprintf(fp.get(), "DISPFB[%d] BP=%05x BW=%u PSM=%u DBX=%u DBY=%u\n",
+		std::fprintf(fp.get(), "DISPFB%d: { BP: 0x%05x, BW: %u, PSM: %u, DBX: %u, DBY: %u }\n",
 			i,
 			r.DISP[i].DISPFB.Block(),
 			r.DISP[i].DISPFB.FBW,
@@ -1120,7 +1136,7 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 			r.DISP[i].DISPFB.DBX,
 			r.DISP[i].DISPFB.DBY);
 
-		std::fprintf(fp.get(), "DISPLAY[%d] DX=%u DY=%u DW=%u DH=%u MAGH=%u MAGV=%u\n",
+		std::fprintf(fp.get(), "DISPLAY%d: { DX: %u, DY: %u, DW: %u, DH: %u, MAGH: %u, MAGV: %u }\n",
 			i,
 			r.DISP[i].DISPLAY.DX,
 			r.DISP[i].DISPLAY.DY,
@@ -1130,7 +1146,7 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 			r.DISP[i].DISPLAY.MAGV);
 	}
 
-	std::fprintf(fp.get(), "PMODE EN1=%u EN2=%u CRTMD=%u MMOD=%u AMOD=%u SLBG=%u ALP=%u\n",
+	std::fprintf(fp.get(), "PMODE: { EN1: %u, EN2: %u, CRTMD: %u, MMOD: %u, AMOD: %u, SLBG: %u, ALP: %u }\n",
 		r.PMODE.EN1,
 		r.PMODE.EN2,
 		r.PMODE.CRTMD,
@@ -1139,7 +1155,8 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 		r.PMODE.SLBG,
 		r.PMODE.ALP);
 
-	std::fprintf(fp.get(), "SMODE1 CLKSEL=%u CMOD=%u EX=%u GCONT=%u LC=%u NVCK=%u PCK2=%u PEHS=%u PEVS=%u PHS=%u PRST=%u PVS=%u RC=%u SINT=%u SLCK=%u SLCK2=%u SPML=%u T1248=%u VCKSEL=%u VHP=%u XPCK=%u\n",
+	std::fprintf(fp.get(),
+		"SMODE1: { CLKSEL: %u, CMOD: %u, EX: %u, GCONT: %u, LC: %u, NVCK: %u, PCK2: %u, PEHS: %u, PEVS: %u, PHS: %u, PRST: %u, PVS: %u, RC: %u, SINT: %u, SLCK: %u, SLCK2: %u, SPML: %u, T1248: %u, VCKSEL: %u, VHP: %u, XPCK: %u }\n",
 		r.SMODE1.CLKSEL,
 		r.SMODE1.CMOD,
 		r.SMODE1.EX,
@@ -1162,24 +1179,24 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 		r.SMODE1.VHP,
 		r.SMODE1.XPCK);
 
-	std::fprintf(fp.get(), "SMODE2 INT=%u FFMD=%u DPMS=%u\n",
+	std::fprintf(fp.get(), "SMODE2: { INT: %u, FFMD: %u, DPMS: %u }\n",
 		r.SMODE2.INT,
 		r.SMODE2.FFMD,
 		r.SMODE2.DPMS);
 
-	std::fprintf(fp.get(), "SRFSH %08x_%08x\n",
+	std::fprintf(fp.get(), "SRFSH: { U32_0: 0x%08x, U32_1: 0x%08x }\n",
 		r.SRFSH.U32[0],
 		r.SRFSH.U32[1]);
 
-	std::fprintf(fp.get(), "SYNCH1 %08x_%08x\n",
+	std::fprintf(fp.get(), "SYNCH1: { U32_0: 0x%08x, U32_1: 0x%08x }\n",
 		r.SYNCH1.U32[0],
 		r.SYNCH1.U32[1]);
 
-	std::fprintf(fp.get(), "SYNCH2 %08x_%08x\n",
+	std::fprintf(fp.get(), "SYNCH2: { U32_0: 0x%08x, U32_1: 0x%08x }\n",
 		r.SYNCH2.U32[0],
 		r.SYNCH2.U32[1]);
 
-	std::fprintf(fp.get(), "SYNCV VBP=%u VBPE=%u VDP=%u VFP=%u VFPE=%u VS=%u\n",
+	std::fprintf(fp.get(), "SYNCV: { VBP: %u, VBPE: %u, VDP: %u, VFP: %u, VFPE: %u, VS: %u }\n",
 		r.SYNCV.VBP,
 		r.SYNCV.VBPE,
 		r.SYNCV.VDP,
@@ -1187,21 +1204,21 @@ void DumpGSPrivRegs(const GSPrivRegSet& r, const std::string& filename)
 		r.SYNCV.VFPE,
 		r.SYNCV.VS);
 
-	std::fprintf(fp.get(), "CSR %08x_%08x\n",
+	std::fprintf(fp.get(), "CSR: { U32_0: 0x%08x, U32_1: 0x%08x }\n",
 		r.CSR.U32[0],
 		r.CSR.U32[1]);
 
-	std::fprintf(fp.get(), "BGCOLOR B=%u G=%u R=%u\n",
+	std::fprintf(fp.get(), "BGCOLOR: { B: %u, G: %u, R: %u }\n",
 		r.BGCOLOR.B,
 		r.BGCOLOR.G,
 		r.BGCOLOR.R);
 
-	std::fprintf(fp.get(), "EXTBUF BP=0x%x BW=%u FBIN=%u WFFMD=%u EMODA=%u EMODC=%u WDX=%u WDY=%u\n",
+	std::fprintf(fp.get(), "EXTBUF: { BP: 0x%05x, BW: %u, FBIN: %u, WFFMD: %u, EMODA: %u, EMODC: %u, WDX: %u, WDY: %u }\n",
 		r.EXTBUF.EXBP, r.EXTBUF.EXBW, r.EXTBUF.FBIN, r.EXTBUF.WFFMD,
 		r.EXTBUF.EMODA, r.EXTBUF.EMODC, r.EXTBUF.WDX, r.EXTBUF.WDY);
 
-	std::fprintf(fp.get(), "EXTDATA SX=%u SY=%u SMPH=%u SMPV=%u WW=%u WH=%u\n",
+	std::fprintf(fp.get(), "EXTDATA: { SX: %u, SY: %u, SMPH: %u, SMPV: %u, WW: %u, WH: %u }\n",
 		r.EXTDATA.SX, r.EXTDATA.SY, r.EXTDATA.SMPH, r.EXTDATA.SMPV, r.EXTDATA.WW, r.EXTDATA.WH);
 
-	std::fprintf(fp.get(), "EXTWRITE EN=%u\n", r.EXTWRITE.WRITE);
+	std::fprintf(fp.get(), "EXTWRITE: { EN: %u }\n", r.EXTWRITE.WRITE);
 }

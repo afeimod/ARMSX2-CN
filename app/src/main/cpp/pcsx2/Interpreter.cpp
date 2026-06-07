@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
@@ -27,7 +27,7 @@ static bool intExitExecution = false;
 static fastjmp_buf intJmpBuf;
 static u32 intLastBranchTo;
 
-static void intEventTest();
+void intEventTest();
 
 
 void intUpdateCPUCycles()
@@ -71,7 +71,10 @@ void intBreakpoint(bool memcheck)
 {
 	const u32 pc = cpuRegs.pc;
  	if (CBreakPoints::CheckSkipFirst(BREAKPOINT_EE, pc) != 0)
+	{
+		CBreakPoints::ClearSkipFirst(BREAKPOINT_EE);
 		return;
+	}
 
 	if (!memcheck)
 	{
@@ -88,7 +91,7 @@ void intBreakpoint(bool memcheck)
 void intMemcheck(u32 op, u32 bits, bool store)
 {
 	// compute accessed address
-	u32 start = cpuRegs.GPR.r[(op >> 21) & 0x1F].UD[0];
+	u32 start = cpuRegs.GPR.r[(op >> 21) & 0x1F].UL[0];
 	if (static_cast<s16>(op) != 0)
 		start += static_cast<s16>(op);
 	if (bits == 128)
@@ -165,6 +168,8 @@ static void execI()
 		intBreakpoint(false);
 
 	intCheckMemcheck();
+
+	CBreakPoints::CommitClearSkipFirst(BREAKPOINT_EE);
 #endif
 
 	const u32 pc = cpuRegs.pc;
@@ -269,7 +274,7 @@ static __fi void _doBranch_shared(u32 tar)
 
 				if (can_skip)
 				{
-					if (static_cast<s32>(cpuRegs.nextEventCycle - cpuRegs.cycle) > 0)
+					if (static_cast<s64>(cpuRegs.nextEventCycle - cpuRegs.cycle) > 0)
 						cpuRegs.cycle = cpuRegs.nextEventCycle;
 					else
 						cpuRegs.nextEventCycle = cpuRegs.cycle;
@@ -326,6 +331,35 @@ void intDoBranch(u32 target)
 		intUpdateCPUCycles();
 		intEventTest();
 	}
+}
+
+// Interpret exactly one guest instruction at cpuRegs.pc using the interpreter,
+// then return. This is the recompiler's per-instruction fallback: the ARM64 EE
+// rec dispatcher calls it for opcodes it cannot yet compile (likely branches,
+// coprocessor ops, syscalls, traps, ...). It mirrors execI; for branch opcodes
+// the interpreter's own branch functions handle the delay slot and PC redirect
+// (and, when taken, flush the accrued cycle count via doBranch/intUpdateCPUCycles).
+// For every non-branch op we flush the cycle count here so the rec's cpuRegs.cycle
+// stays current. It must NOT do the interpreter's fastjmp exit (intJmpBuf is not
+// set up in rec context); the rec drives exits through its own event test.
+void intExecuteOneInst()
+{
+	const u32 thispc = cpuRegs.pc;
+	// Pre-increment PC: exception handlers and branch target math expect cpuRegs.pc
+	// to already point at the delay slot (matches execI).
+	cpuRegs.pc += 4;
+	cpuRegs.code = memRead32(thispc);
+
+	const OPCODE& opcode = GetCurrentInstruction();
+	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+
+	opcode.interpret();
+
+	// Branch ops flush their own cycles inside doBranch when taken; everything else
+	// (including not-taken branches, which just fall through to the delay slot) we
+	// flush immediately so the dynarec's cycle/event accounting doesn't drift.
+	if (!(opcode.flags & IS_BRANCH))
+		intUpdateCPUCycles();
 }
 
 void intSetBranch()

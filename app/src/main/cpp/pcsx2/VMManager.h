@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -6,6 +6,7 @@
 #include <functional>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -36,8 +37,34 @@ struct VMBootParameters
 
 	std::optional<bool> fast_boot;
 	std::optional<bool> fullscreen;
+	std::optional<bool> start_turbo;
+	std::optional<bool> start_unlimited;
 	bool disable_achievements_hardcore_mode = false;
 };
+
+enum class VMBootResult
+{
+	/// The boot succeeded.
+	StartupSuccess,
+	/// The boot failed and an error should be displayed in the UI.
+	StartupFailure,
+	/// The boot failed because the user needs to be prompted to disable
+	/// hardcore mode. If the user agrees, VMManager::Initialize should be
+	/// called again with disable_achievements_hardcore_mode set to true.
+	PromptDisableHardcoreMode
+};
+
+/// Callback used to restart the VM boot process after the user has consented
+/// to hardcore mode being disabled.
+using VMBootRestartCallback = std::function<void()>;
+
+/// Callback used when the VM boot process has been interrupted because the user
+/// needs to be prompted to disable hardcore mode.
+using VMBootHardcoreDisableCallback = std::function<void(std::string reason, VMBootRestartCallback restart_callback)>;
+
+/// Callback used when the VM boot process has finished. This may be called
+/// asynchronously after the user has been prompted to disable hardcore mode.
+using VMBootDoneCallback = std::function<void(VMBootResult result, const Error& error)>;
 
 namespace VMManager
 {
@@ -83,11 +110,22 @@ namespace VMManager
 	/// Returns the path to the ELF which is currently running. Only safe to read on the EE thread.
 	const std::string& GetCurrentELF();
 
-	/// Initializes all system components.
-	bool Initialize(VMBootParameters boot_params);
+	/// Initializes all system components. May restart itself asynchronously
+	/// using the provided hardcore_disable_callback function. Will call the
+	/// done_callback function on either success or failure.
+	void InitializeAsync(
+		const VMBootParameters& boot_params,
+		VMBootHardcoreDisableCallback hardcore_disable_callback,
+		VMBootDoneCallback done_callback);
+
+	/// Initializes all system components. Will not attempt to restart itself.
+	VMBootResult Initialize(const VMBootParameters& boot_params, Error* error = nullptr);
 
 	/// Destroys all system components.
 	void Shutdown(bool save_resume_state);
+
+	/// Resets all subsystems to a cold boot if it's safe to do so.
+	bool RequestReset();
 
 	/// Resets all subsystems to a cold boot.
 	void Reset();
@@ -127,16 +165,17 @@ namespace VMManager
 	bool HasSaveStateInSlot(const char* game_serial, u32 game_crc, s32 slot);
 
 	/// Loads state from the specified file.
-	bool LoadState(const char* filename);
+	bool LoadState(const char* filename, Error* error = nullptr);
 
 	/// Loads state from the specified slot.
-	bool LoadStateFromSlot(s32 slot, bool backup = false);
+	bool LoadStateFromSlot(s32 slot, bool backup = false, Error* error = nullptr);
 
 	/// Saves state to the specified filename.
-	bool SaveState(const char* filename, bool zip_on_thread = true, bool backup_old_state = false);
+	void SaveState(const char* filename, bool zip_on_thread, bool backup_old_state,
+		std::function<void(const std::string&)> error_callback);
 
 	/// Saves state to the specified slot.
-	bool SaveStateToSlot(s32 slot, bool zip_on_thread = true);
+	void SaveStateToSlot(s32 slot, bool zip_on_thread, std::function<void(const std::string&)> error_callback);
 
 	/// Waits until all compressing save states have finished saving to disk.
 	void WaitForSaveStateFlush();
@@ -174,7 +213,7 @@ namespace VMManager
 
 	/// Changes the disc in the virtual CD/DVD drive. Passing an empty will remove any current disc.
 	/// Returns false if the new disc can't be opened.
-	bool ChangeDisc(CDVD_SourceType source, const std::string& path);
+	bool ChangeDisc(CDVD_SourceType source, std::string path);
 
 	/// Changes the ELF to boot ("ELF override"). The VM will be reset.
 	bool SetELFOverride(std::string path);
@@ -183,37 +222,37 @@ namespace VMManager
 	bool ChangeGSDump(const std::string& path);
 
 	/// Returns true if the specified path is an ELF.
-	bool IsElfFileName(std::string_view path);
+	bool IsElfFileName(const std::string_view path);
 
 	/// Returns true if the specified path is a blockdump.
-	bool IsBlockDumpFileName(std::string_view path);
+	bool IsBlockDumpFileName(const std::string_view path);
 
 	/// Returns true if the specified path is a GS Dump.
-	bool IsGSDumpFileName(std::string_view path);
+	bool IsGSDumpFileName(const std::string_view path);
 
 	/// Returns true if the specified path is a save state.
-	bool IsSaveStateFileName(std::string_view path);
+	bool IsSaveStateFileName(const std::string_view path);
 
 	/// Returns true if the specified path is a disc image.
-	bool IsDiscFileName(std::string_view path);
+	bool IsDiscFileName(const std::string_view path);
 
 	/// Returns true if the specified path is a disc/elf/etc.
-	bool IsLoadableFileName(std::string_view path);
+	bool IsLoadableFileName(const std::string_view path);
 
 	/// Returns the serial to use when computing the game settings path for the current game.
 	std::string GetSerialForGameSettings();
 
 	/// Returns the path for the game settings ini file for the specified CRC.
-	std::string GetGameSettingsPath(std::string_view game_serial, u32 game_crc);
+	std::string GetGameSettingsPath(const std::string_view game_serial, u32 game_crc);
 
 	/// Returns the ISO override for an ELF via gamesettings.
 	std::string GetDiscOverrideFromGameSettings(const std::string& elf_path);
 
 	/// Returns the path for the input profile ini file with the specified name (may not exist).
-	std::string GetInputProfilePath(std::string_view name);
+	std::string GetInputProfilePath(const std::string_view name);
 
 	/// Returns the path for the debugger settings json file for the specified game serial and CRC.
-	std::string GetDebuggerSettingsFilePath(std::string_view game_serial, u32 game_crc);
+	std::string GetDebuggerSettingsFilePath(const std::string_view game_serial, u32 game_crc);
 
 	/// Returns the path for the debugger settings json file for the current game.
 	std::string GetDebuggerSettingsFilePathForCurrentGame();
@@ -228,29 +267,11 @@ namespace VMManager
 	/// Returns the time elapsed in the current play session.
 	u64 GetSessionPlayedTime();
 
-	void InitializeDiscordPresence();
-	void ShutdownDiscordPresence();
-	void PollDiscordPresence();
-
 	/// Called when the rich presence string, provided by RetroAchievements, changes.
 	void UpdateDiscordPresence(bool update_session_time);
 
-#ifdef __APPLE__
-#include <TargetConditionals.h>
-#endif
-
-#if defined(__ANDROID__) || (defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE)
-	void AndroidDiscordConfigure(uint64_t app_id, const std::string& custom_scheme, std::string display_name,
-		const std::string& large_image_key);
-	void AndroidDiscordProvideStoredToken(const std::string& access_token, const std::string& refresh_token,
-		const std::string& token_type, int64_t expires_at_epoch_seconds, const std::string& scope);
-	void AndroidDiscordBeginAuthorize();
-	void AndroidDiscordSetAppForeground(bool is_foreground);
-	void AndroidDiscordClearTokens();
-	bool AndroidDiscordIsLoggedIn();
-	bool AndroidDiscordIsClientReady();
-	std::string AndroidDiscordConsumeLastError();
-#endif
+	/// Append bytes to the EE SIO RX FIFO. If it returns false, the FIFO is full and data is not inserted.
+	bool WriteBytesToEESIORXFIFO(const std::span<const u8> data);
 
 	/// Internal callbacks, implemented in the emu core.
 	namespace Internal
@@ -343,14 +364,14 @@ namespace Host
 	void OnPerformanceMetricsUpdated();
 
 	/// Called when a save state is loading, before the file is processed.
-	void OnSaveStateLoading(std::string_view filename);
+	void OnSaveStateLoading(const std::string_view filename);
 
 	/// Called after a save state is successfully loaded. If the save state was invalid, was_successful will be false.
-	void OnSaveStateLoaded(std::string_view filename, bool was_successful);
+	void OnSaveStateLoaded(const std::string_view filename, bool was_successful);
 
 	/// Called when a save state is being created/saved. The compression/write to disk is asynchronous, so this callback
 	/// just signifies that the save has started, not necessarily completed.
-	void OnSaveStateSaved(std::string_view filename);
+	void OnSaveStateSaved(const std::string_view filename);
 
 	/// Provided by the host; called when the running executable changes.
 	void OnGameChanged(const std::string& title, const std::string& elf_override, const std::string& disc_path,

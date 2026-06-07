@@ -1,13 +1,11 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
 #include "R5900OpcodeTables.h"
 #include "x86/iR5900.h"
 
-#if !defined(__ANDROID__)
 using namespace x86Emitter;
-#endif
 
 namespace Interp = R5900::Interpreter::OpcodeImpl;
 
@@ -56,26 +54,21 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 		if (xmmlo >= 0)
 		{
 			// we use CDQE over MOVSX because it's shorter.
-//			xCDQE();
-            armAsm->Sxtw(RAX, EAX);
-//			xPINSR.Q(xRegisterSSE(xmmlo), rax, static_cast<u8>(upper));
-            armAsm->Ins(a64::QRegister(xmmlo).V2D(), static_cast<u8>(upper), RAX);
+			xCDQE();
+			xPINSR.Q(xRegisterSSE(xmmlo), rax, static_cast<u8>(upper));
 		}
 		else
 		{
 			const int gprlo = upper ? -1 : (loused ? _allocX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE));
 			if (gprlo >= 0)
 			{
-//				xMOVSX(xRegister64(gprlo), eax);
-                armAsm->Sxtw(HostX(gprlo), EAX);
+				xMOVSX(xRegister64(gprlo), eax);
 			}
 			else
 			{
-//				xCDQE();
-                armAsm->Sxtw(RAX, EAX);
+				xCDQE();
 				eax_sign_extended = true;
-//				xMOV(ptr64[&cpuRegs.LO.UD[upper]], rax);
-                armStore(PTR_CPU(cpuRegs.LO.UD[upper]), RAX);
+				xMOV(ptr64[&cpuRegs.LO.UD[upper]], rax);
 			}
 		}
 	}
@@ -87,25 +80,20 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 		const int xmmhi = hiusedxmm ? _allocGPRtoXMMreg(XMMGPR_HI, MODE_READ | MODE_WRITE) : _checkXMMreg(XMMTYPE_GPRREG, XMMGPR_HI, MODE_WRITE);
 		if (xmmhi >= 0)
 		{
-//			xMOVSX(rdx, edx);
-            armAsm->Sxtw(RDX, EDX);
-//			xPINSR.Q(xRegisterSSE(xmmhi), rdx, static_cast<u8>(upper));
-            armAsm->Ins(a64::QRegister(xmmhi).V2D(), static_cast<u8>(upper), RDX);
+			xMOVSX(rdx, edx);
+			xPINSR.Q(xRegisterSSE(xmmhi), rdx, static_cast<u8>(upper));
 		}
 		else
 		{
 			const int gprhi = upper ? -1 : (hiused ? _allocX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE));
 			if (gprhi >= 0)
 			{
-//				xMOVSX(xRegister64(gprhi), edx);
-                armAsm->Sxtw(HostX(gprhi), EDX);
+				xMOVSX(xRegister64(gprhi), edx);
 			}
 			else
 			{
-//				xMOVSX(rdx, edx);
-                armAsm->Sxtw(RDX, EDX);
-//				xMOV(ptr64[&cpuRegs.HI.UD[upper]], rdx);
-                armStore(PTR_CPU(cpuRegs.HI.UD[upper]), RDX);
+				xMOVSX(rdx, edx);
+				xMOV(ptr64[&cpuRegs.HI.UD[upper]], rdx);
 			}
 		}
 	}
@@ -117,33 +105,16 @@ static void recWritebackHILO(int info, bool writed, bool upper)
 		// But currently the templates aren't hooked up for that - we'd need a "allow xmm" flag.
 		if (info & PROCESS_EE_D)
 		{
-			if (eax_sign_extended) {
-//                xMOV(xRegister64(HostGprPhys(EEREC_D)), rax);
-                armAsm->Mov(HostX(EEREC_D), RAX);
-            }
-			else {
-//                xMOVSX(xRegister64(HostGprPhys(EEREC_D)), eax);
-                armAsm->Sxtw(HostX(EEREC_D), EAX);
-            }
-			// [FIX] Force-store Rd to cpuRegs immediately after writing to host register.
-			// Root cause: LO/HI allocation above can evict EEREC_D's slot, causing
-			// the slot→phys mapping to become stale. When the evicted value is written
-			// back to cpuRegs during eviction, it uses the OLD host register value
-			// (before the MULT result was placed in EAX). The Sxtw/Mov above writes
-			// to HostX(EEREC_D) which may now point to a slot reassigned to LO/HI.
-			// This force-store ensures the correct multiply result reaches cpuRegs.GPR.r[Rd]
-			// while the host register still holds the correct value.
-			// Same bug class as SLT eviction fix (5-slot ARM64 allocator pressure).
-			armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), HostX(EEREC_D));
+			if (eax_sign_extended)
+				xMOV(xRegister64(EEREC_D), rax);
+			else
+				xMOVSX(xRegister64(EEREC_D), eax);
 		}
 		else
 		{
-			if (!eax_sign_extended) {
-//                xCDQE();
-                armAsm->Sxtw(RAX, EAX);
-            }
-//			xMOV(ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
-            armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), RAX);
+			if (!eax_sign_extended)
+				xCDQE();
+			xMOV(ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
 		}
 	}
 }
@@ -164,22 +135,16 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 		const int xmmlo = lolivexmm ? _allocGPRtoXMMreg(XMMGPR_LO, MODE_READ | MODE_WRITE) : _checkXMMreg(XMMTYPE_GPRREG, XMMGPR_LO, MODE_WRITE);
 		if (xmmlo >= 0)
 		{
-//			xMOV64(rax, loval);
-            armAsm->Mov(RAX, loval);
-//			xPINSR.Q(xRegisterSSE(xmmlo), rax, static_cast<u8>(upper));
-            armAsm->Ins(a64::QRegister(xmmlo).V2D(), static_cast<u8>(upper), RAX);
+			xMOV64(rax, loval);
+			xPINSR.Q(xRegisterSSE(xmmlo), rax, static_cast<u8>(upper));
 		}
 		else
 		{
 			const int gprlo = upper ? -1 : (lolive ? _allocX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_LO, MODE_WRITE));
-			if (gprlo >= 0) {
-//                xImm64Op(xMOV, xRegister64(gprlo), rax, loval);
-                armAsm->Mov(HostX(gprlo), loval);
-            }
-			else {
-//                xImm64Op(xMOV, ptr64[&cpuRegs.LO.UD[upper]], rax, loval);
-                armStore64(PTR_CPU(cpuRegs.LO.UD[upper]), loval);
-            }
+			if (gprlo >= 0)
+				xImm64Op(xMOV, xRegister64(gprlo), rax, loval);
+			else
+				xImm64Op(xMOV, ptr64[&cpuRegs.LO.UD[upper]], rax, loval);
 		}
 	}
 
@@ -190,22 +155,16 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 		const int xmmhi = hilivexmm ? _allocGPRtoXMMreg(XMMGPR_HI, MODE_READ | MODE_WRITE) : _checkXMMreg(XMMTYPE_GPRREG, XMMGPR_HI, MODE_WRITE);
 		if (xmmhi >= 0)
 		{
-//			xMOV64(rax, hival);
-            armAsm->Mov(RAX, hival);
-//			xPINSR.Q(xRegisterSSE(xmmhi), rax, static_cast<u8>(upper));
-            armAsm->Ins(a64::QRegister(xmmhi).V2D(), static_cast<u8>(upper), RAX);
+			xMOV64(rax, hival);
+			xPINSR.Q(xRegisterSSE(xmmhi), rax, static_cast<u8>(upper));
 		}
 		else
 		{
 			const int gprhi = upper ? -1 : (hilive ? _allocX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE) : _checkX86reg(X86TYPE_GPR, XMMGPR_HI, MODE_WRITE));
-			if (gprhi >= 0) {
-//                xImm64Op(xMOV, xRegister64(gprhi), rax, hival);
-                armAsm->Mov(HostX(gprhi), hival);
-            }
-			else {
-//                xImm64Op(xMOV, ptr64[&cpuRegs.HI.UD[upper]], rax, hival);
-                armStore64(PTR_CPU(cpuRegs.HI.UD[upper]), hival);
-            }
+			if (gprhi >= 0)
+				xImm64Op(xMOV, xRegister64(gprhi), rax, hival);
+			else
+				xImm64Op(xMOV, ptr64[&cpuRegs.HI.UD[upper]], rax, hival);
 		}
 	}
 
@@ -215,14 +174,10 @@ static void recWritebackConstHILO(u64 res, bool writed, int upper)
 		_eeOnWriteReg(_Rd_, 0);
 
 		const int regd = _checkX86reg(X86TYPE_GPR, _Rd_, MODE_WRITE);
-		if (regd >= 0) {
-//            xImm64Op(xMOV, xRegister64(regd), rax, loval);
-            armAsm->Mov(HostX(regd), loval);
-        }
-		else {
-//            xImm64Op(xMOV, ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax, loval);
-            armStore64(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), loval);
-        }
+		if (regd >= 0)
+			xImm64Op(xMOV, xRegister64(regd), rax, loval);
+		else
+			xImm64Op(xMOV, ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax, loval);
 	}
 }
 
@@ -239,77 +194,35 @@ static void recMULTsuper(int info, bool sign, bool upper, int process)
 	// TODO(Stenzek): Use MULX where available.
 	if (process & PROCESS_CONSTS)
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-		if (info & PROCESS_EE_T) {
-//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_T))) : xUMUL(xRegister32(HostGprPhys(EEREC_T)));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_T))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_T)));
-        }
-		else {
-//            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]) : xUMUL(
-//                    ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-            armLoad(EEX, PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0]));
-            sign ? armAsm->Smull(RAX, EAX, EEX) : armAsm->Umull(RAX, EAX, EEX);
-        }
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+		if (info & PROCESS_EE_T)
+			sign ? xMUL(xRegister32(EEREC_T)) : xUMUL(xRegister32(EEREC_T));
+		else
+			sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]) : xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 	else if (process & PROCESS_CONSTT)
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
-		if (info & PROCESS_EE_S) {
-//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_S))) : xUMUL(xRegister32(HostGprPhys(EEREC_S)));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S)));
-        }
-		else {
-//            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(
-//                    ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-            armLoad(EEX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-            sign ? armAsm->Smull(RAX, EAX, EEX) : armAsm->Umull(RAX, EAX, EEX);
-        }
+		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
+		if (info & PROCESS_EE_S)
+			sign ? xMUL(xRegister32(EEREC_S)) : xUMUL(xRegister32(EEREC_S));
+		else
+			sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
 	else
 	{
 		// S is more likely to be in a register than T (so put T in eax).
-		if (info & PROCESS_EE_T) {
-//            xMOV(eax, xRegister32(HostGprPhys(EEREC_T)));
-            armAsm->Mov(EAX, a64::WRegister(HostGprPhys(EEREC_T)));
-        }
-		else {
-//            xMOV(eax, ptr[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-            armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0]));
-        }
+		if (info & PROCESS_EE_T)
+			xMOV(eax, xRegister32(EEREC_T));
+		else
+			xMOV(eax, ptr[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 
-		if (info & PROCESS_EE_S) {
-//            sign ? xMUL(xRegister32(HostGprPhys(EEREC_S))) : xUMUL(xRegister32(HostGprPhys(EEREC_S)));
-            sign ? armAsm->Smull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S))) : armAsm->Umull(RAX, EAX, a64::WRegister(HostGprPhys(EEREC_S)));
-        }
-		else {
-//            sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(
-//                    ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-            armLoad(EEX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-            sign ? armAsm->Smull(RAX, EAX, EEX) : armAsm->Umull(RAX, EAX, EEX);
-        }
+		if (info & PROCESS_EE_S)
+			sign ? xMUL(xRegister32(EEREC_S)) : xUMUL(xRegister32(EEREC_S));
+		else
+			sign ? xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]) : xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
-    armAsm->Lsr(RDX, RAX, 32);
-
-	// [R99 FIX] Save EAX to a scratch register BEFORE recWritebackHILO.
-	// recWritebackHILO's LO/HI allocation can trigger XMM eviction of a GPR-type
-	// XMM register. The XMM writeback (_writebackXMMreg) writes 128 bits to
-	// cpuRegs.GPR.r[reg], potentially overwriting the force-store value.
-	// By saving EAX to EEX (w4, not in allocator pool) and writing Rd from EEX
-	// AFTER recWritebackHILO, we guarantee the MULT result is the last write.
-	if (_Rd_)
-		armAsm->Mov(EEX, EAX); // Save low MULT result to EEX (w4)
 
 	recWritebackHILO(info, 1, upper);
-
-	// [R99 FIX] Final Rd writeback from EEX — cannot be overwritten by any eviction.
-	if (_Rd_ && EEINST_LIVETEST(_Rd_))
-	{
-		armAsm->Sxtw(REX, EEX); // sign-extend w4 → x4
-		armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), REX);
-	}
-
 }
 
 static void recMULT_(int info)
@@ -436,104 +349,67 @@ static void recDIV_const()
 
 static void recDIVsuper(int info, bool sign, bool upper, int process)
 {
-	const a64::WRegister divisor((info & PROCESS_EE_T) ? HostGprPhys(EEREC_T) : ECX.GetCode());
+	const xRegister32 divisor((info & PROCESS_EE_T) ? EEREC_T : ecx.GetId());
 	if (!(info & PROCESS_EE_T))
 	{
-		if (process & PROCESS_CONSTT) {
-//            xMOV(divisor, g_cpuConstRegs[_Rt_].UL[0]);
-            armAsm->Mov(divisor, g_cpuConstRegs[_Rt_].UL[0]);
-        }
-		else {
-//            xMOV(divisor, ptr[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-            armLoad(divisor, PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0]));
-        }
+		if (process & PROCESS_CONSTT)
+			xMOV(divisor, g_cpuConstRegs[_Rt_].UL[0]);
+		else
+			xMOV(divisor, ptr[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 
 	// can't use edx, it's part of the dividend
-	pxAssert(divisor.GetCode() != EDX.GetCode());
+	pxAssert(divisor.GetId() != edx.GetId());
 
-	if (process & PROCESS_CONSTS) {
-//        xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-    }
-	else {
-        _eeMoveGPRtoR(RAX, _Rs_);
-    }
+	if (process & PROCESS_CONSTS)
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+	else
+		_eeMoveGPRtoR(rax, _Rs_);
 
-//	u8* end1;
-    a64::Label end1;
+	u8* end1;
 	if (sign) //test for overflow (x86 will just throw an exception)
 	{
-//		xCMP(eax, 0x80000000);
-        armAsm->Cmp(EAX, 0x80000000);
-//		u8* cont1 = JNE8(0);
-        a64::Label cont1;
-        armAsm->B(&cont1, a64::Condition::ne);
-//		xCMP(divisor, 0xffffffff);
-        armAsm->Cmp(divisor, 0xffffffff);
-//		u8* cont2 = JNE8(0);
-        a64::Label cont2;
-        armAsm->B(&cont2, a64::Condition::ne);
+		xCMP(eax, 0x80000000);
+		u8* cont1 = JNE8(0);
+		xCMP(divisor, 0xffffffff);
+		u8* cont2 = JNE8(0);
 		//overflow case:
-//		xXOR(edx, edx); //EAX remains 0x80000000
-        armAsm->Eor(EDX, EDX, EDX);
-//		end1 = JMP8(0);
-        armAsm->B(&end1);
+		xXOR(edx, edx); //EAX remains 0x80000000
+		end1 = JMP8(0);
 
-//		x86SetJ8(cont1);
-        armBind(&cont1);
-//		x86SetJ8(cont2);
-        armBind(&cont2);
+		x86SetJ8(cont1);
+		x86SetJ8(cont2);
 	}
 
-//	xCMP(divisor, 0);
-//	u8* cont3 = JNE8(0);
-    a64::Label cont3;
-    armCbnz(divisor, &cont3);
+	xCMP(divisor, 0);
+	u8* cont3 = JNE8(0);
 	//divide by zero
-//	xMOV(edx, eax);
-    armAsm->Mov(EDX, EAX);
+	xMOV(edx, eax);
 	if (sign) //set EAX to (EAX < 0)?1:-1
 	{
-//		xSAR(eax, 31); //(EAX < 0)?-1:0
-        armAsm->Asr(EAX, EAX, 31);
-//		xSHL(eax, 1); //(EAX < 0)?-2:0
-        armAsm->Lsl(EAX, EAX, 1);
-//		xNOT(eax); //(EAX < 0)?1:-1
-        armAsm->Mvn(EAX, EAX);
+		xSAR(eax, 31); //(EAX < 0)?-1:0
+		xSHL(eax, 1); //(EAX < 0)?-2:0
+		xNOT(eax); //(EAX < 0)?1:-1
 	}
-	else {
-//        xMOV(eax, 0xffffffff);
-        armAsm->Mov(EAX, 0xffffffff);
-    }
-//	u8* end2 = JMP8(0);
-    a64::Label end2;
-    armAsm->B(&end2);
+	else
+		xMOV(eax, 0xffffffff);
+	u8* end2 = JMP8(0);
 
-//	x86SetJ8(cont3);
-    armBind(&cont3);
-
-    armAsm->Mov(EEX, EAX);
+	x86SetJ8(cont3);
 	if (sign)
 	{
-//		xCDQ();
-//		xDIV(divisor);
-        armAsm->Sdiv(EAX, EEX, divisor);
+		xCDQ();
+		xDIV(divisor);
 	}
 	else
 	{
-//		xXOR(edx, edx);
-//		xUDIV(divisor);
-        armAsm->Udiv(EAX, EEX, divisor);
+		xXOR(edx, edx);
+		xUDIV(divisor);
 	}
-    armAsm->Msub(EDX, EAX, divisor, EEX);
 
-	if (sign) {
-//        x86SetJ8(end1);
-        armBind(&end1);
-    }
-//	x86SetJ8(end2);
-    armBind(&end2);
+	if (sign)
+		x86SetJ8(end1);
+	x86SetJ8(end2);
 
 	// need to execute regardless of bad divide
 	recWritebackHILO(info, false, upper);
@@ -646,48 +522,37 @@ EERECOMPILE_CODERC0(DIVU1, /*XMMINFO_READS |*/ XMMINFO_READT);
 static void writeBackMAddToHiLoRd(int hiloID)
 {
 	// eax -> LO, edx -> HI
-//	xCDQE();
-    armAsm->Sxtw(RAX, EAX);
+	xCDQE();
 	if (_Rd_)
 	{
 		_eeOnWriteReg(_Rd_, 1);
 		_deleteEEreg(_Rd_, 0);
-//		xMOV(ptr[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
-        armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), RAX);
+		xMOV(ptr[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
 	}
-//	xMOV(ptr[&cpuRegs.LO.UD[hiloID]], rax);
-    armStore(PTR_CPU(cpuRegs.LO.UD[hiloID]), RAX);
+	xMOV(ptr[&cpuRegs.LO.UD[hiloID]], rax);
 
-//	xMOVSX(rax, edx);
-    armAsm->Sxtw(RAX, EDX);
-//	xMOV(ptr[&cpuRegs.HI.UD[hiloID]], rax);
-    armStore(PTR_CPU(cpuRegs.HI.UD[hiloID]), RAX);
+	xMOVSX(rax, edx);
+	xMOV(ptr[&cpuRegs.HI.UD[hiloID]], rax);
 }
 
 static void addConstantAndWriteBackToHiLoRd(int hiloID, u64 constant)
 {
-	const a64::Register& ehi = EDX;
+	const xRegister32& ehi = edx;
 
 	_deleteEEreg(XMMGPR_LO, 1);
 	_deleteEEreg(XMMGPR_HI, 1);
 
-//	xMOV(eax, ptr[&cpuRegs.LO.UL[hiloID * 2]]);
-    armLoad(EAX, PTR_CPU(cpuRegs.LO.UL[hiloID * 2]));
-//	xMOV(ehi, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
-    armLoad(ehi, PTR_CPU(cpuRegs.HI.UL[hiloID * 2]));
-//	xADD(eax, (u32)(constant & 0xffffffff));
-    armAsm->Adds(EAX, EAX, (u32)(constant & 0xffffffff)); // [BUG-E003] ADDS sets carry flag
-//	xADC(ehi, (u32)(constant >> 32));
-    armAsm->Adc(ehi, ehi, (u32)(constant >> 32));
+	xMOV(eax, ptr[&cpuRegs.LO.UL[hiloID * 2]]);
+	xMOV(ehi, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
+	xADD(eax, (u32)(constant & 0xffffffff));
+	xADC(ehi, (u32)(constant >> 32));
 	writeBackMAddToHiLoRd(hiloID);
 }
 
 static void addEaxEdxAndWriteBackToHiLoRd(int hiloID)
 {
-//	xADD(eax, ptr[&cpuRegs.LO.UL[hiloID * 2]]);
-    armAsm->Adds(EAX, EAX, armLoad(PTR_CPU(cpuRegs.LO.UL[hiloID * 2]))); // [BUG-E003] ADDS sets carry
-//	xADC(edx, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
-    armAsm->Adc(EDX, EDX, armLoad(PTR_CPU(cpuRegs.HI.UL[hiloID * 2])));
+	xADD(eax, ptr[&cpuRegs.LO.UL[hiloID * 2]]);
+	xADC(edx, ptr[&cpuRegs.HI.UL[hiloID * 2]]);
 
 	writeBackMAddToHiLoRd(hiloID);
 }
@@ -710,26 +575,19 @@ void recMADD()
 
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 	else if (GPR_IS_CONST1(_Rt_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
 	else
 	{
-//		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
-    armAsm->Lsr(RDX, RAX, 32);
 
 	addEaxEdxAndWriteBackToHiLoRd(0);
 }
@@ -752,26 +610,19 @@ void recMADDU()
 
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 	else if (GPR_IS_CONST1(_Rt_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
 	else
 	{
-//		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
-    armAsm->Lsr(RDX, RAX, 32);
 
 	addEaxEdxAndWriteBackToHiLoRd(0);
 }
@@ -794,26 +645,19 @@ void recMADD1()
 
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 	else if (GPR_IS_CONST1(_Rt_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
 	else
 	{
-//		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-//		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Smull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
+		xMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
-    armAsm->Lsr(RDX, RAX, 32);
 
 	addEaxEdxAndWriteBackToHiLoRd(1);
 }
@@ -836,26 +680,19 @@ void recMADDU1()
 
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rs_].UL[0]);
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rs_].UL[0]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
 	else if (GPR_IS_CONST1(_Rt_))
 	{
-//		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
-        armAsm->Mov(EAX, g_cpuConstRegs[_Rt_].UL[0]);
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0])));
+		xMOV(eax, g_cpuConstRegs[_Rt_].UL[0]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rs_].UL[0]]);
 	}
 	else
 	{
-//		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-        armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-//		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
-        armAsm->Umull(RAX, EAX, armLoad(PTR_CPU(cpuRegs.GPR.r[_Rt_].UL[0])));
+		xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
+		xUMUL(ptr32[&cpuRegs.GPR.r[_Rt_].UL[0]]);
 	}
-    armAsm->Lsr(RDX, RAX, 32);
 
 	addEaxEdxAndWriteBackToHiLoRd(1);
 }

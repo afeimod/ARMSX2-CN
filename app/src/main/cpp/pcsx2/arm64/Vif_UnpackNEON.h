@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0
 
 #pragma once
@@ -6,7 +6,7 @@
 #include "Common.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
-#include "VixlHelpers.h"
+#include "arm64/AsmHelpers.h"
 
 #define xmmCol0 vixl::aarch64::q2
 #define xmmCol1 vixl::aarch64::q3

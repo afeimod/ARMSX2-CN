@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Achievements.h"
@@ -39,6 +39,7 @@
 #include "common/StringUtil.h"
 #include "common/ZipHelpers.h"
 
+#include "IconsFontAwesome.h"
 #include "fmt/format.h"
 
 #include <csetjmp>
@@ -541,7 +542,7 @@ public:
 
 	const char* GetFilename() const override { return "iopMemory.bin"; }
 	u8* GetDataPtr() const override { return iopMem->Main; }
-	uint GetDataSize() const override { return sizeof(iopMem->Main); }
+	uint GetDataSize() const override { return Ps2MemSize::ExposedIopRam; }
 };
 
 class SavestateEntry_HwRegs final : public MemorySavestateEntry
@@ -580,7 +581,7 @@ public:
 	~SavestateEntry_VU0mem() = default;
 
 	const char* GetFilename() const override { return "vu0Memory.bin"; }
-	u8* GetDataPtr() const override { return g_cpuRegistersPack.vuRegs[0].Mem; }
+	u8* GetDataPtr() const override { return vuRegs[0].Mem; }
 	uint GetDataSize() const override { return VU0_MEMSIZE; }
 };
 
@@ -590,7 +591,7 @@ public:
 	~SavestateEntry_VU1mem() = default;
 
 	const char* GetFilename() const override { return "vu1Memory.bin"; }
-	u8* GetDataPtr() const override { return g_cpuRegistersPack.vuRegs[1].Mem; }
+	u8* GetDataPtr() const override { return vuRegs[1].Mem; }
 	uint GetDataSize() const override { return VU1_MEMSIZE; }
 };
 
@@ -600,7 +601,7 @@ public:
 	~SavestateEntry_VU0prog() = default;
 
 	const char* GetFilename() const override { return "vu0MicroMem.bin"; }
-	u8* GetDataPtr() const override { return g_cpuRegistersPack.vuRegs[0].Micro; }
+	u8* GetDataPtr() const override { return vuRegs[0].Micro; }
 	uint GetDataSize() const override { return VU0_PROGSIZE; }
 };
 
@@ -610,7 +611,7 @@ public:
 	~SavestateEntry_VU1prog() = default;
 
 	const char* GetFilename() const override { return "vu1MicroMem.bin"; }
-	u8* GetDataPtr() const override { return g_cpuRegistersPack.vuRegs[1].Micro; }
+	u8* GetDataPtr() const override { return vuRegs[1].Micro; }
 	uint GetDataSize() const override { return VU1_PROGSIZE; }
 };
 
@@ -937,8 +938,8 @@ static bool SaveState_ReadScreenshot(zip_t* zf, u32* out_width, u32* out_height,
 // --------------------------------------------------------------------------------------
 static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateScreenshotData* screenshot)
 {
-	u32 compression;
-	u32 compression_level;
+	u32 compression = ZIP_CM_DEFAULT;
+	u32 compression_level = 0;
 
 	if (EmuConfig.Savestate.CompressionType == SavestateCompressionMethod::Zstandard)
 	{
@@ -953,25 +954,13 @@ static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateSc
 		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::VeryHigh)
 			compression_level = 22;
 	}
-	else if (EmuConfig.Savestate.CompressionType == SavestateCompressionMethod::Deflate64)
+	else if (EmuConfig.Savestate.CompressionType == SavestateCompressionMethod::Deflate)
 	{
-		compression = ZIP_CM_DEFLATE64;
+		compression = ZIP_CM_DEFLATE;
 		if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::Low)
 			compression_level = 1;
 		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::Medium)
-			compression_level = 3;
-		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::High)
-			compression_level = 7;
-		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::VeryHigh)
-			compression_level = 9;
-	}
-	else if (EmuConfig.Savestate.CompressionType == SavestateCompressionMethod::LZMA2)
-	{
-		compression = ZIP_CM_LZMA2;
-		if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::Low)
-			compression_level = 1;
-		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::Medium)
-			compression_level = 3;
+			compression_level = 5;
 		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::High)
 			compression_level = 7;
 		else if (EmuConfig.Savestate.CompressionRatio == SavestateCompressionLevel::VeryHigh)
@@ -1017,7 +1006,9 @@ static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateSc
 			return false;
 		}
 
-		zip_set_file_compression(zf, fi, compression, compression_level);
+		// Don't compress the version indicator file so that builds that don't
+		// support a given compression method can at least still read it.
+		zip_set_file_compression(zf, fi, ZIP_CM_STORE, 0);
 	}
 
 	const uint listlen = srclist->GetLength();
@@ -1056,14 +1047,18 @@ static bool SaveState_AddToZip(zip_t* zf, ArchiveEntryList* srclist, SaveStateSc
 	return true;
 }
 
-bool SaveState_ZipToDisk(std::unique_ptr<ArchiveEntryList> srclist, std::unique_ptr<SaveStateScreenshotData> screenshot, const char* filename)
+bool SaveState_ZipToDisk(
+	std::unique_ptr<ArchiveEntryList> srclist, std::unique_ptr<SaveStateScreenshotData> screenshot,
+	const char* filename, Error* error)
 {
 	zip_error_t ze = {};
 	zip_source_t* zs = zip_source_file_create(filename, 0, 0, &ze);
 	zip_t* zf = nullptr;
 	if (zs && !(zf = zip_open_from_source(zs, ZIP_CREATE | ZIP_TRUNCATE, &ze)))
 	{
-		Console.Error("Failed to open zip file '%s' for save state: %s", filename, zip_error_strerror(&ze));
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("SaveState", "Failed to open zip file '{}' for save state: {}."),
+			filename, zip_error_strerror(&ze));
 
 		// have to clean up source
 		zip_source_free(zs);
@@ -1073,13 +1068,21 @@ bool SaveState_ZipToDisk(std::unique_ptr<ArchiveEntryList> srclist, std::unique_
 	// discard zip file if we fail saving something
 	if (!SaveState_AddToZip(zf, srclist.get(), screenshot.get()))
 	{
-		Console.Error("Failed to save state to zip file '%s'", filename);
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("SaveState", "Failed to save state to zip file '{}'."), filename);
 		zip_discard(zf);
 		return false;
 	}
 
 	// force the zip to close, this is the expensive part with libzip.
-	zip_close(zf);
+	if (zip_close(zf) != 0)
+	{
+		Error::SetStringFmt(error,
+			TRANSLATE_FS("SaveState", "Failed to save state to zip file '{}': {}."), filename, zip_strerror(zf));
+		zip_discard(zf);
+		return false;
+	}
+
 	return true;
 }
 
@@ -1119,11 +1122,16 @@ static bool CheckVersion(const std::string& filename, zip_t* zf, Error* error)
 	// than the emulator recognizes.  99% chance that trying to load it will just corrupt emulation or crash.
 	if (savever > g_SaveVersion || (savever >> 16) != (g_SaveVersion >> 16))
 	{
-		Error::SetString(error, fmt::format(TRANSLATE_FS("SaveState","This save state is outdated and is no longer compatible "
-											"with the current version of PCSX2.\n\n"
-											"If you have any unsaved progress on this save state, you can download the compatible version (PCSX2 {}) "
+		std::string current_emulator_version = BuildVersion::GitTag;
+		if (current_emulator_version.empty())
+		{
+			current_emulator_version = "Unknown";
+		}
+		Error::SetString(error, fmt::format(TRANSLATE_FS("SaveState","This save state was created with PCSX2 version {0}. It is no longer compatible "
+											"with your current PCSX2 version {1}.\n\n"
+											"If you have any unsaved progress on this save state, you can download the compatible PCSX2 version {0} "
 											"from pcsx2.net, load the save state, and save your progress to the memory card."),
-											version_string));
+											version_string, current_emulator_version));
 		return false;
 	}
 
@@ -1243,4 +1251,38 @@ bool SaveState_UnzipFromDisk(const std::string& filename, Error* error)
 
 	PostLoadPrep();
 	return true;
+}
+
+void SaveState_ReportLoadErrorOSD(const std::string& message, std::optional<s32> slot, bool backup)
+{
+	std::string full_message;
+	if (slot.has_value())
+	{
+		if (backup)
+			full_message = fmt::format(
+				TRANSLATE_FS("SaveState", "Failed to load state from backup slot {}: {}"), *slot, message);
+		else
+			full_message = fmt::format(
+				TRANSLATE_FS("SaveState", "Failed to load state from slot {}: {}"), *slot, message);
+	}
+	else
+	{
+		full_message = fmt::format(TRANSLATE_FS("SaveState", "Failed to load state: {}"), message);
+	}
+
+	Host::AddIconOSDMessage("LoadState", ICON_FA_TRIANGLE_EXCLAMATION,
+		full_message, Host::OSD_WARNING_DURATION);
+}
+
+void SaveState_ReportSaveErrorOSD(const std::string& message, std::optional<s32> slot)
+{
+	std::string full_message;
+	if (slot.has_value())
+		full_message = fmt::format(
+			TRANSLATE_FS("SaveState", "Failed to save state to slot {}: {}"), *slot, message);
+	else
+		full_message = fmt::format(TRANSLATE_FS("SaveState", "Failed to save state: {}"), message);
+
+	Host::AddIconOSDMessage("SaveState", ICON_FA_TRIANGLE_EXCLAMATION,
+		full_message, Host::OSD_WARNING_DURATION);
 }

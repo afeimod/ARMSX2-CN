@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -12,12 +12,7 @@
 #include "common/emitter/x86emitter.h"
 
 // Register containing a pointer to our fastmem (4GB) area
-// On ARM64 builds (including macOS Apple Silicon), this is defined in
-// arm64/VixlHelpers.h to an AArch64 register. Only define the x86 variant
-// when we're not on Android and not compiling for ARM64.
-#if !defined(__ANDROID__) && !defined(__aarch64__) && !defined(_M_ARM64)
 #define RFASTMEMBASE x86Emitter::rbp
-#endif
 
 // iPSX2: Enable recompiler modules when Real Rec is requested
 #if defined(iPSX2_REAL_REC) && iPSX2_REAL_REC
@@ -31,6 +26,11 @@ extern int g_branch;       // set for branch
 extern u32 target;         // branch target
 extern u32 s_nBlockCycles; // cycles of current block recompiling
 extern bool s_nBlockInterlocked; // Current block has VU0 interlocking
+
+// x86 can use shorter displacement if it fits in an s8, so offset 144 bytes into the cpuRegs
+// This will allow us to reach r1-r16 with a shorter encoding
+// TODO: Actually figure out what things are used most often, maybe rearrange the cpuRegs struct, and point at that
+#define R5900_TEXTPTR (&cpuRegs.GPR.r[9])
 
 //////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -75,7 +75,7 @@ void SaveBranchState();
 void LoadBranchState();
 
 void recompileNextInstruction(bool delayslot, bool swapped_delay_slot);
-void SetBranchReg(u32 reg);
+void SetBranchReg();
 void SetBranchImm(u32 imm);
 
 void iFlushCall(int flushtype);
@@ -87,7 +87,7 @@ namespace R5900
 {
 	namespace Dynarec
 	{
-		extern void recDoBranchImm(u32 branchTo, a64::Label* jmpSkip, bool isLikely = false, bool swappedDelaySlot = false);
+		extern void recDoBranchImm(u32 branchTo, u32* jmpSkip, bool isLikely = false, bool swappedDelaySlot = false);
 	} // namespace Dynarec
 } // namespace R5900
 
@@ -116,8 +116,9 @@ alignas(16) extern GPR_reg64 g_cpuConstRegs[32];
 extern u32 g_cpuHasConstReg, g_cpuFlushedConstReg;
 
 // finds where the GPR is stored and moves lower 32 bits to EAX
-void _eeMoveGPRtoR(const a64::Register& to, int fromgpr, bool allow_preload = true);
-void _eeMoveGPRtoM(const a64::MemOperand& to, int fromgpr); // 32-bit only
+void _eeMoveGPRtoR(const x86Emitter::xRegister32& to, int fromgpr, bool allow_preload = true);
+void _eeMoveGPRtoR(const x86Emitter::xRegister64& to, int fromgpr, bool allow_preload = true);
+void _eeMoveGPRtoM(uptr to, int fromgpr); // 32-bit only
 
 void _eeFlushAllDirty();
 void _eeOnWriteReg(int reg, int signext);

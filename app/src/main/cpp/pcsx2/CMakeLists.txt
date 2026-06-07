@@ -1,34 +1,16 @@
 # All flags, libraries, etc, that are shared between PCSX2 compilation files
 add_library(PCSX2_FLAGS INTERFACE)
 
-if(ANDROID)
-	add_library(PCSX2 SHARED)
-	set_target_properties(PCSX2 PROPERTIES OUTPUT_NAME "emucore")
-	target_compile_definitions(PCSX2_FLAGS INTERFACE
-		"PCSX2_CORE=1"
-		"DISABLE_RECORDING"
-	)
+if(DISABLE_ADVANCE_SIMD OR LTO_PCSX2_CORE)
+	# Fixes issues with some compiler + linker combinations
+	add_library(PCSX2 OBJECT)
 else()
-	if(DISABLE_ADVANCE_SIMD OR LTO_PCSX2_CORE)
-		# Fixes issues with some compiler + linker combinations
-		add_library(PCSX2 OBJECT)
-	else()
-		add_library(PCSX2)
-	endif()
+	add_library(PCSX2)
 endif()
 target_link_libraries(PCSX2 PRIVATE PCSX2_FLAGS)
 
-target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
+target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_17)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
-
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-	message(STATUS "Forcing _M_ARM64 for iOS")
-	set(_M_ARM64 TRUE)
-	target_compile_definitions(PCSX2_FLAGS INTERFACE
-		"_M_ARM64=1"
-	)
-endif()
-
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
 
 # Check that people use the good file
@@ -265,7 +247,6 @@ set(pcsx2SPU2Sources
 	SPU2/ADSR.cpp
 	SPU2/Debug.cpp
 	SPU2/Dma.cpp
-	SPU2/Mixer.cpp
 	SPU2/spu2.cpp
 	SPU2/ReadInput.cpp
 	SPU2/RegTable.cpp
@@ -276,6 +257,7 @@ set(pcsx2SPU2Sources
 )
 
 set(pcsx2SPU2SourcesUnshared
+	SPU2/Mixer.cpp
 	SPU2/ReverbResample.cpp
 )
 
@@ -488,12 +470,12 @@ set(pcsx2GSSourcesUnshared
 	GS/Renderers/SW/GSRendererSW.cpp
 )
 
-if(_M_X86)
+if(ARCH_X86)
 	list(APPEND pcsx2GSSourcesUnshared
 		GS/Renderers/SW/GSDrawScanlineCodeGenerator.all.cpp
 		GS/Renderers/SW/GSSetupPrimCodeGenerator.all.cpp
 	)
-elseif(_M_ARM64)
+elseif(ARCH_ARM64)
 	list(APPEND pcsx2GSSourcesUnshared
 		GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.cpp
 		GS/Renderers/SW/GSSetupPrimCodeGenerator.arm64.cpp
@@ -505,6 +487,7 @@ set(pcsx2GSSources
 	GS/GSCapture.cpp
 	GS/GSClut.cpp
 	GS/GSDrawingContext.cpp
+	GS/GSDrawingEnvironment.cpp
 	GS/GSDump.cpp
 	GS/GSLocalMemory.cpp
 	GS/GSLzma.cpp
@@ -561,6 +544,7 @@ set(pcsx2GSHeaders
 	GS/Renderers/Common/GSFastList.h
 	GS/Renderers/Common/GSFunctionMap.h
 	GS/Renderers/Common/GSRenderer.h
+	GS/Renderers/Common/GSShaderEnums.h
 	GS/Renderers/Common/GSTexture.h
 	GS/Renderers/Common/GSVertex.h
 	GS/Renderers/Common/GSVertexTrace.h
@@ -581,14 +565,14 @@ set(pcsx2GSHeaders
 	GS/Renderers/SW/GSVertexSW.h
 	)
 
-if(_M_X86)
+if(ARCH_X86)
 	list(APPEND pcsx2GSHeaders
 		GS/GSVector4.h
 		GS/GSVector4i.h
 		GS/GSVector8.h
 		GS/GSVector8i.h
 	)
-elseif(_M_ARM64)
+elseif(ARCH_ARM64)
 	list(APPEND pcsx2GSHeaders
 		GS/GSVector4_arm64.h
 		GS/GSVector4i_arm64.h
@@ -624,11 +608,6 @@ if(USE_OPENGL)
 		if(X11_API OR WAYLAND_API)
 			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGL.cpp)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGL.h)
-		elseif(ANDROID)
-			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGL.cpp)
-			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGL.h)
-			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGLAndroid.cpp)
-			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGLAndroid.h)
 		endif()
 
 		if(X11_API)
@@ -669,7 +648,7 @@ if(USE_VULKAN)
 		GS/Renderers/Vulkan/VKStreamBuffer.h
 		GS/Renderers/Vulkan/VKSwapChain.h
 	)
-	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers glslang)
+	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers)
 	target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
 endif()
 
@@ -732,6 +711,13 @@ elseif(LINUX)
 	list(APPEND pcsx2USBHeaders
 		USB/usb-eyetoy/cam-linux.h
 	)
+elseif(APPLE)
+	list(APPEND pcsx2USBSources
+		USB/usb-eyetoy/cam-macos.mm
+	)
+	list(APPEND pcsx2USBHeaders
+		USB/usb-eyetoy/cam-macos.h
+	)
 else()
 	list(APPEND pcsx2USBSources
 		USB/usb-eyetoy/cam-noop.cpp
@@ -761,7 +747,7 @@ set(pcsx2IPUHeaders
 	IPU/yuv2rgb.h
 )
 
-if(DISABLE_ADVANCE_SIMD)
+if(DISABLE_ADVANCE_SIMD AND ARCH_X86)
 	target_compile_definitions(PCSX2 PUBLIC MULTI_ISA_SHARED_COMPILATION)
 	if(USE_GCC)
 		target_link_options(PCSX2_FLAGS INTERFACE -Wno-odr)
@@ -846,16 +832,13 @@ set(pcsx2HostSources
 	Host/CubebAudioStream.cpp
 	Host/SDLAudioStream.cpp)
 
-if(ANDROID)
-	list(APPEND pcsx2HostSources Host/OboeAudioStream.cpp)
-endif()
-
 set(pcsx2HostHeaders
 	Host/AudioStream.h
 	Host/AudioStreamTypes.h)
 
 set(pcsx2ImGuiSources
 	ImGui/FullscreenUI.cpp
+	ImGui/FullscreenUI_Settings.cpp
 	ImGui/ImGuiFullscreen.cpp
 	ImGui/ImGuiManager.cpp
 	ImGui/ImGuiOverlays.cpp
@@ -863,6 +846,7 @@ set(pcsx2ImGuiSources
 
 set(pcsx2ImGuiHeaders
 	ImGui/FullscreenUI.h
+	ImGui/FullscreenUI_Internal.h
 	ImGui/ImGuiAnimated.h
 	ImGui/ImGuiFullscreen.h
 	ImGui/ImGuiManager.h
@@ -918,14 +902,10 @@ set(pcsx2LinuxSources
 	CDVD/Linux/IOCtlSrc.cpp
 	)
 
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-	set(pcsx2OSXSources "")
-else()
-	set(pcsx2OSXSources
-		CDVD/Darwin/DriveUtility.cpp
-		CDVD/Darwin/IOCtlSrc.cpp
-		)
-endif()
+set(pcsx2OSXSources
+	CDVD/Darwin/DriveUtility.cpp
+	CDVD/Darwin/IOCtlSrc.cpp
+	)
 
 set(pcsx2FreeBSDSources
 	CDVD/Darwin/DriveUtility.cpp
@@ -1023,9 +1003,8 @@ set(pcsx2x86Sources
 	x86/ix86-32/iR5900Shift.cpp
 	x86/ix86-32/iR5900Templates.cpp
 	x86/ix86-32/recVTLB.cpp
-	x86/microVU.cpp
-#	x86/Vif_Dynarec.cpp
-#	x86/Vif_UnpackSSE.cpp
+	x86/Vif_Dynarec.cpp
+	x86/Vif_UnpackSSE.cpp
 	)
 
 # x86 headers
@@ -1064,48 +1043,44 @@ set(pcsx2x86Headers
 	x86/microVU_Profiler.h
 	x86/microVU_Tables.inl
 	x86/microVU_Upper.inl
+	x86/newVif.h
+	x86/Vif_UnpackSSE.h
 	x86/R5900_Profiler.h
-#	x86/newVif.h
-#	x86/Vif_UnpackSSE.h
 	)
 
-# ARM64
 # ARM64
 set(pcsx2arm64Sources
+	arm64/AsmHelpers.cpp
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
-	arm64/VixlHelpers.cpp
 	arm64/RecStubs.cpp
+	arm64/aR3000A.cpp
+	arm64/aR5900.cpp
+	arm64/aR5900LoadStore.cpp
+	arm64/aR5900Arith.cpp
+	arm64/aR5900MultDiv.cpp
+	arm64/aR5900Branch.cpp
+	arm64/aR5900FPU.cpp
+	arm64/aR5900MMI.cpp
+	arm64/aVU.cpp
 	)
 
-set(pcsx2arm64RecSources
-	x86/BaseblockEx.cpp
-	x86/iCOP0.cpp
-	x86/iCore.cpp
-	x86/iFPU.cpp
-	x86/iFPUd.cpp
-	x86/iMMI.cpp
-	x86/iR3000A.cpp
-	x86/iR3000Atables.cpp
-	x86/iR5900Analysis.cpp
-	x86/iR5900Misc.cpp
-	x86/ix86-32/iCore.cpp
-	x86/ix86-32/iR5900.cpp
-	x86/ix86-32/iR5900Arit.cpp
-	x86/ix86-32/iR5900AritImm.cpp
-	x86/ix86-32/iR5900Branch.cpp
-	x86/ix86-32/iR5900Jump.cpp
-	x86/ix86-32/iR5900LoadStore.cpp
-	x86/ix86-32/iR5900Move.cpp
-	x86/ix86-32/iR5900MultDiv.cpp
-	x86/ix86-32/iR5900Shift.cpp
-	x86/ix86-32/iR5900Templates.cpp
-	x86/ix86-32/recVTLB.cpp
-    x86/microVU.cpp
-)
-
 set(pcsx2arm64Headers
-	arm64/VixlHelpers.h
+	arm64/AsmHelpers.h
+	arm64/aR5900.h
+	arm64/aVU.h
+	arm64/aVU_IR.h
+	arm64/aVU_Misc.h
+	arm64/aVU_Analyze.inl
+	arm64/aVU_Alloc.inl
+	arm64/aVU_Clamp.inl
+	arm64/aVU_Misc.inl
+	arm64/aVU_Upper.inl
+	arm64/aVU_Lower.inl
+	arm64/aVU_Tables.inl
+	arm64/aVU_Flags.inl
+	arm64/aVU_Branch.inl
+	arm64/aVU_Compile.inl
 )
 
 # These ones benefit a lot from LTO
@@ -1120,15 +1095,12 @@ set(pcsx2LTOSources
 	${pcsx2GSHeaders}
 )
 
-if(_M_X86)
+if(ARCH_X86)
 	list(APPEND pcsx2LTOSources ${pcsx2x86Sources} ${pcsx2x86Headers})
-#	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
-elseif(_M_ARM64)
-	message(STATUS "DEBUG: _M_ARM64 is TRUE")
-	message(STATUS "DEBUG: pcsx2arm64RecSources: ${pcsx2arm64RecSources}")
-	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers} ${pcsx2arm64RecSources})
+	target_link_libraries(PCSX2_FLAGS INTERFACE zydis)
+elseif(ARCH_ARM64)
+	list(APPEND pcsx2LTOSources ${pcsx2arm64Sources} ${pcsx2arm64Headers})
 	target_link_libraries(PCSX2_FLAGS INTERFACE vixl)
-	target_compile_definitions(PCSX2_FLAGS INTERFACE iPSX2_REAL_REC=1)
 endif()
 
 if(LTO_PCSX2_CORE)
@@ -1166,14 +1138,7 @@ target_sources(PCSX2 PRIVATE
 )
 
 # platform sources
-if(ANDROID)
-	target_sources(PCSX2 PRIVATE
-		${pcsx2LinuxSources}
-		${pcsx2LinuxHeaders}
-		../main.cpp
-        ../common/Android/JNI.cpp
-	)
-elseif(LINUX)
+if(LINUX)
 	target_sources(PCSX2 PRIVATE
 		${pcsx2LinuxSources}
 		${pcsx2LinuxHeaders}
@@ -1204,69 +1169,32 @@ if(APPLE OR BSD)
 		${pcsx2LinuxHeaders})
 endif()
 
-# [P63] macOS stubs (guarded by #if iPSX2_MACOS inside file)
-if(iPSX2_MACOS_BUILD)
-	target_sources(PCSX2 PRIVATE MacOSStubs.cpp)
-endif()
-
-# [V34] QA probe module — automated JIT vs Interpreter regression gate
-target_sources(PCSX2 PRIVATE QAProbe.cpp QAProbe.h)
-
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS" OR iPSX2_MACOS_BUILD)
-	# Force name-only linking for system libraries to avoid SDK path mismatch
-	set(ZLIB_LINK "z")
-	set(BZIP2_LINK "bz2")
-	set(LIBC_LIBRARIES "m")
-	set(PNG_LINK "") # No PNG for iOS/macOS native
-else()
-	set(ZLIB_LINK ZLIB::ZLIB)
-	set(BZIP2_LINK BZip2::BZip2)
-	set(PNG_LINK PNG::PNG)
-endif()
-
 target_link_libraries(PCSX2_FLAGS INTERFACE
 	common
 	imgui
 	fmt::fmt
-	rapidyaml::rapidyaml
 	libchdr
 	libzip::zip
 	cpuinfo
 	cubeb
 	rcheevos
+	discord-rpc
 	simpleini
 	freesurround
+	Freetype::Freetype
 	SDL3::SDL3
-	${ZLIB_LINK}
-	${PNG_LINK}
-	${BZIP2_LINK}
+	ZLIB::ZLIB
 	LZ4::LZ4
 	SoundTouch::SoundTouch
-#	PNG::PNG
+	PNG::PNG
 	LZMA::LZMA
 	Zstd::Zstd
 	demanglegnu
 	ccc
-#	plutovg::plutovg
-#	plutosvg::plutosvg
+	plutovg::plutovg
+	plutosvg::plutosvg
 	${LIBC_LIBRARIES}
 )
-
-if(ANDROID AND USE_VULKAN AND TARGET adrenotools)
-	target_link_libraries(PCSX2_FLAGS INTERFACE adrenotools)
-	target_compile_definitions(PCSX2_FLAGS INTERFACE USE_ADRENOTOOLS)
-endif()
-
-# Discord linking: only link when the option is enabled and the corresponding target exists
-if(USE_DISCORD_SDK)
-	if(TARGET discord_partner_sdk::discord_partner_sdk)
-		target_link_libraries(PCSX2_FLAGS INTERFACE discord_partner_sdk::discord_partner_sdk)
-	elseif(TARGET discord-rpc)
-		target_link_libraries(PCSX2_FLAGS INTERFACE discord-rpc)
-	else()
-		message(WARNING "USE_DISCORD_SDK is ON but no discord SDK target (discord_partner_sdk or discord-rpc) was found. Build may fail until a SDK is provided.")
-	endif()
-endif()
 
 if(WIN32)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
@@ -1291,51 +1219,29 @@ if(WIN32)
 		dwmapi.lib
 		OneCore.lib
 	)
-elseif(ANDROID)
-	find_library(log-lib log)
-	target_link_directories(PCSX2 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ../3rdparty/libs)
-	target_link_libraries(PCSX2_FLAGS INTERFACE
-		oboe
-		android
-		${log-lib}
-	)
 else()
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
-		target_link_libraries(PCSX2_FLAGS INTERFACE
-			PCAP::PCAP
-		)
-	endif()
+	target_link_libraries(PCSX2_FLAGS INTERFACE
+		PCAP::PCAP
+	)
 endif()
 
 # additonal include directories
-if(_M_X86)
+if(ARCH_X86)
 	target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_SOURCE_DIR}/3rdparty/xbyak")
 	target_compile_definitions(PCSX2_FLAGS INTERFACE XBYAK_NO_EXCEPTION)
 endif()
-
-if(ANDROID)
-	target_include_directories(PCSX2_FLAGS INTERFACE
-		"${CMAKE_CURRENT_SOURCE_DIR}"
-		"${CMAKE_BINARY_DIR}/pcsx2"
-		"${CMAKE_BINARY_DIR}/common/include"
-		"${CMAKE_SOURCE_DIR}/3rdparty/libjpeg"
-		"${CMAKE_SOURCE_DIR}/3rdparty/shaderc/include"
-		"${CMAKE_SOURCE_DIR}/3rdparty/ffmpeg/include"
-	)
-else()
-	target_include_directories(PCSX2_FLAGS INTERFACE
-		"${CMAKE_CURRENT_SOURCE_DIR}"
-		"${CMAKE_BINARY_DIR}/pcsx2"
-		"${CMAKE_BINARY_DIR}/common/include"
-		"${FFMPEG_INCLUDE_DIRS}"
-	)
-endif()
+target_include_directories(PCSX2_FLAGS INTERFACE
+	"${CMAKE_CURRENT_SOURCE_DIR}"
+	"${CMAKE_BINARY_DIR}/pcsx2"
+	"${CMAKE_BINARY_DIR}/common/include"
+	"${FFMPEG_INCLUDE_DIRS}"
+)
 
 set_source_files_properties(PrecompiledHeader.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
-#if(COMMAND target_precompile_headers)
-#	message("Using precompiled headers.")
-#	target_precompile_headers(PCSX2_FLAGS INTERFACE PrecompiledHeader.h)
-#endif()
+if(COMMAND target_precompile_headers)
+	message("Using precompiled headers.")
+	target_precompile_headers(PCSX2_FLAGS INTERFACE PrecompiledHeader.h)
+endif()
 
 # Copy resource files if needed
 function(pcsx2_resource target path basedir)
@@ -1353,43 +1259,31 @@ function(pcsx2_resource target path basedir)
 endfunction()
 
 if (NOT APPLE)
-	if (NOT ANDROID)
-		set_target_properties(PCSX2 PROPERTIES
-			OUTPUT_NAME iPSX2iOS
-		)
-	endif()
+	set_target_properties(PCSX2 PROPERTIES
+		OUTPUT_NAME pcsx2
+	)
 endif()
 
 fixup_file_properties(PCSX2)
 # Directories like /usr/local/include, /opt/local/include, etc tend to include lots of headers from lots of libraries.
 # Possibly including libraries that we compiled versions of with the dependency build script.
 # To ensure the dependency build script's headers are preferred, push any directories that look like */local/include to the end.
-if (NOT ANDROID)
 force_include_last(PCSX2_FLAGS "/(usr|local)/include/?$")
-endif()
 
 if (APPLE)
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-		find_library(APPKIT_LIBRARY AppKit)
-		find_library(IOKIT_LIBRARY IOKit)
-		target_link_libraries(PCSX2_FLAGS INTERFACE
-			${APPKIT_LIBRARY}
-			${IOKIT_LIBRARY}
-		)
-	else()
-		target_link_libraries(PCSX2_FLAGS INTERFACE
-			"-framework UIKit"
-			"-framework GameController"
-			"-framework CoreHaptics"
-			"-framework AudioToolbox"
-			"-framework AVFoundation"
-			"-framework CoreAudio"
-			"-framework CoreMedia"
-		)
-	endif()
+	find_library(APPKIT_LIBRARY AppKit)
+	find_library(IOKIT_LIBRARY IOKit)
+	find_library(METAL_LIBRARY Metal)
+	find_library(QUARTZCORE_LIBRARY QuartzCore)
+	find_library(AVFOUNDATION_LIBRARY AVFoundation)
+	find_library(COREMEDIA_LIBRARY CoreMedia)
 	target_link_libraries(PCSX2_FLAGS INTERFACE
-		"-framework Metal"
-		"-framework QuartzCore"
+		${APPKIT_LIBRARY}
+		${IOKIT_LIBRARY}
+		${METAL_LIBRARY}
+		${QUARTZCORE_LIBRARY}
+		${AVFOUNDATION_LIBRARY}
+		${COREMEDIA_LIBRARY}
 	)
 endif()
 
@@ -1404,6 +1298,9 @@ function(setup_main_executable target)
 			continue()
 		endif()
 		if (NOT WIN32 AND "${path}" MATCHES "/dx11/") # Don't include unneccessary stuff
+			continue()
+		endif()
+		if (NOT BUNDLE_EMOJI_FONT AND "${path}" MATCHES "fonts/Twemoji")
 			continue()
 		endif()
 		pcsx2_resource(${target} ${path} ${CMAKE_SOURCE_DIR}/bin/resources/)
@@ -1437,7 +1334,7 @@ function(setup_main_executable target)
 
 		# Copy dependency libraries.
 		set(DEPS_BINDIR "${CMAKE_SOURCE_DIR}/deps/bin")
-		set(DEPS_TO_COPY freetype.dll harfbuzz.dll jpeg62.dll libpng16.dll libsharpyuv.dll libwebp.dll lz4.dll SDL3.dll shaderc_shared.dll zlib1.dll zstd.dll plutovg.dll plutosvg.dll)
+		set(DEPS_TO_COPY freetype.dll harfbuzz.dll jpeg62.dll libpng16.dll libsharpyuv.dll libwebp.dll libwebpdemux.dll libwebpmux.dll lz4.dll SDL3.dll shaderc_shared.dll z.dll zstd.dll plutovg.dll plutosvg.dll ryml.dll)
 		set(DEPS_TO_COPY
 			$<IF:$<CONFIG:Debug>,kddockwidgets-qt6d.dll,kddockwidgets-qt6.dll>
 			${DEPS_TO_COPY}
@@ -1446,8 +1343,25 @@ function(setup_main_executable target)
 			install(FILES "${DEPS_BINDIR}/${DEP_TO_COPY}" DESTINATION "${CMAKE_SOURCE_DIR}/bin")
 		endforeach()
 
+		set(OPT_DEPS_TO_COPY avcodec-62.dll avformat-62.dll avutil-60.dll swresample-6.dll swscale-9.dll)
+		foreach(OPT_DEP_TO_COPY ${OPT_DEPS_TO_COPY})
+			install(FILES "${DEPS_BINDIR}/${OPT_DEP_TO_COPY}" DESTINATION "${CMAKE_SOURCE_DIR}/bin" OPTIONAL)
+		endforeach()
+
+		set(SYMBOLS_TO_COPY ${DEPS_TO_COPY} ${OPT_DEPS_TO_COPY})
+		list(TRANSFORM SYMBOLS_TO_COPY REPLACE "[.]dll" ".pdb")
+		foreach(SYMBOL_TO_COPY ${SYMBOLS_TO_COPY})
+			install(FILES "${DEPS_BINDIR}/${SYMBOL_TO_COPY}" DESTINATION "${CMAKE_SOURCE_DIR}/bin" OPTIONAL)
+		endforeach()
+
+		set(AGILITY_DIR "${CMAKE_SOURCE_DIR}/deps/bin/D3D12")
+		set(AGILITY_DEPS_TO_COPY D3D12Core.dll d3d12SDKLayers.dll)
+		foreach(AGILITY_DEP_TO_COPY ${AGILITY_DEPS_TO_COPY})
+			install(FILES "${DEPS_BINDIR}/D3D12/${AGILITY_DEP_TO_COPY}" DESTINATION "${CMAKE_SOURCE_DIR}/bin/D3D12" OPTIONAL)
+		endforeach()
+
 		get_target_property(WINDEPLOYQT_EXE Qt6::windeployqt IMPORTED_LOCATION)
-		install(CODE "execute_process(COMMAND \"${WINDEPLOYQT_EXE}\" \"${CMAKE_SOURCE_DIR}/bin/$<TARGET_FILE_NAME:${target}>\" --plugindir \"${CMAKE_SOURCE_DIR}/bin/QtPlugins\" --no-compiler-runtime --no-system-d3d-compiler --no-system-dxc-compiler --no-translations COMMAND_ERROR_IS_FATAL ANY)")
+		install(CODE "execute_process(COMMAND \"${WINDEPLOYQT_EXE}\" \"${CMAKE_SOURCE_DIR}/bin/$<TARGET_FILE_NAME:${target}>\" --plugindir \"${CMAKE_SOURCE_DIR}/bin/QtPlugins\" --pdb --no-compiler-runtime --no-system-d3d-compiler --no-system-dxc-compiler --no-translations --no-network COMMAND_ERROR_IS_FATAL ANY)")
 		install(CODE "file(WRITE \"${CMAKE_SOURCE_DIR}/bin/qt.conf\" \"[Paths]\\nPlugins = ./QtPlugins\")")
 	endif()
 
@@ -1507,19 +1421,12 @@ function(setup_main_executable target)
 			MACOSX_BUNDLE true
 			MACOSX_BUNDLE_INFO_PLIST "${PCSX2_SOURCE_DIR}/Resources/Info.plist.in"
 			XCODE_ATTRIBUTE_CODE_SIGN_ENTITLEMENTS "${PCSX2_SOURCE_DIR}/Resources/PCSX2.entitlements"
-			OUTPUT_NAME iPSX2iOS
+			OUTPUT_NAME ARMSX2
 			# Fixes complaints when Xcode tries to sign for running locally about MoltenVK not being signed
 			XCODE_ATTRIBUTE_OTHER_CODE_SIGN_FLAGS --deep
 		)
 
-		if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-			set_target_properties(${target} PROPERTIES
-				XCODE_ATTRIBUTE_SDKROOT iphoneos
-				XCODE_ATTRIBUTE_SUPPORTED_PLATFORMS "iphoneos iphonesimulator"
-			)
-		endif()
-
-		pcsx2_resource(${target} ${PCSX2_SOURCE_DIR}/Resources/PCSX2.icns ${PCSX2_SOURCE_DIR}/Resources)
+		pcsx2_resource(${target} ${PCSX2_SOURCE_DIR}/Resources/ARMSX2.icns ${PCSX2_SOURCE_DIR}/Resources)
 
 		# Copy shaderc into the bundle
 		target_sources(${target} PRIVATE "${SHADERC_LIBRARY}")
@@ -1554,7 +1461,8 @@ function(setup_main_executable target)
 	endif()
 
 	if(ENABLE_SETCAP AND UNIX AND NOT APPLE)
-		message(WARNING "Networking capabilities enabled, building will require temporary root elevation.")
+		message(WARNING "Networking capabilities enabled on the main executable, building will require temporary root elevation.")
+		message(WARNING "File capabilities can disable LD_PRELOAD-based integrations such as the Steam overlay and Steam Input.")
 		add_custom_target(
 			pcsx2-enable-setcap
 			ALL

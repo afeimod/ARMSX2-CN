@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "R3000A.h"
@@ -542,22 +542,7 @@ void cdrInterrupt()
 	}
 
 	if (cdr.Stat != NoIntr && cdr.Reg2 != 0x18)
-	{
-		// [TEMP_DIAG] iter617: @@CDR_IRQ2_FIRE@@ — IRQ2 発火時の IEc・INTC_MASK を記録 (max 30)
-		// 目的: IRQ2 が IEc=1 かつ INTC_MASK bit2=1 のstateで発火するかverify (D-2 診断)
-		// Removal condition: CDROM ISR → DeliverEvent(F1000005) パスafter confirmed
-		{
-			static int s_cdr_irq2_n = 0;
-			if (s_cdr_irq2_n < 30) {
-				s_cdr_irq2_n++;
-				u32 iec = psxRegs.CP0.r[12] & 1u;
-				u16 intc_mask = (u16)psxHu32(0x1074u);
-				Console.WriteLn("@@CDR_IRQ2_FIRE@@ n=%d irq=%02x stat=%d IEc=%d INTC_MASK=%04x iop_pc=%08x",
-					s_cdr_irq2_n, (u32)Irq, (u32)cdr.Stat, (int)iec, (u32)intc_mask, psxRegs.pc);
-			}
-		}
-		psxHu32(0x1070) |= 0x4;
-	}
+		psxHu32(HW_ISTAT) |= 0x4;
 
 	CDVD_LOG("Cdr Interrupt %x\n", Irq);
 }
@@ -594,25 +579,10 @@ void cdrReadInterrupt()
 
 	if (cdr.RErr == -1)
 	{
-		// [iter622] CDR_FAKE_DR 撤去 (iter626): EE スタベーションcauseだったため除去。
-		// iter619 DiskError-only パスに戻す → EE がvsync=12000+ まで安定稼働できる。
 		DevCon.Warning("CD err");
 		std::memset(cdr.Transfer, 0, sizeof(cdr.Transfer));
-		// PC PCSX2 reference 準拠: DiskError では割り込み配信なし。IOP は cdrRead3 ポーリングで INT5 をdetect。
-		// [TEMP_DIAG] @@CDR_DISKERR_IRQ@@ — 初回のみ (n≤3)
-		{
-			static int s_diskerr_n = 0;
-			if (s_diskerr_n < 3) {
-				s_diskerr_n++;
-				u32 iec = psxRegs.CP0.r[12] & 1u;
-				u16 intc_mask = (u16)psxHu32(0x1074u);
-				Console.WriteLn("@@CDR_DISKERR_IRQ@@ n=%d IEc=%d INTC_MASK=%04x iop_pc=%08x",
-					s_diskerr_n, (int)iec, (u32)intc_mask, psxRegs.pc);
-			}
-		}
 		cdr.Stat = DiskError;
 		cdr.StatP |= STATUS_ERROR;
-		cdr.StatP &= ~STATUS_READ;
 		cdr.Result[0] = cdr.StatP;
 		ReadTrack();
 		CDREAD_INT((cdr.Mode & 0x80) ? (cdReadTime / 2) : cdReadTime);
@@ -650,7 +620,7 @@ void cdrReadInterrupt()
 		CDREAD_INT((cdr.Mode & 0x80) ? (cdReadTime / 2) : cdReadTime);
 	}
 
-	psxHu32(0x1070) |= 0x4;
+	psxHu32(HW_ISTAT) |= 0x4;
 	return;
 }
 
@@ -731,17 +701,6 @@ void cdrWrite1(u8 rt)
 	int i;
 
 	CDVD_LOG("CD1 write: %x (%s)", rt, CmdName[rt]);
-	// [TEMP_DIAG] iter615: @@CDR_WRITE1@@ — PS1 BIOS が CDROM コマンドを送るかverify (max 30)
-	// 目的: INTC_STAT bit2 (CDROM IRQ) が発火しないcause特定 (D-1 -> D-2)
-	// Removal condition: CDROM IRQ2 発火経路after determined
-	{
-		static int s_cdr_write1_n = 0;
-		if (s_cdr_write1_n < 30) {
-			s_cdr_write1_n++;
-			Console.WriteLn("@@CDR_WRITE1@@ n=%d cmd=%02x(%s) ctrl=%02x stat=%02x iop_pc=%08x",
-				s_cdr_write1_n, (u32)rt, CmdName[rt], (u32)cdr.Ctrl, (u32)cdr.Stat, psxRegs.pc);
-		}
-	}
 	cdr.Cmd = rt;
 	cdr.OCUP = 0;
 
@@ -1052,20 +1011,6 @@ u8 cdrRead3(void)
 	}
 	else
 		psxHu8(0x1803) = 0;
-
-	// [TEMP_DIAG] iter620: @@CDR_READ3@@ — BIOS ISR が読む INT 値を記録 (max 15, IEc 無関係)
-	// 目的: W5 era PCB[5]=0x4000 になった INT 値を特定 (INT1=DataReady, INT3=Ack, INT5=DiskError, 0=spurious)
-	// 注意: exception context (IEc=0) でも発火するよう IEc チェック除去
-	// Removal condition: DeliverEvent(F1000005) トリガ INT 値after identified
-	{
-		static int s_rd3_n = 0;
-		if (s_rd3_n < 50) {
-			s_rd3_n++;
-			u32 iec = psxRegs.CP0.r[12] & 1u;
-			Console.WriteLn("@@CDR_READ3@@ n=%d ret=%02x stat=%d ctrl=%02x IEc=%d iop_pc=%08x",
-				s_rd3_n, (u32)psxHu8(0x1803), (u32)cdr.Stat, (u32)cdr.Ctrl, (int)iec, psxRegs.pc);
-		}
-	}
 
 	CDVD_LOG("CD3 Read: %x", psxHu8(0x1803));
 	return psxHu8(0x1803);

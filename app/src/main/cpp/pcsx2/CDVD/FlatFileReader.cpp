@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "FlatFileReader.h"
@@ -22,17 +22,9 @@ FlatFileReader::~FlatFileReader()
 
 bool FlatFileReader::Open2(std::string filename, Error* error)
 {
-    m_filename = std::move(filename);
-    ////
-    if (m_filename.rfind("content://", 0) == 0) {
-        m_file = fdopen(FileSystem::OpenFDFileContent(m_filename.c_str()), "rb");
-    } else {
-        m_file = FileSystem::OpenCFile(m_filename.c_str(), "rb", error);
-    }
-    ////
-    if (!m_file) {
-        return false;
-    }
+	m_filename = std::move(filename);
+	if (!(m_file = FileSystem::OpenCFile(m_filename.c_str(), "rb", error)))
+		return false;
 
 	const s64 filesize = FileSystem::FSize64(m_file);
 	if (filesize <= 0)

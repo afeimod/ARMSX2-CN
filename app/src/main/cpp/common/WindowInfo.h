@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -15,9 +15,7 @@ struct WindowInfo
 		Win32,
 		X11,
 		Wayland,
-		MacOS,
-        Android,
-        iOS
+		MacOS
 	};
 
 	/// The type of the surface. Surfaceless indicates it will not be displayed on screen at all.

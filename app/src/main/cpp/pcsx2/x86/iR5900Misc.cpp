@@ -1,19 +1,11 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
 #include "iR5900.h"
 #include "R5900OpcodeTables.h"
-#include <atomic>
 
-// [iter681] recClear is defined in iR5900.cpp (global scope, outside namespace)
-extern void recClear(u32 addr, u32 size);
-// [TEMP_DIAG] JIT perf counter
-extern std::atomic<uint32_t> s_jit_cache_clear_count;
-
-#if !defined(__ANDROID__)
 using namespace x86Emitter;
-#endif
 
 namespace R5900 {
 namespace Dynarec {
@@ -25,7 +17,7 @@ namespace Dynarec {
 // Parameters:
 //   jmpSkip - This parameter is the result of the appropriate J32 instruction
 //   (usually JZ32 or JNZ32).
-void recDoBranchImm(u32 branchTo, a64::Label* jmpSkip, bool isLikely, bool swappedDelaySlot)
+void recDoBranchImm(u32 branchTo, u32* jmpSkip, bool isLikely, bool swappedDelaySlot)
 {
 	// First up is the Branch Taken Path : Save the recompiler's state, compile the
 	// DelaySlot, and issue a BranchTest insertion.  The state is reloaded below for
@@ -41,8 +33,7 @@ void recDoBranchImm(u32 branchTo, a64::Label* jmpSkip, bool isLikely, bool swapp
 
 	// Jump target when the branch is *not* taken, skips the branchtest code
 	// insertion above.
-//	x86SetJ32(jmpSkip);
-    armBind(jmpSkip);
+	x86SetJ32(jmpSkip);
 
 	// if it's a likely branch then we'll need to skip the delay slot here, since
 	// MIPS cancels the delay slot instruction when branches aren't taken.
@@ -80,11 +71,9 @@ void recPREF()
 {
 }
 
-#if !defined(_M_ARM64)
 void recSYNC()
 {
 }
-#endif
 
 void recMFSA()
 {
@@ -96,24 +85,19 @@ void recMFSA()
 	{
 		// have to zero out bits 63:32
 		const int temp = _allocTempXMMreg(XMMT_INT);
-//		xMOVSSZX(xRegisterSSE(temp), ptr32[&cpuRegs.sa]);
-        armLoad(a64::QRegister(temp).S(), PTR_CPU(cpuRegs.sa));
-//		xBLEND.PD(xRegisterSSE(mmreg), xRegisterSSE(temp), 1);
-        armAsm->Mov(a64::QRegister(mmreg).V2D(), 0, a64::QRegister(temp).V2D(), 0);
+		xMOVSSZX(xRegisterSSE(temp), ptr32[&cpuRegs.sa]);
+		xBLEND.PD(xRegisterSSE(mmreg), xRegisterSSE(temp), 1);
 		_freeXMMreg(temp);
 	}
 	else if (const int gprreg = _allocIfUsedGPRtoX86(_Rd_, MODE_WRITE); gprreg >= 0)
 	{
-//		xMOV(xRegister32(gprreg), ptr32[&cpuRegs.sa]);
-        armLoad(HostW(gprreg), PTR_CPU(cpuRegs.sa));
+		xMOV(xRegister32(gprreg), ptr32[&cpuRegs.sa]);
 	}
 	else
 	{
 		_deleteEEreg(_Rd_, 0);
-//		xMOV(eax, ptr32[&cpuRegs.sa]);
-        armLoad(EAX, PTR_CPU(cpuRegs.sa));
-//		xMOV(ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
-        armStore(PTR_CPU(cpuRegs.GPR.r[_Rd_].UD[0]), RAX);
+		xMOV(eax, ptr32[&cpuRegs.sa]);
+		xMOV(ptr64[&cpuRegs.GPR.r[_Rd_].UD[0]], rax);
 	}
 }
 
@@ -122,8 +106,7 @@ void recMTSA()
 {
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(ptr32[&cpuRegs.sa], g_cpuConstRegs[_Rs_].UL[0] & 0xf);
-        armStore(PTR_CPU(cpuRegs.sa), g_cpuConstRegs[_Rs_].UL[0] & 0xf);
+		xMOV(ptr32[&cpuRegs.sa], g_cpuConstRegs[_Rs_].UL[0] & 0xf);
 	}
 	else
 	{
@@ -131,23 +114,18 @@ void recMTSA()
 
 		if ((mmreg = _checkXMMreg(XMMTYPE_GPRREG, _Rs_, MODE_READ)) >= 0)
 		{
-//			xMOVSS(ptr[&cpuRegs.sa], xRegisterSSE(mmreg));
-            armStore(PTR_CPU(cpuRegs.sa), a64::QRegister(mmreg).S());
+			xMOVSS(ptr[&cpuRegs.sa], xRegisterSSE(mmreg));
 		}
 		else if ((mmreg = _checkX86reg(X86TYPE_GPR, _Rs_, MODE_READ)) >= 0)
 		{
-//			xMOV(ptr[&cpuRegs.sa], xRegister32(mmreg));
-            armStore(PTR_CPU(cpuRegs.sa), HostW(mmreg));
+			xMOV(ptr[&cpuRegs.sa], xRegister32(mmreg));
 		}
 		else
 		{
-//			xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
-            armLoad(EAX, PTR_CPU(cpuRegs.GPR.r[_Rs_].UL[0]));
-//			xMOV(ptr[&cpuRegs.sa], eax);
-            armStore(PTR_CPU(cpuRegs.sa), EAX);
+			xMOV(eax, ptr[&cpuRegs.GPR.r[_Rs_].UL[0]]);
+			xMOV(ptr[&cpuRegs.sa], eax);
 		}
-//		xAND(ptr32[&cpuRegs.sa], 0xf);
-        armAnd(PTR_CPU(cpuRegs.sa), 0xf);
+		xAND(ptr32[&cpuRegs.sa], 0xf);
 	}
 }
 
@@ -155,18 +133,14 @@ void recMTSAB()
 {
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(ptr32[&cpuRegs.sa], ((g_cpuConstRegs[_Rs_].UL[0] & 0xF) ^ (_Imm_ & 0xF)));
-        armStore(PTR_CPU(cpuRegs.sa), ((g_cpuConstRegs[_Rs_].UL[0] & 0xF) ^ (_Imm_ & 0xF)));
+		xMOV(ptr32[&cpuRegs.sa], ((g_cpuConstRegs[_Rs_].UL[0] & 0xF) ^ (_Imm_ & 0xF)));
 	}
 	else
 	{
-		_eeMoveGPRtoR(EAX, _Rs_);
-//		xAND(eax, 0xF);
-        armAsm->And(EAX, EAX, 0xF);
-//		xXOR(eax, _Imm_ & 0xf);
-        armAsm->Eor(EAX, EAX, _Imm_ & 0xf);
-//		xMOV(ptr[&cpuRegs.sa], eax);
-        armStore(PTR_CPU(cpuRegs.sa), EAX);
+		_eeMoveGPRtoR(eax, _Rs_);
+		xAND(eax, 0xF);
+		xXOR(eax, _Imm_ & 0xf);
+		xMOV(ptr[&cpuRegs.sa], eax);
 	}
 }
 
@@ -174,20 +148,15 @@ void recMTSAH()
 {
 	if (GPR_IS_CONST1(_Rs_))
 	{
-//		xMOV(ptr32[&cpuRegs.sa], ((g_cpuConstRegs[_Rs_].UL[0] & 0x7) ^ (_Imm_ & 0x7)) << 1);
-        armStore(PTR_CPU(cpuRegs.sa), ((g_cpuConstRegs[_Rs_].UL[0] & 0x7) ^ (_Imm_ & 0x7)) << 1);
+		xMOV(ptr32[&cpuRegs.sa], ((g_cpuConstRegs[_Rs_].UL[0] & 0x7) ^ (_Imm_ & 0x7)) << 1);
 	}
 	else
 	{
-		_eeMoveGPRtoR(EAX, _Rs_);
-//		xAND(eax, 0x7);
-        armAsm->And(EAX, EAX, 0x7);
-//		xXOR(eax, _Imm_ & 0x7);
-        armAsm->Eor(EAX, EAX, _Imm_ & 0x7);
-//		xSHL(eax, 1);
-        armAsm->Lsl(EAX, EAX, 1);
-//		xMOV(ptr[&cpuRegs.sa], eax);
-        armStore(PTR_CPU(cpuRegs.sa), EAX);
+		_eeMoveGPRtoR(eax, _Rs_);
+		xAND(eax, 0x7);
+		xXOR(eax, _Imm_ & 0x7);
+		xSHL(eax, 1);
+		xMOV(ptr[&cpuRegs.sa], eax);
 	}
 }
 
@@ -227,56 +196,14 @@ void recCOP1_Unknown()
 *
 **********************************************************/
 
-// [iter681] FIX: CACHE instruction must invalidate JIT blocks for EE RAM targets.
-// Without this, FlushCache SYSCALL leaves stale JIT blocks from before kernel code copy,
-// causing the BIOS sceSifSetDma implementation (at 0x80006410) to execute NOPs instead
-// of the real code, preventing SIF DMA tag setup and BIOS browser display.
-//
-// Runtime helper: called for each CACHE instruction targeting EE RAM.
-// Clears any compiled JIT block at the given address.
-static void recCACHE_ClearBlock(u32 addr)
+// Suikoden 3 uses it a lot
+void recCACHE() //Interpreter only!
 {
-	s_jit_cache_clear_count.fetch_add(1, std::memory_order_relaxed); // [TEMP_DIAG]
-	u32 phys = addr & 0x1FFFFFFFu;
-	// Only clear blocks in EE RAM range (0-32MB)
-	if (phys < Ps2MemSize::MainRam) {
-		recClear(phys, 1);
-	}
-}
-
-void recCACHE()
-{
-	// [iter684] Only clear JIT blocks for I-cache operations.
-	// D-cache operations (0x10-0x1C) don't affect compiled code.
-	// I-cache: 0x07 (IXIN), 0x0C (BFH/BTAC Flush)
-	// This filter eliminates ~95% of unnecessary JIT block invalidations.
-	const u32 op = _Rt_;
-	if (op != 0x07 && op != 0x0C) {
-		// Data cache operation — no JIT impact, skip
-		return;
-	}
-
-	// Emit a runtime call to recCACHE_ClearBlock(base + offset)
-	// CACHE instruction format: base=Rs, offset=Imm (sign-extended)
-	iFlushCall(FLUSH_EVERYTHING);
-
-	// Compute target address: Rs + sign_extended_imm
-	if (GPR_IS_CONST1(_Rs_)) {
-		u32 addr = g_cpuConstRegs[_Rs_].UL[0] + _Imm_;
-		armAsm->Mov(a64::w0, addr);
-	} else {
-		int rs = _allocX86reg(X86TYPE_GPR, _Rs_, MODE_READ);
-		armAsm->Mov(a64::w0, HostW(rs));
-		if (_Imm_ != 0)
-			armAsm->Add(a64::w0, a64::w0, _Imm_);
-	}
-	armEmitCall((void*)recCACHE_ClearBlock);
-}
-
-void recMOVCI()
-{
-	if (!_Rd_) return; // rd==0: always NOP
-	recCall(R5900::Interpreter::OpcodeImpl::MOVCI);
+	//xMOV(ptr32[&cpuRegs.code], (u32)cpuRegs.code );
+	//xMOV(ptr32[&cpuRegs.pc], (u32)pc );
+	//iFlushCall(FLUSH_EVERYTHING);
+	//xFastCall((void*)(uptr)R5900::Interpreter::OpcodeImpl::CACHE );
+	//branch = 2;
 }
 
 void recTGE()

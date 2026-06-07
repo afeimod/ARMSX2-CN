@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
@@ -15,16 +15,14 @@ static __fi void IntCHackCheck()
 {
 	// Sanity check: To protect from accidentally "rewinding" the cyclecount
 	// on the few times nextBranchCycle can be behind our current cycle.
-	s32 diff = cpuRegs.nextEventCycle - cpuRegs.cycle;
-	if (diff > 0 && (cpuRegs.cycle - cpuRegs.lastEventCycle) > 8) {
-		cpuRegs.cycle = cpuRegs.nextEventCycle;
-	}
+	s64 diff = cpuRegs.nextEventCycle - cpuRegs.cycle;
+	if (diff > 0 && (cpuRegs.cycle - cpuRegs.lastEventCycle) > 8) cpuRegs.cycle = cpuRegs.nextEventCycle;
 }
 
 template< uint page > RETURNS_R128 _hwRead128(u32 mem);
 
 template< uint page, bool intcstathack >
-mem32_t _hwRead32_impl(u32 mem)
+mem32_t _hwRead32(u32 mem)
 {
 	pxAssume( (mem & 0x03) == 0 );
 
@@ -74,30 +72,6 @@ mem32_t _hwRead32_impl(u32 mem)
 				if (intcstathack && !(psxHu32(HW_ICFG) & (1 << 3))) IntCHackCheck();
 				return psHu32(INTC_STAT);
 			}
-
-            // [iPSX2] Force PS2 Mode (Clear bit 3 of ICFG)
-            if (mem == HW_ICFG) {
-                u32 val = psHu32(HW_ICFG);
-                static bool s_force_checked = false;
-                static bool s_force_enabled = false;
-                if (!s_force_checked) {
-                    const char* env = std::getenv("iPSX2_FORCE_PS2MODE");
-                    s_force_enabled = (env && env[0] == '1');
-                    s_force_checked = true;
-                }
-                
-                if (s_force_enabled) {
-                    u32 orig = val;
-                    val &= ~8; // Clear bit 3 (PlayStation 2 Mode)
-                    static bool s_log_once = false;
-                    if (!s_log_once) {
-                        Console.WriteLn("@@MODE450_OVR@@ addr=bf801450 orig=%08x new=%08x bit3=%d enabled=1", 
-                            orig, val, (val >> 3) & 1);
-                        s_log_once = true;
-                    }
-                }
-                return val;
-            }
 
 			// todo: psx mode: this is new
 			if (((mem & 0x1FFFFFFF) >= EEMemoryMap::SBUS_PS1_Start) && ((mem & 0x1FFFFFFF) < EEMemoryMap::SBUS_PS1_End)) {
@@ -150,54 +124,27 @@ mem32_t _hwRead32_impl(u32 mem)
 			}*/
 			switch( mem )
 			{
-				case SIO_LSR:
-					// [iter215] BIOS putchar polls SIO_LSR bit5 (THRE) for TX ready.
-					// PCSX2 processes TX writes instantly, so always report ready.
-					return 0x60; // THRE(bit5) + TEMT(bit6) = TX ready + TX empty
-
 				case SIO_ISR:
+					
+					// Not (yet) hardware tested
+					// The PS2SDK behaviour is as follows:
 
-				// [iter218] BIOS at 9FC433F0 polls SIO_TXFIFO bit15 waiting for TX ready.
-				// PCSX2 does not emulate SIO TX, so always report FIFO empty (0).
-				case SIO_TXFIFO:
-				{
-					// [iter219] TEMP_DIAG: confirm SIO_TXFIFO handler is reached
-					static u32 s_txfifo_cnt = 0;
-					if (s_txfifo_cnt < 5) {
-						Console.WriteLn("@@SIO_TXFIFO_HIT@@ n=%u pc=%08x mem=%08x", s_txfifo_cnt, cpuRegs.pc, mem);
-						s_txfifo_cnt++;
-					}
-					return 0;
-				}
+					// TX: Don't write to TX FIFO until until bit 15 is 0
 
+					// RX: RX FIFO has data when bits 8-11 are not 0 (maybe a byte count?)
+					// RX: When reading from the RX FIFO, set bits 0-2 to 1 (why??)
+					
+					// For TX, we don't do any LLE buffering, so we can keep bit 15 to 0
+					// For RX, just hack it so when the ee_rx_fifo.size() != 0, ISR = 0xf00
+
+					if(!ee_sio_rx_fifo.empty())
+						return 0xf00;
+
+					return 0x0;
+					break;
 				case 0x1000f410:
 				case MCH_RICM:
 					return 0;
-
-				case SBUS_F230:
-				{
-					// [iter672] @@EE_SBUS_F230_READ@@ – cap 8→30, bit18 追跡
-					// Removal condition: SMFLG bit18 差異のroot causeafter identified
-					static u32 s_f230_n = 0;
-					static u32 s_f230_total = 0;
-					static bool s_bit18_first_read = false;
-					++s_f230_total;
-					const u32 val = psHu32(SBUS_F230);
-					if (s_f230_n < 30) {
-						++s_f230_n;
-						Console.WriteLn("@@EE_SBUS_F230_READ@@ n=%u total=%u pc=0x%08x f230=0x%08x",
-							s_f230_n, s_f230_total, cpuRegs.pc, val);
-					} else if (s_f230_total == 10000 || s_f230_total == 100000) {
-						Console.WriteLn("@@EE_SBUS_F230_READ@@ total=%u pc=0x%08x f230=0x%08x",
-							s_f230_total, cpuRegs.pc, val);
-					}
-					if (!s_bit18_first_read && (val & 0x40000)) {
-						s_bit18_first_read = true;
-						Console.WriteLn("@@SMFLG_BIT18_FIRST_READ@@ pc=0x%08x f230=0x%08x total_reads=%u eecyc=%u",
-							cpuRegs.pc, val, s_f230_total, cpuRegs.cycle);
-					}
-					return val;
-				}
 
 				case SBUS_F240:
 #if PSX_EXTRALOGS
@@ -210,17 +157,6 @@ mem32_t _hwRead32_impl(u32 mem)
 #endif
 					return psHu32(SBUS_F260);
 				case MCH_DRD:
-					// [iter56] @@MCH_DRD_READ@@ probe: confirm hwRead32 is reached + show psHu32(MCH_RICM).
-					// Removal condition: MCH_RICM 書き込み経路確定・after fixed。
-					{
-						static int s_drd_count = 0;
-						if (s_drd_count < 20) {
-							s_drd_count++;
-							Console.WriteLn("@@MCH_DRD_READ@@ #%d ricm=%08x SA=%03x sdevid=%d",
-								s_drd_count, psHu32(MCH_RICM),
-								(psHu32(MCH_RICM) >> 16) & 0xFFF, rdram_sdevid);
-						}
-					}
 					if( !((psHu32(MCH_RICM) >> 6) & 0xF) )
 					{
 						switch ((psHu32(MCH_RICM)>>16) & 0xFFF)
@@ -269,67 +205,11 @@ mem32_t _hwRead32_impl(u32 mem)
 	return psHu32(mem);
 }
 
-template< uint page, bool intcstathack >
-mem32_t _hwRead32(u32 mem)
-{
-    static bool once = false;
-    if (!once) { Console.WriteLn("@@HWMON_HOOK@@ _hwRead32_impl alive"); once = true; }
-    
-    mem32_t ret = _hwRead32_impl<page, intcstathack>(mem);
-
-    // [TEMP_DIAG][REMOVE_AFTER=EE_9FC41048_T0_HWREAD_ROOTCAUSE_V1]
-    // 目的: EE BIOS wait-loop (9FC41048付近) の RCNT0_COUNT 読み値と cycle/pc を直接証拠化し、
-    // needed時に限定交互値を返して EE 停滞脱出可否を切り分ける。既定OFF・ログ上限あり。
-    if constexpr (page == 0x00)
-    {
-        static int s_cfg_init = 0;
-        static int s_probe_enabled = 0;
-        static int s_toggle_enabled = 0;
-        static u32 s_n = 0;
-        static u32 s_toggle_n = 0;
-        static u32 s_prev_cycle = 0;
-        if (!s_cfg_init)
-        {
-            s_probe_enabled = iPSX2_GetRuntimeEnvBool("iPSX2_EE_T0HW_PROBE", false) ? 1 : 0;
-            s_toggle_enabled = iPSX2_GetRuntimeEnvBool("iPSX2_EE_T0HW_TOGGLE", false) ? 1 : 0;
-            Console.WriteLn("@@CFG@@ iPSX2_EE_T0HW_PROBE=%d iPSX2_EE_T0HW_TOGGLE=%d", s_probe_enabled, s_toggle_enabled);
-            s_cfg_init = 1;
-        }
-
-        const bool is_rcnt0_count = ((mem & 0xff) == 0x00); // page 0x00 local offset 0 == RCNT0_COUNT
-        const bool bios_loop_window = (cpuRegs.pc >= 0x9FC41000u && cpuRegs.pc < 0x9FC41100u);
-        if (is_rcnt0_count && bios_loop_window)
-        {
-            mem32_t out = ret;
-            if (s_toggle_enabled)
-                out = (s_toggle_n++ & 1u);
-
-            if ((s_probe_enabled || s_toggle_enabled) && s_n < 64)
-            {
-                Console.WriteLn("@@EE_T0HW@@ n=%u pc=%08x mem=%08x raw=%08x out=%08x cycle=%u dcycle=%u",
-                    s_n, cpuRegs.pc, mem, static_cast<u32>(ret), static_cast<u32>(out),
-                    cpuRegs.cycle, cpuRegs.cycle - s_prev_cycle);
-                s_n++;
-            }
-            s_prev_cycle = cpuRegs.cycle;
-            ret = out;
-        }
-    }
-
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 32, ret, false);
-    return ret;
-}
-
 template< uint page >
 mem32_t hwRead32(u32 mem)
 {
 	mem32_t retval = _hwRead32<page,false>(mem);
 	eeHwTraceLog( mem, retval, true );
-    // g_HwRegRing.Push merged into _hwRead32
-    
-    static bool once = false;
-    if (!once) { Console.WriteLn("@@HWMON_HOOK@@ hwRead32 alive"); once = true; }
-    
 	return retval;
 }
 
@@ -337,7 +217,6 @@ mem32_t hwRead32_page_0F_INTC_HACK(u32 mem)
 {
 	mem32_t retval = _hwRead32<0x0f,true>(mem);
 	eeHwTraceLog( mem, retval, true );
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 32, retval, false);
 	return retval;
 }
 
@@ -346,18 +225,20 @@ mem32_t hwRead32_page_0F_INTC_HACK(u32 mem)
 // --------------------------------------------------------------------------------------
 
 template< uint page >
-mem8_t _hwRead8_impl(u32 mem)
-{
-	u32 ret32 = _hwRead32<page, false>(mem & ~0x03);
-	return ((u8*)&ret32)[mem & 0x03];
-}
-
-template< uint page >
 mem8_t _hwRead8(u32 mem)
 {
-    mem8_t ret = _hwRead8_impl<page>(mem);
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 8, ret, false);
-    return ret;
+	if(mem == SIO_RXFIFO)
+	{
+		if(ee_sio_rx_fifo.empty())
+			return 0; // needs hardware test, what does it return with the FIFO is empty
+		
+		const char c = ee_sio_rx_fifo.front();
+		ee_sio_rx_fifo.pop_front();
+		return c;
+	}
+
+	u32 ret32 = _hwRead32<page, false>(mem & ~0x03);
+	return ((u8*)&ret32)[mem & 0x03];
 }
 
 template< uint page >
@@ -369,20 +250,12 @@ mem8_t hwRead8(u32 mem)
 }
 
 template< uint page >
-mem16_t _hwRead16_impl(u32 mem)
+mem16_t _hwRead16(u32 mem)
 {
 	pxAssume( (mem & 0x01) == 0 );
 
 	u32 ret32 = _hwRead32<page, false>(mem & ~0x03);
 	return ((u16*)&ret32)[(mem>>1) & 0x01];
-}
-
-template< uint page >
-mem16_t _hwRead16(u32 mem)
-{
-    mem16_t ret = _hwRead16_impl<page>(mem);
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 16, ret, false);
-    return ret;
 }
 
 template< uint page >
@@ -405,7 +278,7 @@ mem16_t hwRead16_page_0F_INTC_HACK(u32 mem)
 }
 
 template< uint page >
-static u64 _hwRead64_impl(u32 mem)
+static u64 _hwRead64(u32 mem)
 {
 	pxAssume( (mem & 0x07) == 0 );
 
@@ -451,14 +324,6 @@ static u64 _hwRead64_impl(u32 mem)
 }
 
 template< uint page >
-static u64 _hwRead64(u32 mem)
-{
-    u64 ret = _hwRead64_impl<page>(mem);
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 64, ret, false);
-    return ret;
-}
-
-template< uint page >
 mem64_t hwRead64(u32 mem)
 {
 	u64 res = _hwRead64<page>(mem);
@@ -467,7 +332,7 @@ mem64_t hwRead64(u32 mem)
 }
 
 template< uint page >
-RETURNS_R128 _hwRead128_impl(u32 mem)
+RETURNS_R128 _hwRead128(u32 mem)
 {
 	pxAssume( (mem & 0x0f) == 0 );
 
@@ -532,19 +397,10 @@ RETURNS_R128 _hwRead128_impl(u32 mem)
 }
 
 template< uint page >
-RETURNS_R128 _hwRead128(u32 mem)
-{
-    r128 ret = _hwRead128_impl<page>(mem);
-    g_HwRegRing.Push(cpuRegs.pc, mem, mem, 128, *(u64*)&ret, false);
-    return ret;
-}
-
-template< uint page >
 RETURNS_R128 hwRead128(u32 mem)
 {
 	r128 res = _hwRead128<page>(mem);
 	eeHwTraceLog(mem, res, true);
-    // Log lower 64 bits only - merged into _hwRead128
 	return res;
 }
 

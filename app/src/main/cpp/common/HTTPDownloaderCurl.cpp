@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/HTTPDownloaderCurl.h"
@@ -13,7 +13,6 @@
 #include <functional>
 #include <pthread.h>
 #include <signal.h>
-#include <curl/urlapi.h>
 
 HTTPDownloaderCurl::HTTPDownloaderCurl()
 	: HTTPDownloader()
@@ -166,56 +165,13 @@ void HTTPDownloaderCurl::InternalPollRequests()
 bool HTTPDownloaderCurl::StartRequest(HTTPDownloader::Request* request)
 {
 	Request* req = static_cast<Request*>(request);
-
-	if (request->url.empty())
-	{
-		Console.Error("HTTP request rejected: empty URL");
-		req->callback(HTTP_STATUS_ERROR, std::string(), {});
-		curl_easy_cleanup(req->handle);
-		delete req;
-		return false;
-	}
-
-	bool url_valid = false;
-	if (CURLU* url = curl_url())
-	{
-		const CURLUcode parse_result = curl_url_set(url, CURLUPART_URL, request->url.c_str(), CURLU_NON_SUPPORT_SCHEME);
-		url_valid = (parse_result == CURLUE_OK);
-		if (!url_valid)
-			Console.Error(fmt::format("HTTP request rejected: malformed URL '{}' ({})", request->url, static_cast<int>(parse_result)));
-		curl_url_cleanup(url);
-	}
-else
-	Console.Error("HTTP request rejected: curl_url() allocation failed");
-
-	if (!url_valid)
-	{
-		req->callback(HTTP_STATUS_ERROR, std::string(), {});
-		curl_easy_cleanup(req->handle);
-		delete req;
-		return false;
-	}
-	const CURLcode set_url_result = curl_easy_setopt(req->handle, CURLOPT_URL, request->url.c_str());
-	if (set_url_result != CURLE_OK)
-	{
-		Console.Error(fmt::format("HTTP request rejected: curl_easy_setopt(URL) failed for '{}' ({})", request->url, static_cast<int>(set_url_result)));
-		req->callback(HTTP_STATUS_ERROR, std::string(), {});
-		curl_easy_cleanup(req->handle);
-		delete req;
-		return false;
-	}
+	curl_easy_setopt(req->handle, CURLOPT_URL, request->url.c_str());
 	curl_easy_setopt(req->handle, CURLOPT_USERAGENT, m_user_agent.c_str());
 	curl_easy_setopt(req->handle, CURLOPT_WRITEFUNCTION, &HTTPDownloaderCurl::WriteCallback);
 	curl_easy_setopt(req->handle, CURLOPT_WRITEDATA, req);
 	curl_easy_setopt(req->handle, CURLOPT_NOSIGNAL, 1L);
 	curl_easy_setopt(req->handle, CURLOPT_PRIVATE, req);
 	curl_easy_setopt(req->handle, CURLOPT_FOLLOWLOCATION, 1L);
-
-#if defined(__ANDROID__)
-	// TESTING PURPOSES ONLY HOT FIX
-	curl_easy_setopt(req->handle, CURLOPT_SSL_VERIFYPEER, 0L);
-	curl_easy_setopt(req->handle, CURLOPT_SSL_VERIFYHOST, 0L);
-#endif
 
 	if (request->type == Request::Type::Post)
 	{

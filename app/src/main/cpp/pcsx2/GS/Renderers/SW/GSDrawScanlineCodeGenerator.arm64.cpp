@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0
 
 #include "GS/Renderers/SW/GSDrawScanlineCodeGenerator.arm64.h"
@@ -77,8 +77,10 @@ static const auto& _d4_f = v9;
 static const auto& _test = v8;
 static const auto& _fd = v2;
 
-#define _local(field) MemOperand(_locals, offsetof(GSScanlineLocalData, field))
-#define _global(field) MemOperand(_globals, offsetof(GSScanlineGlobalData, field))
+// Yay, you can't offsetof with non-constant array indices in GCC
+#define OFFSETOF(base, field) (reinterpret_cast<uptr>(&reinterpret_cast<base*>(0)->field))
+#define _local(field) MemOperand(_locals, OFFSETOF(GSScanlineLocalData, field))
+#define _global(field) MemOperand(_globals, OFFSETOF(GSScanlineGlobalData, field))
 #define armAsm (&m_emitter)
 
 GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, size_t maxsize)
@@ -2352,14 +2354,15 @@ void GSDrawScanlineCodeGenerator::modulate16(const VRegister& a, const VRegister
 
 void GSDrawScanlineCodeGenerator::modulate16(const VRegister& d, const VRegister& a, const VRegister& f, u8 shift)
 {
-	// potentially going to cause issues due to saturation
-	armAsm->Shl(d.V8H(), a.V8H(), shift + 1);
-	if (shift != 0)
-		armAsm->Sqdmulh(a.V8H(), a.V8H(), f.V8H());
+	if (shift)
+	{
+		armAsm->Shl(d.V8H(), a.V8H(), shift);
+		armAsm->Sqdmulh(d.V8H(), d.V8H(), f.V8H());
+	}
 	else
-		armAsm->Sqrdmulh(a.V8H(), a.V8H(), f.V8H());
-
-	armAsm->Sshr(a.V8H(), a.V8H(), 1);
+	{
+		armAsm->Sqdmulh(a.V8H(), d.V8H(), f.V8H());
+	}
 }
 
 void GSDrawScanlineCodeGenerator::lerp16(const VRegister& a, const VRegister& b, const VRegister& f, u8 shift)

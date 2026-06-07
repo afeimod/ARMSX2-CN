@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
@@ -24,10 +24,6 @@ class Error;
 
 #if defined(__APPLE__)
 #define VK_USE_PLATFORM_METAL_EXT
-#endif
-
-#if defined(__ANDROID__)
-#define VK_USE_PLATFORM_ANDROID_KHR
 #endif
 
 #include "vulkan/vulkan.h"
@@ -79,6 +75,7 @@ class Error;
 #pragma clang diagnostic ignored "-Wnullability-completeness"
 #pragma clang diagnostic ignored "-Wunused-variable"
 #pragma clang diagnostic ignored "-Wunused-function"
+#pragma clang diagnostic ignored "-Wunused-private-field"
 #endif
 
 #define VMA_STATIC_VULKAN_FUNCTIONS 1

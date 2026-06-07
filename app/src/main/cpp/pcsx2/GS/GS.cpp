@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Config.h"
@@ -21,20 +21,10 @@
 #include "GS/Renderers/HW/GSRendererHW.h"
 #include "GS/Renderers/HW/GSTextureReplacements.h"
 #include "VMManager.h"
-#include "R5900.h"
-#include "Dmac.h"
-#include "vtlb.h"
-
-extern "C" void vtlb_LogVTLBAccess(u32 addr, u32 pc, bool is_write);
 
 #ifdef ENABLE_OPENGL
 #include "GS/Renderers/OpenGL/GSDeviceOGL.h"
 #endif
-
-// [iPSX2]
-extern "C" void LogUnified(const char* fmt, ...);
-
-static constexpr bool kIOSLegacyGSVsyncDiagnostics = false;
 
 #ifdef __APPLE__
 #include "GS/Renderers/Metal/GSMetalCPPAccessible.h"
@@ -58,7 +48,7 @@ static constexpr bool kIOSLegacyGSVsyncDiagnostics = false;
 #include "common/SmallString.h"
 #include "common/StringUtil.h"
 
-#include "IconsFontAwesome5.h"
+#include "IconsFontAwesome.h"
 
 #include "fmt/format.h"
 
@@ -150,9 +140,6 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 			return false;
 	}
 
-	// [iPSX2] GS Open Start
-	LogUnified("@@GS_OPEN@@ renderer=%d api=%s\n", (int)renderer, GSDevice::RenderAPIToString(new_api));
-
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
 	if (okay)
 	{
@@ -175,14 +162,9 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	}
 
 	GSConfig.OsdShowGPU = GSConfig.OsdShowGPU && g_gs_device->SetGPUTimingEnabled(true);
-	// [TEMP_DIAG] Force GPU timing for profiling
-	g_gs_device->SetGPUTimingEnabled(true);
 
 	Console.WriteLn(Color_StrongGreen, "%s Graphics Driver Info:", GSDevice::RenderAPIToString(new_api));
 	Console.WriteLn(g_gs_device->GetDriverInfo());
-
-	// [iPSX2] GS Init OK
-	LogUnified("@@GS_INIT_OK@@ backend=%s device_ok=1\n", GSDevice::RenderAPIToString(new_api));
 
 	return true;
 }
@@ -203,12 +185,12 @@ static void GSClampUpscaleMultiplier(Pcsx2Config::GSOptions& config)
 	if (config.UpscaleMultiplier <= static_cast<float>(max_upscale_multiplier))
 	{
 		// Shouldn't happen, but just in case.
-		if (config.UpscaleMultiplier < 1.0f)
-			config.UpscaleMultiplier = 1.0f;
+		if (config.UpscaleMultiplier < 0.0f)
+			config.UpscaleMultiplier = 0.0f;
 		return;
 	}
 
-	Host::AddIconOSDMessage("GSUpscaleMultiplierInvalid", ICON_FA_EXCLAMATION_TRIANGLE,
+	Host::AddIconOSDMessage("GSUpscaleMultiplierInvalid", ICON_FA_TRIANGLE_EXCLAMATION,
 		fmt::format(TRANSLATE_FS("GS", "Configured upscale multiplier {}x is above your GPU's supported multiplier of {}x."),
 			config.UpscaleMultiplier, max_upscale_multiplier),
 		Host::OSD_WARNING_DURATION);
@@ -366,18 +348,6 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 	bool res = OpenGSDevice(renderer, true, false, vsync_mode, allow_present_throttle);
 	if (res)
 	{
-#if TARGET_OS_IPHONE
-		// [iter254] iOS: Allow both SW and HW renderer via env var
-		{
-			const char* force_sw = getenv("iPSX2_FORCE_SW_RENDERER");
-			if (force_sw && force_sw[0] == '1') {
-				Console.WriteLn("@@GS_RENDERER@@ forcing SW renderer (env)");
-				renderer = GSRendererType::SW;
-			} else {
-				Console.WriteLn("@@GS_RENDERER@@ using renderer=%d (Metal HW)", (int)renderer);
-			}
-		}
-#endif
 		res = OpenGSRenderer(renderer, basemem);
 		if (!res)
 			CloseGSDevice(true);
@@ -385,10 +355,10 @@ bool GSopen(const Pcsx2Config::GSOptions& config, GSRendererType renderer, u8* b
 
 	if (!res)
 	{
-		Host::ReportErrorAsync(
-			"Error", fmt::format(TRANSLATE_FS("GS","Failed to create render device. This may be due to your GPU not supporting the "
-								 "chosen renderer ({}), or because your graphics drivers need to be updated."),
-						 Pcsx2Config::GSOptions::GetRendererName(GSConfig.Renderer)));
+		Host::ReportErrorAsync("Error",
+			fmt::format(TRANSLATE_FS("GS", "Failed to create render device. This may be due to your GPU not supporting the "
+			                               "chosen renderer ({}), or because your graphics drivers need to be updated."),
+			            Pcsx2Config::GSOptions::GetRendererName(GSConfig.Renderer)));
 		return false;
 	}
 
@@ -465,57 +435,14 @@ void GSgifTransfer3(u8* mem, u32 size)
 
 void GSvsync(u32 field, bool registers_written)
 {
-    // Added loop iteration logging for BIOS polling loop (first 64 iterations)
-    static int bios_loop_iter = 0;
-    if (kIOSLegacyGSVsyncDiagnostics && cpuRegs.pc == 0xbfc0207c && bios_loop_iter < 64) {
-        u32 t0 = cpuRegs.GPR.n.t0.UL[0];
-        u32 t1 = cpuRegs.GPR.n.t1.UL[0];
-        u32 t2 = cpuRegs.GPR.n.t2.UL[0];
-        DevCon.Error("@@CP0HACK@@ POLL i=%d pc=%08x t0=%08x t1=%08x t2=%08x", bios_loop_iter, cpuRegs.pc, t0, t1, t2);
-        // Log VTLB info for addresses accessed by this iteration
-        // CRASH FIX: vtlb_LogVTLBAccess access VTLB structures which is unsafe from MTGS thread!
-        // vtlb_LogVTLBAccess(t0, cpuRegs.pc, false); // read at t0
-        // vtlb_LogVTLBAccess(t0 + 4, cpuRegs.pc, false); // read at t0+4
-        // vtlb_LogVTLBAccess(t1, cpuRegs.pc, false); // read/write SIF register
-        bios_loop_iter++;
-    }
-
-    // [iPSX2] PC Watchdog (in VSync)
-    static int s_watch_count = 0;
-    if (kIOSLegacyGSVsyncDiagnostics && s_watch_count < 20 && (s_watch_count % 5) == 0) { // Log every 5th vsync, max 20 logs
-        LogUnified("@@PC_WATCH@@ pc=%08x\n", cpuRegs.pc);
-    }
-    s_watch_count++;
-
-
-		// Update this here because we need to check if the pending draw affects the current frame, so our regs need to be updated.
-		// [iter233] @@MTGS_REGS_PROBE@@ m_regs の PMODE/DISPLAY2 値をverify
-		if (kIOSLegacyGSVsyncDiagnostics)
-		{
-			static u32 s_mtgs_probe_n = 0;
-			if (s_mtgs_probe_n < 15) {
-			auto& d0 = g_gs_renderer->PCRTCDisplays.PCRTCDisplays[0];
-			auto& d1 = g_gs_renderer->PCRTCDisplays.PCRTCDisplays[1];
-			fprintf(stderr, "@@MTGS_REGS_PROBE@@ n=%u pmode=%016llx en1=%d en2=%d d0rect=[%d,%d,%d,%d] d0en=%d d0fbw=%d d1en=%d vmode=%d int=%d\n",
-				s_mtgs_probe_n,
-				(unsigned long long)g_gs_renderer->m_regs->PMODE.U64,
-				(int)g_gs_renderer->m_regs->PMODE.EN1,
-				(int)g_gs_renderer->m_regs->PMODE.EN2,
-				d0.displayRect.x, d0.displayRect.y, d0.displayRect.z, d0.displayRect.w,
-				(int)d0.enabled, (int)d0.FBW,
-				(int)d1.enabled,
-				g_gs_renderer->PCRTCDisplays.videomode,
-				(int)g_gs_renderer->PCRTCDisplays.interlaced);
-			s_mtgs_probe_n++;
-		}
-	}
+	// Update this here because we need to check if the pending draw affects the current frame, so our regs need to be updated.
 	g_gs_renderer->PCRTCDisplays.SetVideoMode(g_gs_renderer->GetVideoMode());
 	g_gs_renderer->PCRTCDisplays.EnableDisplays(g_gs_renderer->m_regs->PMODE, g_gs_renderer->m_regs->SMODE2, g_gs_renderer->isReallyInterlaced());
-	g_gs_renderer->PCRTCDisplays.CheckSameSource();
 	g_gs_renderer->PCRTCDisplays.SetRects(0, g_gs_renderer->m_regs->DISP[0].DISPLAY, g_gs_renderer->m_regs->DISP[0].DISPFB);
 	g_gs_renderer->PCRTCDisplays.SetRects(1, g_gs_renderer->m_regs->DISP[1].DISPLAY, g_gs_renderer->m_regs->DISP[1].DISPFB);
+	g_gs_renderer->PCRTCDisplays.CheckSameSource();
 	g_gs_renderer->PCRTCDisplays.CalculateDisplayOffset(g_gs_renderer->m_scanmask_used);
-	g_gs_renderer->PCRTCDisplays.CalculateFramebufferOffset(g_gs_renderer->m_scanmask_used);
+	g_gs_renderer->PCRTCDisplays.CalculateFramebufferOffset(g_gs_renderer->m_scanmask_used, g_gs_renderer->m_regs->DISP[0].DISPFB, g_gs_renderer->m_regs->DISP[1].DISPFB);
 
 	// Do not move the flush into the VSync() method. It's here because EE transfers
 	// get cleared in HW VSync, and may be needed for a buffered draw (FFX FMVs).
@@ -573,15 +500,10 @@ void GSEndCapture()
 {
 	if (g_gs_renderer)
 		g_gs_renderer->EndCapture();
-}		
+}
 
 void GSPresentCurrentFrame()
 {
-	static int pres_log = 0;
-	if (pres_log < 10) {
-		LogUnified("@@GS_PRESENT@@ frame=%d\n", pres_log);
-		pres_log++;
-	}
 	g_gs_renderer->PresentCurrentFrame();
 }
 
@@ -611,7 +533,7 @@ bool GSHasDisplayWindow()
 	return (g_gs_device->GetWindowInfo().type != WindowInfo::Type::Surfaceless);
 }
 
-void GSResizeDisplayWindow(int width, int height, float scale)
+void GSResizeDisplayWindow(u32 width, u32 height, float scale)
 {
 	g_gs_device->ResizeWindow(width, height, scale);
 	ImGuiManager::WindowResized();
@@ -678,6 +600,14 @@ std::vector<GSAdapterInfo> GSGetAdapterInfo(GSRendererType renderer)
 		break;
 #endif
 
+#ifdef ENABLE_OPENGL
+		case GSRendererType::OGL:
+		{
+			ret = GSDeviceOGL::GetAdapterInfo();
+		}
+		break;
+#endif
+
 #ifdef ENABLE_VULKAN
 		case GSRendererType::VK:
 		{
@@ -739,82 +669,113 @@ void GSgetStats(SmallStringBase& info)
 		const double fillrate = pm.Get(GSPerfMon::Fillrate);
 		double pps = fps * fillrate;
 		char prefix = '\0';
-		
+
 		if (pps >= 170000000)
 		{
-			pps /= 1073741824; // Gpps
+			pps /= _1gb; // Gpps
 			prefix = 'G';
 		}
 		else if (pps >= 35000000)
 		{
-			pps /= 1048576; // Mpps
+			pps /= _1mb; // Mpps
 			prefix = 'M';
 		}
-		else if (pps >= 1024)
+		else if (pps >= _1kb)
 		{
-			pps /= 1024;
-			prefix = 'K';
-		}
-		else
-		{
-			prefix = '\0';
+			pps /= _1kb; // kpps
+			prefix = 'k';
 		}
 
-		info.format("{} SW | {} SP | {} P | {} D | {:.2f} S | {:.2f} U | {:.2f} {}pps",
+		info.format("{} SW | {} SYNP | {} PRIM | {} DRW | {:.2f} SWIZ | {:.2f} UNSWIZ | {:.2f} {}pps",
 			api_name,
 			(int)pm.Get(GSPerfMon::SyncPoint),
 			(int)pm.Get(GSPerfMon::Prim),
 			(int)pm.Get(GSPerfMon::Draw),
-			pm.Get(GSPerfMon::Swizzle) / 1024,
-			pm.Get(GSPerfMon::Unswizzle) / 1024,
-			pps,prefix);
+			pm.Get(GSPerfMon::Swizzle) / _1kb,
+			pm.Get(GSPerfMon::Unswizzle) / _1kb,
+			pps, prefix);
 	}
 	else if (GSCurrentRenderer == GSRendererType::Null)
 	{
-		fmt::format_to(std::back_inserter(info), "{} Null", api_name);
+		info.format("{} Null", api_name);
 	}
 	else
 	{
-		info.format("{} HW | {} P | {} D | {} DC | {} B | {} RP | {} RB | {} TC | {} TU",
-			api_name,
-			(int)pm.Get(GSPerfMon::Prim),
-			(int)pm.Get(GSPerfMon::Draw),
-			(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
-			(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
-			(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
-			(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
-			(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
-			(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		if (!GSConfig.HWROV)
+		{
+			info.format("{} HW | {} PRIM | {} DRW | {} DRWC | {} BAR | {} RP | {} RB | {} TC | {} TU",
+				api_name,
+				(int)pm.Get(GSPerfMon::Prim),
+				(int)pm.Get(GSPerfMon::Draw),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
+				(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
+				(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
+				(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		}
+		else
+		{
+			// Add ROV stats along standard stats.
+			info.format("{} HW | {} PRIM | {} DRW | {}/{} DRWC | {}/{} BAR | {} RP | {} RB | {}/{} TC | {} TU",
+				api_name,
+				(int)pm.Get(GSPerfMon::Prim),
+				(int)pm.Get(GSPerfMon::Draw),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCallsROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
+				(int)std::ceil(pm.Get(GSPerfMon::BarriersROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
+				(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
+				(int)std::ceil(pm.Get(GSPerfMon::DepthCopiesROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		}
 	}
 }
 
 void GSgetMemoryStats(SmallStringBase& info)
 {
 	if (!g_texture_cache)
+	{
+		info.assign("");
 		return;
+	}
 
-	const u64 targets = g_texture_cache->GetTargetMemoryUsage();
-	const u64 sources = g_texture_cache->GetSourceMemoryUsage();
-	const u64 hashcache = g_texture_cache->GetHashCacheMemoryUsage();
-	const u64 pool = g_gs_device->GetPoolMemoryUsage();
-	const u64 total = targets + sources + hashcache + pool;
+	// Get megabyte values. Round negligible values to 0.1 MB to avoid swamping.
+	const auto get_MB = [](const double bytes) {
+		return (bytes <= 0.0 ? bytes : std::max(0.1, bytes / static_cast<double>(_1mb)));
+	};
+
+	const auto format_precision = [](const double megabytes) -> std::string {
+		return (megabytes < 10.0 ?
+			fmt::format("{:.1f}", megabytes) :
+			fmt::format("{:.0f}", std::round(megabytes)));
+	};
+
+	const double targets_MB = get_MB(static_cast<double>(g_texture_cache->GetTargetMemoryUsage()));
+	const double sources_MB = get_MB(static_cast<double>(g_texture_cache->GetSourceMemoryUsage()));
+	const double pool_MB = get_MB(static_cast<double>(g_gs_device->GetPoolMemoryUsage()));
 
 	if (GSConfig.TexturePreloading == TexturePreloadingLevel::Full)
 	{
-		fmt::format_to(std::back_inserter(info), "VRAM: {} MB | T: {} MB | S: {} MB | H: {} MB | P: {} MB",
-			(int)std::ceil(total / 1048576.0f),
-			(int)std::ceil(targets / 1048576.0f),
-			(int)std::ceil(sources / 1048576.0f),
-			(int)std::ceil(hashcache / 1048576.0f),
-			(int)std::ceil(pool / 1048576.0f));
+		const double hashcache_MB = get_MB(static_cast<double>(g_texture_cache->GetHashCacheMemoryUsage()));
+		const double total_MB = targets_MB + sources_MB + hashcache_MB + pool_MB;
+		info.format("VRAM: {} MB | TGT: {} MB | SRC: {} MB | HC: {} MB | PL: {} MB",
+			format_precision(total_MB),
+			format_precision(targets_MB),
+			format_precision(sources_MB),
+			format_precision(hashcache_MB),
+			format_precision(pool_MB));
 	}
 	else
 	{
-		fmt::format_to(std::back_inserter(info), "VRAM: {} MB | T: {} MB | S: {} MB | P: {} MB",
-			(int)std::ceil(total / 1048576.0f),
-			(int)std::ceil(targets / 1048576.0f),
-			(int)std::ceil(sources / 1048576.0f),
-			(int)std::ceil(pool / 1048576.0f));
+		const double total_MB = targets_MB + sources_MB + pool_MB;
+		info.format("VRAM: {} MB | TGT: {} MB | SRC: {} MB | PL: {} MB",
+			format_precision(total_MB),
+			format_precision(targets_MB),
+			format_precision(sources_MB),
+			format_precision(pool_MB));
 	}
 }
 
@@ -842,6 +803,9 @@ void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config)
 	// Handle OSD scale changes by pushing a window resize through.
 	if (new_config.OsdScale != old_config.OsdScale)
 		ImGuiManager::RequestScaleUpdate();
+
+	if (new_config.OsdFontPath != old_config.OsdFontPath)
+		ImGuiManager::ReloadFonts();
 
 	// Options which need a full teardown/recreate.
 	if (!GSConfig.RestartOptionsAreEqual(old_config))
@@ -1021,9 +985,6 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#ifdef __ANDROID__
-#include <android/sharedmem.h>
-#endif
 
 static int s_shm_fd = -1;
 
@@ -1032,26 +993,6 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 	pxAssert(s_shm_fd == -1);
 
 	const char* file_name = "/GS.mem";
-#if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	// iOS sandbox blocks shm_open and /tmp — use app sandbox temp dir
-	const char* tmpdir = getenv("TMPDIR");
-	if (!tmpdir) tmpdir = "/var/mobile/Containers/Data/Application";
-	char tmppath[1024];
-	snprintf(tmppath, sizeof(tmppath), "%s/GS.mem.XXXXXX", tmpdir);
-	s_shm_fd = mkstemp(tmppath);
-	if (s_shm_fd != -1)
-	{
-		unlink(tmppath); // unlink immediately, fd keeps file alive
-	}
-	else
-	{
-		fprintf(stderr, "Failed to create GS temp file: %s\n", strerror(errno));
-		return nullptr;
-	}
-
-	if (ftruncate(s_shm_fd, repeat * size) < 0)
-		fprintf(stderr, "Failed to reserve GS memory: %s\n", strerror(errno));
-#elif !defined(__ANDROID__)
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (s_shm_fd != -1)
 	{
@@ -1065,27 +1006,15 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 
 	if (ftruncate(s_shm_fd, repeat * size) < 0)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
-#else
-    s_shm_fd = ASharedMemory_create(file_name, repeat * size);
-    if (s_shm_fd < 0)
-    {
-        fprintf(stderr, "Failed to open shared memory\n");
-        return nullptr;
-    }
-#endif
+
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
-	Console.WriteLn("@@GS_MMAP@@ fifo=%p size=0x%zx repeat=%zu total=0x%zx shm_fd=%d",
-		fifo, size, repeat, size * repeat, s_shm_fd);
 
 	for (size_t i = 1; i < repeat; i++)
 	{
 		void* base = (u8*)fifo + size * i;
 		u8* next = (u8*)mmap(base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, s_shm_fd, 0);
 		if (next != base)
-			Console.Error("@@GS_MMAP_FAIL@@ i=%zu base=%p next=%p errno=%d (%s)",
-				i, base, (void*)next, errno, strerror(errno));
-		else
-			Console.WriteLn("@@GS_MMAP_OK@@ i=%zu base=%p", i, base);
+			fprintf(stderr, "Fail to mmap contiguous segment\n");
 	}
 
 	return fifo;
@@ -1180,24 +1109,63 @@ std::pair<u8, u8> GSGetRGBA8AlphaMinMax(const void* data, u32 width, u32 height,
 		static_cast<u8>(maxc.maxv_u32() >> 24));
 }
 
-static void HotkeyAdjustUpscaleMultiplier(s32 delta)
+static void HotkeyAdjustUpscaleMultiplier(const float delta)
 {
-	const u32 new_multiplier = static_cast<u32>(std::clamp(static_cast<s32>(EmuConfig.GS.UpscaleMultiplier) + delta, 1, 8));
-	Host::AddKeyedOSDMessage("UpscaleMultiplierChanged",
-		fmt::format(TRANSLATE_FS("GS", "Upscale multiplier set to {}x."), new_multiplier), Host::OSD_QUICK_DURATION);
-	EmuConfig.GS.UpscaleMultiplier = new_multiplier;
+	if (!g_gs_renderer)
+		return;
 
-	// this is pretty slow. we only really need to flush the TC and recompile shaders.
+	if (GSCurrentRenderer == GSRendererType::SW || GSCurrentRenderer == GSRendererType::Null)
+	{
+		Host::AddIconOSDMessage("UpscaleMultiplierChanged", ICON_FA_ARROW_UP_RIGHT_FROM_SQUARE,
+								TRANSLATE_STR("GS", "Upscaling can only be changed while using the Hardware Renderer."), Host::OSD_QUICK_DURATION);
+		return;
+	}
+
+	// Clamp logic mirrors GraphicsSettingsWidget::populateUpscaleMultipliers().
+	float candidate_multiplier = EmuConfig.GS.UpscaleMultiplier + delta;
+	const float max_multiplier = static_cast<float>(std::clamp(GSGetMaxUpscaleMultiplier(g_gs_device->GetMaxTextureSize()),
+													10u, EmuConfig.GS.ExtendedUpscalingMultipliers ? 25u : 12u));
+
+	std::string osd_message;
+	if (candidate_multiplier <= 1)
+	{
+		candidate_multiplier = 1;
+		osd_message = TRANSLATE_STR("GS", "Upscale multiplier set to native resolution.");
+	}
+	else if (candidate_multiplier >= max_multiplier)
+	{
+		candidate_multiplier = max_multiplier;
+		osd_message = fmt::format(TRANSLATE_FS("GS", "Upscale multiplier maximized to {}x."), max_multiplier);
+	}
+	else
+	{
+		osd_message = fmt::format(TRANSLATE_FS("GS", "Upscale multiplier {} to {}x."),
+							  delta > 0 ? TRANSLATE_STR("GS", "increased") : TRANSLATE_STR("GS", "decreased"), candidate_multiplier);
+	}
+
+	// Need to calculate our own target resolution. Reading after applying settings is a race condition.
+	const GSVector2i base_resolution = g_gs_renderer ? g_gs_renderer->PCRTCDisplays.GetResolution() : GSVector2i(0, 0);
+	const int target_iwidth = static_cast<int>(std::round(static_cast<float>(base_resolution.x) * candidate_multiplier));
+	const int target_iheight = static_cast<int>(std::round(static_cast<float>(base_resolution.y) * candidate_multiplier));
+
+	//: Leftmost value is an OSD message about the upscale multiplier. Values in parentheses are a resolution width (left) and height (right).
+	Host::AddIconOSDMessage("UpscaleMultiplierChanged", ICON_FA_ARROW_UP_RIGHT_FROM_SQUARE,
+							fmt::format(TRANSLATE_FS("GS", "{} ({} x {})"), osd_message, target_iwidth, target_iheight), Host::OSD_QUICK_DURATION);
+
+	// This is pretty slow. We only really need to flush the TC and recompile shaders.
 	// TODO(Stenzek): Make it faster at some point in the future.
+	EmuConfig.GS.UpscaleMultiplier = candidate_multiplier;
 	MTGS::ApplySettings();
 }
 
 static void HotkeyToggleOSD()
 {
 	GSConfig.OsdShowSettings ^= EmuConfig.GS.OsdShowSettings;
+	GSConfig.OsdshowPatches ^= EmuConfig.GS.OsdshowPatches;
 	GSConfig.OsdShowInputs ^= EmuConfig.GS.OsdShowInputs;
 	GSConfig.OsdShowInputRec ^= EmuConfig.GS.OsdShowInputRec;
 	GSConfig.OsdShowVideoCapture ^= EmuConfig.GS.OsdShowVideoCapture;
+	GSConfig.OsdShowTextureReplacements ^= EmuConfig.GS.OsdShowTextureReplacements;
 
 	GSConfig.OsdMessagesPos =
 		GSConfig.OsdMessagesPos == OsdOverlayPos::None ? EmuConfig.GS.OsdMessagesPos : OsdOverlayPos::None;
@@ -1259,13 +1227,13 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 		TRANSLATE_NOOP("Hotkeys", "Increase Upscale Multiplier"),
 		[](s32 pressed) {
 			if (!pressed)
-				HotkeyAdjustUpscaleMultiplier(1);
+				HotkeyAdjustUpscaleMultiplier(1.0f);
 		}},
 	{"DecreaseUpscaleMultiplier", TRANSLATE_NOOP("Hotkeys", "Graphics"),
 		TRANSLATE_NOOP("Hotkeys", "Decrease Upscale Multiplier"),
 		[](s32 pressed) {
 			if (!pressed)
-				HotkeyAdjustUpscaleMultiplier(-1);
+				HotkeyAdjustUpscaleMultiplier(-1.0f);
 		}},
 	{"ToggleOSD", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Toggle On-Screen Display"),
 		[](s32 pressed) {
@@ -1322,10 +1290,59 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 				fmt::format(
 					TRANSLATE_FS("Hotkeys", "Deinterlace mode set to '{}'."), option_names[static_cast<s32>(new_mode)]),
 				Host::OSD_QUICK_DURATION);
-			EmuConfig.GS.InterlaceMode = new_mode;
 
+			EmuConfig.GS.InterlaceMode = new_mode;
 			MTGS::RunOnGSThread([new_mode]() { GSConfig.InterlaceMode = new_mode; });
 		}},
+	{"CycleTVShader", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Cycle TV Shader"),
+		[](s32 pressed) {
+			if (pressed)
+				return;
+
+			static constexpr std::array<const char*, 8> option_names = {{
+				TRANSLATE_NOOP("Hotkeys", "None (Default)"),
+				TRANSLATE_NOOP("Hotkeys", "Scanline Filter"),
+				TRANSLATE_NOOP("Hotkeys", "Diagonal Filter"),
+				TRANSLATE_NOOP("Hotkeys", "Triangular Filter"),
+				TRANSLATE_NOOP("Hotkeys", "Wave Filter"),
+				TRANSLATE_NOOP("Hotkeys", "Lottes CRT"),
+				TRANSLATE_NOOP("Hotkeys", "4xRGSS"),
+				TRANSLATE_NOOP("Hotkeys", "NxAGSS"),
+			}};
+
+			const u32 new_shader = (EmuConfig.GS.TVShader + 1) % 8;
+			Host::AddKeyedOSDMessage("CycleTVShader",
+				fmt::format(
+					TRANSLATE_FS("Hotkeys", "TV shader set to '{}'."), option_names[new_shader]),
+				Host::OSD_QUICK_DURATION);
+
+			EmuConfig.GS.TVShader = new_shader;
+			MTGS::RunOnGSThread([new_shader]() { GSConfig.TVShader = new_shader; });
+		}},
+		{"CycleBlendingAccuracy", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Cycle Blending Accuracy"),
+			[](s32 pressed) {
+				if (pressed)
+					return;
+
+				static constexpr std::array<const char*, static_cast<u8>(AccBlendLevel::MaxCount)> s_blending_option_names = {{
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Minimum"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Basic"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Medium"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "High"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Full"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Maximum"),
+				}};
+
+				const AccBlendLevel new_blend_mode = static_cast<AccBlendLevel>(
+					(static_cast<u8>(EmuConfig.GS.AccurateBlendingUnit) + 1) % static_cast<u8>(AccBlendLevel::MaxCount));
+				Host::AddKeyedOSDMessage("CycleBlendingAccuracy",
+					fmt::format(
+						TRANSLATE_FS("Hotkeys", "Blending Accuracy set to {}."), s_blending_option_names[static_cast<u8>(new_blend_mode)]),
+					Host::OSD_QUICK_DURATION);
+
+				EmuConfig.GS.AccurateBlendingUnit = new_blend_mode;
+				MTGS::RunOnGSThread([new_blend_mode]() { GSConfig.AccurateBlendingUnit = new_blend_mode; });
+			}},
 	{"ToggleTextureDumping", TRANSLATE_NOOP("Hotkeys", "Graphics"), TRANSLATE_NOOP("Hotkeys", "Toggle Texture Dumping"),
 		[](s32 pressed) {
 			if (!pressed)

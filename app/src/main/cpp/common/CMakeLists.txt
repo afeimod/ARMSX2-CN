@@ -7,7 +7,6 @@ endif(NOT TOP_CMAKE_WAS_SOURCED)
 
 add_library(common)
 
-# x86emitter sources
 target_sources(common PRIVATE
 	AlignedMalloc.cpp
 	Assertions.cpp
@@ -20,6 +19,7 @@ target_sources(common PRIVATE
 	HostSys.cpp
 	Image.cpp
 	HTTPDownloader.cpp
+	MemoryInterface.cpp
 	MemorySettingsInterface.cpp
 	MD5Digest.cpp
 	PrecompiledHeader.cpp
@@ -34,9 +34,9 @@ target_sources(common PRIVATE
 	Timer.cpp
 	WAVWriter.cpp
 	WindowInfo.cpp
+	YAML.cpp
 )
 
-# x86emitter headers
 target_sources(common PRIVATE
 	AlignedMalloc.h
 	Assertions.h
@@ -59,6 +59,7 @@ target_sources(common PRIVATE
 	LRUCache.h
 	HeapArray.h
 	HTTPDownloader.h
+	MemoryInterface.h
 	MemorySettingsInterface.h
 	MD5Digest.h
 	MRCHelpers.h
@@ -81,11 +82,11 @@ target_sources(common PRIVATE
 	WAVWriter.h
 	WindowInfo.h
 	WrappedMemCopy.h
+	YAML.h
 )
 
-if(_M_X86)
+if(ARCH_X86)
 	target_sources(common PRIVATE
-		emitter/avx.cpp
 		emitter/bmi.cpp
 		emitter/fpu.cpp
 		emitter/groups.cpp
@@ -122,12 +123,6 @@ if(_M_X86)
 		emitter/x86emitter.h
 		emitter/x86types.h
 	)
-else()
-	target_sources(common PRIVATE
-		emitter/x86emitter.cpp
-		emitter/x86emitter.h
-		emitter/x86types.h
-	)
 endif()
 
 if(WIN32)
@@ -149,52 +144,37 @@ if(WIN32)
 	)
 elseif(APPLE)
 	target_sources(common PRIVATE
+		CocoaTools.mm
+		CocoaTools.h
 		Darwin/DarwinThreads.cpp
 		Darwin/DarwinMisc.cpp
 		Darwin/DarwinMisc.h
+		Linux/LnxHostSys.cpp
 	)
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
-		target_sources(common PRIVATE
-			CocoaTools.mm
-			CocoaTools.h
-		)
-		target_link_libraries(common PRIVATE
-			"-framework Foundation"
-			"-framework IOKit"
-			"-framework AppKit"
-		)
-	else()
-		target_link_libraries(common PRIVATE
-			"-framework Foundation"
-			"-framework UIKit"
-		)
-	endif()
-
 	target_compile_options(common PRIVATE -fobjc-arc)
 	target_link_options(common PRIVATE -fobjc-link-runtime)
+	target_link_libraries(common PRIVATE
+		"-framework Foundation"
+		"-framework IOKit"
+	)
 else()
 	target_sources(common PRIVATE
 		Linux/LnxHostSys.cpp
 		Linux/LnxThreads.cpp
 		Linux/LnxMisc.cpp
 	)
-	if(X11_API)
-		target_include_directories(common PRIVATE
-			${DBUS_INCLUDE_DIRS}
-		)
-		target_link_libraries(common PRIVATE
-			${DBUS_LINK_LIBRARIES}
-			X11::X11
-			X11::Xrandr
-			X11::Xi
-		)
-	endif()
+	target_include_directories(common PRIVATE
+		${DBUS_INCLUDE_DIRS}
+	)
+	target_link_libraries(common PRIVATE
+		${DBUS_LINK_LIBRARIES}
+		X11::X11
+		X11::Xrandr
+		X11::Xi
+	)
 	if(USE_BACKTRACE)
 		target_compile_definitions(common PRIVATE "HAS_LIBBACKTRACE=1")
 		target_link_libraries(common PRIVATE libbacktrace::libbacktrace)
-	endif()
-	if(${CMAKE_SYSTEM_NAME} STREQUAL "FreeBSD")
-		target_link_libraries(common PRIVATE cpuinfo)
 	endif()
 endif()
 
@@ -211,72 +191,35 @@ endif()
 
 if(NOT WIN32)
 	# libcurl-based HTTPDownloader
-	if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS" AND NOT iPSX2_MACOS_BUILD)
-		target_sources(common PRIVATE
-			HTTPDownloaderCurl.cpp
-			HTTPDownloaderCurl.h
-		)
-		if(ANDROID)
-			target_link_libraries(common PRIVATE curl ssl crypto nghttp2 pcap)
-		else()
-			target_link_libraries(common PRIVATE
-				CURL::libcurl
-			)
-		endif()
-	endif()
+	target_sources(common PRIVATE
+		HTTPDownloaderCurl.cpp
+		HTTPDownloaderCurl.h
+	)
+	target_link_libraries(common PRIVATE
+		CURL::libcurl
+	)
 endif()
 
-if(ANDROID)
-	target_link_libraries(common PRIVATE
-		${LIBC_LIBRARIES}
-		jpeg
-		png16
-		webp
-	)
-else()
-	target_link_libraries(common PRIVATE
-		${LIBC_LIBRARIES}
-	)
-	if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-		target_link_libraries(common PRIVATE
-			webp
-		)
-	elseif(NOT iPSX2_MACOS_BUILD)
-		target_link_libraries(common PRIVATE
-			WebP::libwebp
-			JPEG::JPEG
-			PNG::PNG
-		)
-	endif()
-endif()
+target_link_libraries(common PRIVATE
+	${LIBC_LIBRARIES}
+	JPEG::JPEG
+	PNG::PNG
+	WebP::libwebp
+	cpuinfo
+)
 
-if(ANDROID)
-	find_library(log-lib log)
-	target_link_libraries(common PUBLIC
-		fmt::fmt
-		fast_float
-		${log-lib}
-	)
-else()
-	target_link_libraries(common PUBLIC
-		fmt::fmt
-		fast_float
-	)
-endif()
+target_link_libraries(common PUBLIC
+	fmt::fmt
+	fast_float
+	ryml::ryml
+)
 
 fixup_file_properties(common)
-target_compile_features(common PUBLIC cxx_std_20)
-target_include_directories(common PUBLIC ../3rdparty/include ../3rdparty/vixl/include ../)
-
-if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-    target_compile_definitions(common PRIVATE
-        "PCSX2_ARM64_DYNAREC=1"
-        "_M_ARM64=1"
-    )
-endif()
+target_compile_features(common PUBLIC cxx_std_17)
+target_include_directories(common PUBLIC ../3rdparty/include ../)
 target_compile_definitions(common PUBLIC "${PCSX2_DEFS}")
 target_compile_options(common PRIVATE "${PCSX2_WARNINGS}")
 
-#if(COMMAND target_precompile_headers)
-#	target_precompile_headers(common PRIVATE PrecompiledHeader.h)
-#endif()
+if(COMMAND target_precompile_headers)
+	target_precompile_headers(common PRIVATE PrecompiledHeader.h)
+endif()

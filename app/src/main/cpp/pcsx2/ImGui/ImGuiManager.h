@@ -1,10 +1,11 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
 
 #include "common/Pcsx2Defs.h"
 
+#include <span>
 #include <string>
 #include <vector>
 
@@ -16,8 +17,16 @@ enum class InputLayout : u8;
 
 namespace ImGuiManager
 {
-	/// Sets the path to the font to use. Empty string means to use the default.
-	void SetFontPathAndRange(std::string path, std::vector<u16> range);
+	struct FontInfo
+	{
+		std::span<const u8> data;
+		std::span<const u32> exclude_ranges;
+		const char* face_name;
+		bool is_emoji_font;
+	};
+
+	/// Sets a list of fonts to use.
+	void SetFonts(std::vector<FontInfo> info);
 
 	/// Initializes ImGui, creates fonts, etc.
 	bool Initialize();
@@ -38,6 +47,9 @@ namespace ImGuiManager
 	/// Updates scaling of the on-screen elements.
 	void RequestScaleUpdate();
 
+	/// Rebuilds the ImGui font atlas using current settings.
+	void ReloadFonts();
+
 	/// Call at the beginning of the frame to set up ImGui state.
 	void NewFrame();
 
@@ -50,25 +62,23 @@ namespace ImGuiManager
 	/// Returns the scale of all on-screen elements.
 	float GetGlobalScale();
 
-	/// Returns true if fullscreen fonts are present.
-	bool HasFullscreenFonts();
-
-	/// Allocates/adds fullscreen fonts if they're not loaded.
-	bool AddFullscreenFontsIfMissing();
-
 	/// Returns the standard font for external drawing.
 	ImFont* GetStandardFont();
 
 	/// Returns the fixed-width font for external drawing.
 	ImFont* GetFixedFont();
 
-	/// Returns the medium font for external drawing, scaled by ImGuiFullscreen.
-	/// This font is allocated on demand.
-	ImFont* GetMediumFont();
+	/// Returns the On-screen Display font for external drawing.
+	ImFont* GetOSDFont();
 
-	/// Returns the large font for external drawing, scaled by ImGuiFullscreen.
-	/// This font is allocated on demand.
-	ImFont* GetLargeFont();
+	// Returns the standard font size for external drawing.
+	float GetFontSizeStandard();
+
+	// Returns the medium font size for external drawing, matching the size used by ImGuiFullscreen.
+	float GetFontSizeMedium();
+
+	// Returns the large font size for external drawing, matching the size used by ImGuiFullscreen.
+	float GetFontSizeLarge();
 
 	/// Returns true if imgui wants to intercept text input.
 	bool WantsTextInput();

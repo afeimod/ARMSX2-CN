@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 /*
@@ -101,7 +101,7 @@ namespace x86Emitter
 		const xRegisterInt& to_ = to.GetNonWide();
 		if (!preserve_flags && (imm == 0))
 		{
-			_g1_EmitOp(G1Type_XOR, to_, to_);
+			xXOR(to_, to_);
 		}
 		else if (imm == (sptr)(u32)imm || !to.IsWide())
 		{

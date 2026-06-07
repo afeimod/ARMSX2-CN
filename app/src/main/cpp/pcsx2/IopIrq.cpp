@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "DEV9/DEV9.h"
@@ -7,8 +7,6 @@
 #include "IopDma.h"
 #include "Common.h"
 #include "R3000A.h"
-#include "SifRingBuffer.h"
-#include "R5900.h" // [P34] cpuRegs for ring buffer
 
 using namespace R3000A;
 
@@ -49,9 +47,6 @@ void spu2Irq()
 
 void iopIntcIrq(uint irqType)
 {
-	psxHu32(0x1070) |= 1 << irqType;
-	// [P34] ring buffer: ISTAT set
-	SifRing::Record(SifRing::ISTAT_SET, cpuRegs.cycle, psxRegs.cycle,
-		irqType, psxHu32(0x1070));
+	psxHu32(HW_ISTAT) |= 1 << irqType;
 	iopTestIntc();
 }

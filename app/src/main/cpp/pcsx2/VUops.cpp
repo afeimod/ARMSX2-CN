@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
@@ -187,10 +187,8 @@ void _vuFlushAll(VURegs* VU)
 
 __fi void _vuTestPipes(VURegs* VU)
 {
-	// Restored to PC PCSX2 do-while multi-pass pattern.
-	// Single-pass optimization (P22) removed: flush functions may expose new
-	// entries on repeated passes in complex VU1 programs (3D scenes).
 	bool flushed;
+
 	do
 	{
 		flushed = false;
@@ -223,7 +221,7 @@ static void _vuFMACTestStall(VURegs* VU, u32 reg, u32 xyzw)
 		if ((VU->fmac[currentpipe].regupper == reg && VU->fmac[currentpipe].xyzwupper & xyzw)
 			|| (VU->fmac[currentpipe].reglower == reg && VU->fmac[currentpipe].xyzwlower & xyzw))
 		{
-			u32 newCycle = VU->fmac[currentpipe].Cycle + VU->fmac[currentpipe].sCycle;
+			u64 newCycle = VU->fmac[currentpipe].Cycle + VU->fmac[currentpipe].sCycle;
 
 			VUM_LOG("FMAC[%d] stall %d", currentpipe, newCycle - VU->cycle);
 			if (newCycle > VU->cycle)
@@ -234,10 +232,6 @@ static void _vuFMACTestStall(VURegs* VU, u32 reg, u32 xyzw)
 
 static __fi void _vuTestFMACStalls(VURegs* VU, _VURegsNum* VUregsn)
 {
-	// [P22 O4] Early exit: no FMAC entries pending → no stalls possible
-	if (VU->fmaccount == 0)
-		return;
-
 	if (VUregsn->VFread0)
 	{
 		_vuFMACTestStall(VU, VUregsn->VFread0, VUregsn->VFr0xyzw);
@@ -254,7 +248,7 @@ static __fi void _vuTestFDIVStalls(VURegs* VU, _VURegsNum* VUregsn)
 
 	if (VU->fdiv.enable != 0)
 	{
-		u32 newCycle = VU->fdiv.Cycle + VU->fdiv.sCycle;
+		u64 newCycle = VU->fdiv.Cycle + VU->fdiv.sCycle;
 		VUM_LOG("waiting FDIV pipe %d", newCycle - VU->cycle);
 		if (newCycle > VU->cycle)
 			VU->cycle = newCycle;
@@ -274,7 +268,7 @@ static __fi void _vuTestEFUStalls(VURegs* VU, _VURegsNum* VUregsn)
 	// than WAITP, we're going to overwrite the value in the pipeline, which will break everything.
 	// So the TL;DR of this is that we should be safe to release 1 cycle early and write back P
 	VU->efu.Cycle -= 1;
-	u32 newCycle = VU->efu.sCycle + VU->efu.Cycle;
+	u64 newCycle = VU->efu.sCycle + VU->efu.Cycle;
 
 	VUM_LOG("waiting EFU pipe %d", newCycle - VU->cycle);
 	if (newCycle > VU->cycle)
@@ -283,10 +277,6 @@ static __fi void _vuTestEFUStalls(VURegs* VU, _VURegsNum* VUregsn)
 
 static __fi void _vuTestALUStalls(VURegs* VU, _VURegsNum* VUregsn)
 {
-	// [P22 O4] Early exit: no IALU entries pending → no stalls possible
-	if (VU->ialucount == 0)
-		return;
-
 	u32 i = 0;
 
 	for (int currentpipe = VU->ialureadpos; i < VU->ialucount; currentpipe = (currentpipe + 1) & 3, i++)
@@ -296,7 +286,7 @@ static __fi void _vuTestALUStalls(VURegs* VU, _VURegsNum* VUregsn)
 
 		if (VU->ialu[currentpipe].reg & VUregsn->VIread) // Read and written VI regs share the same register
 		{
-			u32 newCycle = VU->ialu[currentpipe].Cycle + VU->ialu[currentpipe].sCycle;
+			u64 newCycle = VU->ialu[currentpipe].Cycle + VU->ialu[currentpipe].sCycle;
 
 			VUM_LOG("ALU[%d] stall %d", currentpipe, newCycle - VU->cycle);
 			if (newCycle > VU->cycle)
@@ -1144,12 +1134,12 @@ static __fi void _vuMR32(VURegs* VU)
 
 __fi u32* GET_VU_MEM(VURegs* VU, u32 addr) // non-static, also used by sVU for now.
 {
-	if (VU == &g_cpuRegistersPack.vuRegs[1])
-		return (u32*)(g_cpuRegistersPack.vuRegs[1].Mem + (addr & 0x3fff));
+	if (VU == &vuRegs[1])
+		return (u32*)(vuRegs[1].Mem + (addr & 0x3fff));
 	else if (addr & 0x4000)
-		return (u32*)((u8*)g_cpuRegistersPack.vuRegs[1].VF + (addr & 0x3ff)); // get VF and VI regs (they're mapped to 0x4xx0 in VU0 mem!)
+		return (u32*)((u8*)vuRegs[1].VF + (addr & 0x3ff)); // get VF and VI regs (they're mapped to 0x4xx0 in VU0 mem!)
 	else
-		return (u32*)(g_cpuRegistersPack.vuRegs[0].Mem + (addr & 0xfff)); // for addr 0x0000 to 0x4000 just wrap around
+		return (u32*)(vuRegs[0].Mem + (addr & 0xfff)); // for addr 0x0000 to 0x4000 just wrap around
 }
 
 static __ri void _vuLQ(VURegs* VU)
@@ -1842,7 +1832,7 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 		if (VU1.xgkicksizeremaining == 0)
 		{
 			VUM_LOG("XGKICK reading new tag from %x", VU1.xgkickaddr);
-			u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, g_cpuRegistersPack.vuRegs[1].Mem, VU1.xgkickaddr, ~0u, flush);
+			u32 size = gifUnit.GetGSPacketSize(GIF_PATH_1, vuRegs[1].Mem, VU1.xgkickaddr, ~0u, flush);
 			VU1.xgkicksizeremaining = size & 0xFFFF;
 			VU1.xgkickendpacket = size >> 31;
 			VU1.xgkickdiff = 0x4000 - VU1.xgkickaddr;
@@ -1870,7 +1860,19 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 
 		VUM_LOG("XGKICK Transferring %x bytes from %x size %x", transfersize * 0x10, VU1.xgkickaddr, VU1.xgkicksizeremaining);
 
-		gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &g_cpuRegistersPack.vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
+		// Would be "nicer" to do the copy until it's all up, however this really screws up PATH3 masking stuff
+		// So lets just do it the other way :)
+		/*if (THREAD_VU1)
+		{
+			if ((transfersize * 0x10) < VU1.xgkicksizeremaining)
+				gifUnit.gifPath[GIF_PATH_1].CopyGSPacketData(&VU1.Mem[VU1.xgkickaddr], transfersize * 0x10, true);
+			else
+				gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
+		}
+		else*/
+		//{
+			gifUnit.TransferGSPacketData(GIF_TRANS_XGKICK, &vuRegs[1].Mem[VU1.xgkickaddr], transfersize * 0x10, true);
+		//}
 
 		if ((VU0.VI[REG_VPU_STAT].UL & 0x100) && flush)
 			VU1.cycle += transfersize * 2;
@@ -1892,7 +1894,7 @@ void _vuXGKICKTransfer(s32 cycles, bool flush)
 			if (vif1Regs.stat.VGW)
 			{
 				vif1Regs.stat.VGW = false;
-				CPU_INT(DMAC_VIF1, 8, EE_VIF1_SRC_XGKICK);
+				CPU_INT(DMAC_VIF1, 8);
 			}
 		}
 	}
@@ -4044,3 +4046,4 @@ void VFCOR()   { VU0.code = cpuRegs.code; _vuFCOR(&VU0); }
 void VFCSET()  { VU0.code = cpuRegs.code; _vuFCSET(&VU0); SYNCCLIPFLAG(); }
 void VFCGET()  { VU0.code = cpuRegs.code; _vuFCGET(&VU0); }
 void VXITOP()  { VU0.code = cpuRegs.code; _vuXITOP(&VU0); }
+

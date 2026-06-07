@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2002-2025 PCSX2 Dev Team
+// SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "IopHw_Internal.h"
@@ -9,16 +9,9 @@
 #include "FW.h"
 #include "SPU2/spu2.h"
 #include "DEV9/DEV9.h"
-#include <cstdio>
 #include "USB/USB.h"
 #include "IopCounters.h"
 #include "IopDma.h"
-#include "R5900.h" // For cpuRegs/verification
-#include <cstdio> // For fprintf, stderr
-
-// [DIAGNOSIS] Test Hook for 1f803204
-// Controlled by iR5900.cpp recEventTest
-int g_iop3204_test_val = -1;
 
 #include "ps2/pgif.h"
 #include "Mdec.h"
@@ -32,9 +25,6 @@ int g_iop3204_test_val = -1;
 namespace IopMemory
 {
 using namespace Internal;
-
-// Template-compatible version of the psxHu macro.  Used for reading.
-#define psxHu(mem)	(*(u32*)&iopHw[(mem) & 0xffff])
 
 //////////////////////////////////////////////////////////////////////////////////////////
 //
@@ -104,91 +94,28 @@ mem8_t iopHwRead8_Page1( u32 addr )
 
 //////////////////////////////////////////////////////////////////////////////////////////
 //
-mem8_t iopHwRead8_Page3( u32 addr )
+mem8_t iopHwRead8_Page3(u32 addr)
 {
-    // [TOTAL WAR] Forward Progress Verification
-    static u32 debug_last_iop_pc = 0;
-    static u32 debug_stall_pc = 0xFFFFFFFF;
-    static u32 debug_stall_count = 0;
-    static int debug_stall_logged = 0;
-
-    // 1. bfc02454 Hit Counter & Exit Logic
-    if (cpuRegs.pc == 0xbfc02454) {
-        static int bfc_hits = 0;
-        if (bfc_hits < 10 || (bfc_hits % 100) == 0) {
-             s64 delta = (s64)((s64)cpuRegs.nextEventCycle - (s64)cpuRegs.cycle);
-             fprintf(stderr, "@@BFC02454@@ hit=%d pc=%08x status=%08x cause=%08x epc=%08x cycle=%u next=%u d=%lld\n",
-                 bfc_hits, cpuRegs.pc, cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC, 
-                 cpuRegs.cycle, cpuRegs.nextEventCycle, (long long)delta);
-        }
-        bfc_hits++;
-    } else {
-        // Exit Detection
-        if (debug_last_iop_pc == 0xbfc02454) {
-             static int exit_log_count = 0;
-             if (exit_log_count < 5) {
-                 fprintf(stderr, "@@BFC02454_EXIT@@ from=%08x to=%08x v0=%08x v1=%08x status=%08x cause=%08x epc=%08x\n", 
-                     debug_last_iop_pc, cpuRegs.pc, cpuRegs.GPR.n.v0.UL[0], cpuRegs.GPR.n.v1.UL[0],
-                     cpuRegs.CP0.n.Status.val, cpuRegs.CP0.n.Cause, cpuRegs.CP0.n.EPC);
-                 exit_log_count++;
-             }
-        }
-    }
-    
-    // 2. Stall Detection (Any PC stuck > 10000 times)
-    if (cpuRegs.pc == debug_stall_pc) {
-        debug_stall_count++;
-        if (debug_stall_count == 10000) {
-            s64 delta = (s64)((s64)cpuRegs.nextEventCycle - (s64)cpuRegs.cycle);
-            fprintf(stderr, "@@STALL@@ pc=%08x count=%u status=%08x cycle=%u next=%u d=%lld\n",
-                cpuRegs.pc, debug_stall_count, cpuRegs.CP0.n.Status.val, cpuRegs.cycle, cpuRegs.nextEventCycle, (long long)delta);
-        }
-    } else {
-        debug_stall_pc = cpuRegs.pc;
-        debug_stall_count = 0;
-    }
-    
-    debug_last_iop_pc = cpuRegs.pc;
-
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssume((addr >> 12) == 0x1f803);
 
+	const u32 masked_addr = addr & 0x0fff;
+
 	mem8_t ret;
-	if (addr == 0x1f803100)	// PS/EE/IOP conf related
-		//ret = 0x10; // Dram 2M
-		ret = 0xFF; //all high bus is the corect default state for CEX PS2!
-    else {
-		ret = psxHu8( addr );
-    }
+	switch (masked_addr)
+	{
+		case 0x100: // TOOL config switches
+			ret = 0;
+			break;
+		case 0x204: // TOOL board id
+			ret = 0x7c;
+			break;
+		default:
+			ret = psxHu8(addr);
+			break;
+	}
 
-    // 3. IOP3204 Detail Log (Safe, minimal) & Test Hook
-    if ((addr & 0x1FFFFFFF) == 0x1F803204) {
-        static int iop_log_limit = 0;
-        static u32 last_val = 0xFFFFFFFF;
-        static int rd_log_count = 0;
-        u32 current_val = (u32)ret;
-
-        // [DIAGNOSIS] Force Value if Test Mode Active
-        if (g_iop3204_test_val >= 0) {
-            ret = (mem8_t)g_iop3204_test_val;
-            fprintf(stderr, "@@MMIO_TEST@@ mode=FORCED addr=%08x ret=%02x (val=%d)\n", addr, ret, g_iop3204_test_val);
-        } else {
-            // Normal Log
-            if (iop_log_limit < 20 || current_val != last_val) {
-                fprintf(stderr, "@@IOP3204@@ n=%d pc=%08x addr=%08x ret8=%02x handler=iopHwRead8_Page3\n", 
-                     iop_log_limit, cpuRegs.pc, addr, current_val);
-            }
-        }
-        if (rd_log_count < 4) {
-            fprintf(stderr, "@@IOP3204_RD@@ pc=%08x addr=%08x ret8=%02x src=iopHwRead8_Page3\n",
-                cpuRegs.pc, addr, ret);
-            rd_log_count++;
-        }
-        last_val = current_val;
-        iop_log_limit++;
-    }
-
-	IopHwTraceLog<mem8_t>( addr, ret, true );
+	IopHwTraceLog<mem8_t>(addr, ret, true);
 	return ret;
 }
 
@@ -201,7 +128,7 @@ mem8_t iopHwRead8_Page8( u32 addr )
 
 	mem8_t ret;
 
-	if (addr == HW_SIO2_FIFO)
+	if (addr == HW_SIO2_RX)
 	{
 		ret = g_Sio2.Read();
 	}
@@ -219,12 +146,7 @@ template< typename T >
 static __fi T _HwRead_16or32_Page1( u32 addr )
 {
 	// all addresses are assumed to be prefixed with 0x1f801xxx:
-	// [FIX] Changed pxAssume to Console.Error to prevent crash and log the bad address.
-	if ((addr >> 12) != 0x1f801) {
-		Console.Error("@@IOP_HW_BAD_ADDR@@ _HwRead_16or32_Page1 called with bad addr=0x%08x (expected 0x1f801xxx) pc=0x%08x",
-			addr, cpuRegs.pc);
-		return 0;
-	}
+	pxAssume( (addr >> 12) == 0x1f801 );
 
 	// all addresses should be aligned to the data operand size:
 	pxAssume(
@@ -254,7 +176,7 @@ static __fi T _HwRead_16or32_Page1( u32 addr )
 			break;
 
 			case 0x8:
-				ret = static_cast<T>(psxCounters[cntidx].target);
+				ret = psxCounters[cntidx].target;
 			break;
 
 			default:
@@ -287,12 +209,12 @@ static __fi T _HwRead_16or32_Page1( u32 addr )
 			break;
 
 			case 0x8:
-				ret = static_cast<T>(psxCounters[cntidx].target);
+				ret = psxCounters[cntidx].target;
 				PSXCNT_LOG("IOP Counter[%d] targetRead%d = %lx", cntidx, sizeof(T), ret);
 			break;
 
 			case 0xa:
-				ret = static_cast<T>(psxCounters[cntidx].target >> 16);
+				ret = psxCounters[cntidx].target >> 16;
 				PSXCNT_LOG("IOP Counter[%d] targetUpperRead%d = %lx", cntidx, sizeof(T), ret);
 			break;
 
@@ -377,13 +299,13 @@ static __fi T _HwRead_16or32_Page1( u32 addr )
 			//	case 0x05e: hard = serial_baud_read(); break;
 
 			mcase(HW_ICTRL):
-				ret = psxHu32(0x1078);
-				psxHu32(0x1078) = 0;
+				ret = psxHu32(HW_ICTRL);
+				psxHu32(HW_ICTRL) = 0;
 			break;
 
 			mcase(HW_ICTRL+2):
-				ret = psxHu16(0x107a);
-				psxHu32(0x1078) = 0;	// most likely should clear all 32 bits here.
+				ret = psxHu16(HW_ICTRL+2);
+				psxHu32(HW_ICTRL) = 0;	// most likely should clear all 32 bits here.
 			break;
 
 			// ------------------------------------------------------------------------
@@ -473,31 +395,6 @@ mem16_t iopHwRead16_Page8( u32 addr )
 //
 mem32_t iopHwRead32_Page1( u32 addr )
 {
-	// Log SIF register access (value-change only)
-	if (addr == 0x1f801020) {
-		static bool first_read = true;
-		static u32 last_value = 0;
-		u32 current_value = _HwRead_16or32_Page1<mem32_t>(addr);
-		
-		if (first_read || current_value != last_value) {
-			Console.WriteLn("IOP_HW_READ: addr=%08x val=%08x PC=%08x", addr, current_value, cpuRegs.pc);
-			first_read = false;
-			last_value = current_value;
-		}
-		return current_value;
-	}
-	
-	// [TEMP_DIAG] DMA9 CHCR read detection (smart logging)
-	if (addr == 0x1f801528) {
-		mem32_t val = _HwRead_16or32_Page1<mem32_t>(addr);
-		static int s_d9r = 0;
-		s_d9r++;
-		// Log first 10, then every 1000th
-		if (s_d9r <= 10 || (s_d9r % 1000 == 0))
-			Console.WriteLn("@@D9_CHCR_R@@ n=%d val=%08x ioppc=%08x cyc=%u",
-				s_d9r, val, psxRegs.pc, psxRegs.cycle);
-		return val;
-	}
 	return _HwRead_16or32_Page1<mem32_t>( addr );
 }
 
@@ -507,7 +404,6 @@ mem32_t iopHwRead32_Page3( u32 addr )
 {
 	// all addresses are assumed to be prefixed with 0x1f803xxx:
 	pxAssume( (addr >> 12) == 0x1f803 );
-
 	const mem32_t ret = psxHu32(addr);
 	IopHwTraceLog<mem32_t>( addr, ret, true );
 	return ret;
@@ -528,7 +424,7 @@ mem32_t iopHwRead32_Page8( u32 addr )
 		if( masked_addr < 0x240 )
 		{
 			const int parm = (masked_addr-0x200) / 4;
-			ret = g_Sio2.send3[parm];
+			ret = g_Sio2.CmdQueue[parm];
 			Sio2Log.WriteLn("%s(%08X) SIO2 SEND3 Read (%08X)", __FUNCTION__, addr, ret);
 		}
 		else if ( masked_addr < 0x260 )
@@ -536,18 +432,18 @@ mem32_t iopHwRead32_Page8( u32 addr )
 			// SIO2 Send commands alternate registers.  First reg maps to Send1, second
 			// to Send2, third to Send1, etc.  And the following clever code does this:
 			const int parm = (masked_addr-0x240) / 8;
-			ret = (masked_addr & 4) ? g_Sio2.send2[parm] : g_Sio2.send1[parm];
+			ret = (masked_addr & 4) ? g_Sio2.PortCtrl1[parm] : g_Sio2.PortCtrl0[parm];
 			Sio2Log.WriteLn("%s(%08X) SIO2 SEND1/2 Read (%08X)", __FUNCTION__, addr, ret);
 		}
 		else if ( masked_addr <= 0x280 )
 		{
 			switch( masked_addr )
 			{
-				case (HW_SIO2_DATAIN & 0x0fff):
+				case (HW_SIO2_TX & 0x0fff):
 					ret = psxHu32(addr);
 					Sio2Log.Warning("%s(%08X) Unexpected 32 bit read of HW_SIO2_DATAIN (%08X)", __FUNCTION__, addr, ret);
 					break;
-				case (HW_SIO2_FIFO & 0x0fff):
+				case (HW_SIO2_RX & 0x0fff):
 					ret = psxHu32(addr);
 					Sio2Log.Warning("%s(%08X) Unexpected 32 bit read of HW_SIO2_FIFO (%08X)", __FUNCTION__, addr, ret);
 					break;
@@ -555,24 +451,24 @@ mem32_t iopHwRead32_Page8( u32 addr )
 					ret = g_Sio2.ctrl;
 					Sio2Log.WriteLn("%s(%08X) SIO2 CTRL Read (%08X)", __FUNCTION__, addr, ret);
 					break;
-				case (HW_SIO2_RECV1 & 0xfff):
-					ret = g_Sio2.recv1;
+				case (HW_SIO2_CMD_STAT & 0xfff):
+					ret = g_Sio2.CmdStat;
 					Sio2Log.WriteLn("%s(%08X) SIO2 RECV1 Read (%08X)", __FUNCTION__, addr, ret);
 					break;
-				case (HW_SIO2_RECV2 & 0x0fff):
-					ret = g_Sio2.recv2;
+				case (HW_SIO2_PORT_STAT & 0x0fff):
+					ret = g_Sio2.PortStat;
 					Sio2Log.WriteLn("%s(%08X) SIO2 RECV2 Read (%08X)", __FUNCTION__, addr, ret);
 					break;
-				case (HW_SIO2_RECV3 & 0x0fff):
-					ret = g_Sio2.recv3;
+				case (HW_SIO2_FIFO_STAT & 0x0fff):
+					ret = g_Sio2.FifoStat;
 					Sio2Log.WriteLn("%s(%08X) SIO2 RECV3 Read (%08X)", __FUNCTION__, addr, ret);
 					break;
 				case (0x1f808278 & 0x0fff):
-					ret = g_Sio2.unknown1;
+					ret = g_Sio2.FifoTxPos;
 					Sio2Log.WriteLn("%s(%08X) SIO2 UNK1 Read (%08X)", __FUNCTION__, addr, ret);
 					break;
 				case (0x1f80827C & 0x0fff):
-					ret = g_Sio2.unknown2;
+					ret = g_Sio2.FifoRxPos;
 					Sio2Log.WriteLn("%s(%08X) SIO2 UNK2 Read (%08X)", __FUNCTION__, addr, ret);
 					break;
 				case (HW_SIO2_INTR & 0x0fff):
@@ -598,3 +494,4 @@ mem32_t iopHwRead32_Page8( u32 addr )
 }
 
 }
+
