@@ -207,8 +207,8 @@ Daha sonra Ayarlar → ARMSX2 dizinini aç seçeneğinden açabilirsiniz.</strin
     <string name="settings_intc_spin_detection">INTC Spin Tespiti</string>
     <string name="settings_mvu_flag_hack">mVU Flag Hilesi</string>
     <string name="settings_instant_vu1">Anlık VU1</string>
-    <string name="settings_enable_vu0">Enable VU0 Recompiler</string>
-    <string name="settings_enable_vu1">Enable VU1 Recompiler</string>
+    <string name="settings_enable_vu0">VU0 Yeniden Derleyiciyi Etkinleştir</string>
+    <string name="settings_enable_vu1">VU1 Yeniden Derleyiciyi Etkinleştir</string>
     <string name="settings_fast_cdvd">Hızlı CD/DVD</string>
     <string name="settings_performance_overlay">Performans Katmanı</string>
     <string name="settings_osd_scale_default">Ekran Üstünde Ölçeği: 100</string>
