@@ -1709,10 +1709,22 @@ void mvu1AnalyzeBlock(
 		mo.sFlag.lastWrite   = 0;
 		mo.sFlag.read        = 0;
 
-		// mFlag.doFlag set by the backward walk that mirrors x86 mVUsetFlags
-		// lines 113-137 — only the last ~3 sFlag.doFlag pairs get mFlag set.
-		// Defaults false here; flipped true in the post-pass below.
-		mo.mFlag.doFlag      = false;
+		// mFlag.doFlag mirrors sFlag.doFlag (every FMAC arith pair). Mac's
+		// mVUsetFlags has a `noFlagOpts` mode that keeps only the last ~3
+		// pairs' mFlag.doFlag set (cross-block carry — those are the only
+		// ones the next block's first 4 instructions can read), but that
+		// optimisation REQUIRES the forward `__Mac` analysis that detects
+		// intra-block FMAND/FMSAND/FMSEQ/FMSOR readers and lifts mFlag.doFlag
+		// back to true for the FMAC writes those readers consume. We don't
+		// have that forward analysis ported yet, so any block with a mid-
+		// block mac reader had its xMac[xM] ring never advanced — the
+		// reader-side commit then loaded the prologue-init entry value
+		// instead of the freshly computed mac. Result: GoW2 missing
+		// triangles + broken culling whenever the toggle was on.
+		// Setting mFlag.doFlag = (ukind == 1) here is mac's pre-noFlagOpts
+		// state — conservative-correct. Backward walk below idempotently
+		// re-sets true for the last ~3, no behaviour change.
+		mo.mFlag.doFlag      = (ukind == 1);
 		mo.mFlag.doNonSticky = false;
 		mo.mFlag.write       = 0;
 		mo.mFlag.lastWrite   = 0;
