@@ -4754,13 +4754,25 @@ static int64_t fmacInstanceOff(int inst, int field_off)
 	     + (int64_t)field_off;
 }
 
-// Reader-side commit: at the top of every pair, fan out the current
-// per-flag-type instance to VI[REG_MAC/STATUS/CLIP] so the lower-op
-// emit's VI cache load reads the right historical value. Three Ldr+Str
-// pairs (6 mem ops) per pair. Also bumps the pinned macflag/statusflag/
-// clipflag regs to the routed value — subsequent FMAC arithmetic
-// overwrites them with the new computed flag, then emitFMACAddPair
-// stores those new values into slot[mo.{m,s,c}Flag.write].
+// Reader-side commit: at the top of every pair, fan out the per-flag-type
+// routing state. There are TWO destinations with different semantics:
+//
+//   - Pinned w19/w20/w28: source for IN-PAIR RMW emitters (FMAC writeback's
+//     OPMULA W-bit preservation in aVU_Upper.inl:629, CLIP shift-OR in
+//     aVU_Upper.inl:2732+, FSSET masked merge in aVU_Lower.inl:2207+).
+//     Mac's instance comment says lastWrite "most-up-to-date instance for
+//     inline mid-block reads" — that's what mid-block RMW chains need.
+//     Using mo.{m,s,c}Flag.read here for the pinned source was the GoW2
+//     dropped-floors/walls root cause: consecutive CLIP ops all read the
+//     same older `read` instance (entry value when no prior CLIP had
+//     mature 4 cycles ago) instead of the previous CLIP's output, so the
+//     6-bit accumulation broke and FCAND saw only the most recent CLIP's
+//     6 bits instead of the OR over the triangle's 3 vertices.
+//
+//   - VI[REG_MAC/STATUS/CLIP] memory: source for 4-cycle-DELAYED readers
+//     (FSAND / FMAND / FCAND / FSEQ etc. which Ldrh VI memory directly).
+//     These want mo.{m,s,c}Flag.read — the hardware-pipeline-accurate
+//     historical instance whose write cycle is the most recent <= cycles.
 static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
 {
 	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
@@ -4773,39 +4785,61 @@ static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
 	const int64_t vi_clip_off   = (int64_t)offsetof(VURegs, VI)
 	                            + REG_CLIP_FLAG   * (int64_t)sizeof(REG_VI);
 
-	// MAC flag: slot[mo.mFlag.read].macflag → VI[REG_MAC_FLAG] + pinned w19.
+	// MAC flag.
+	// Pinned (RMW source for OPMULA W preservation) ← slot[lastWrite].
 	armAsm->Ldr(VU1_MACFLAG_REG,
-		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.read, f_macflag)));
-	armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.lastWrite, f_macflag)));
+	// VI memory (delayed readers) ← slot[read]. Re-use w4 to avoid an
+	// extra Ldr if read == lastWrite — same address.
+	if (mo.mFlag.read == mo.mFlag.lastWrite)
+	{
+		armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
+	}
+	else
+	{
+		armAsm->Ldr(w4,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.mFlag.read, f_macflag)));
+		armAsm->Str(w4, MemOperand(VU1_BASE_REG, vi_mac_off));
+	}
 
-	// Status flag: slot[mo.sFlag.read].statusflag → VI[REG_STATUS_FLAG] +
-	// pinned w20. UNLIKE mac and clip, status has TWO independent
-	// contributing sources — FMAC writeback owns bits 0xFCF (Z/S/U/O
-	// current + sticky), the FDIV drain (vu1_TestPipes_VU1's FDIV branch
-	// which still runs even with the toggle on, because we don't track
-	// state.q in the analyze pass yet) owns bits 0x30 (D/I current). The
-	// pre-routing helper's status drain explicitly preserved 0x30 from VI
-	// memory when committing the FMAC contribution. Blindly Str'ing the
-	// whole slot here clobbers any FDIV D/I bits the BL drained between
-	// pairs — symptom: missing geometry (FSAND / FSEQ / FSOR see stale D
-	// status and gate the wrong subset of triangles). Merge: take 0x30 from
-	// VI memory, take 0xFCF from the routed slot.
+	// Status flag. Two contributing sources (see source comment): FMAC
+	// writeback owns bits 0xFCF, FDIV drain owns bits 0x30. Pinned gets
+	// the lastWrite-routed FMAC value merged with the current FDIV bits
+	// from VI memory; VI memory gets the read-routed FMAC value merged
+	// with the current FDIV bits.
 	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vi_status_off));   // VI current
-	armAsm->Ldr(w5,
-		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.read, f_statusflag)));
 	armAsm->And(w4, w4, 0x30);                                  // keep FDIV bits
-	armAsm->And(w5, w5, 0xFCF);                                 // FMAC bits
-	armAsm->Orr(VU1_STATUSFLAG_REG, w4, w5);
-	armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
+	armAsm->Ldr(w5,
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.lastWrite, f_statusflag)));
+	armAsm->And(w5, w5, 0xFCF);
+	armAsm->Orr(VU1_STATUSFLAG_REG, w4, w5);                    // pinned = lastWrite-merged
+	if (mo.sFlag.read == mo.sFlag.lastWrite)
+	{
+		armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
+	}
+	else
+	{
+		armAsm->Ldr(w5,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.read, f_statusflag)));
+		armAsm->And(w5, w5, 0xFCF);
+		armAsm->Orr(w5, w4, w5);
+		armAsm->Str(w5, MemOperand(VU1_BASE_REG, vi_status_off));
+	}
 
-	// Clip flag: slot[mo.cFlag.read].clipflag → VI[REG_CLIP_FLAG] + pinned w28.
+	// Clip flag.
 	armAsm->Ldr(VU1_CLIPFLAG_REG,
-		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.read, f_clipflag)));
-	armAsm->Str(VU1_CLIPFLAG_REG, MemOperand(VU1_BASE_REG, vi_clip_off));
+		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.lastWrite, f_clipflag)));
+	if (mo.cFlag.read == mo.cFlag.lastWrite)
+	{
+		armAsm->Str(VU1_CLIPFLAG_REG, MemOperand(VU1_BASE_REG, vi_clip_off));
+	}
+	else
+	{
+		armAsm->Ldr(w4,
+			MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.cFlag.read, f_clipflag)));
+		armAsm->Str(w4, MemOperand(VU1_BASE_REG, vi_clip_off));
+	}
 
-	// VI cache tracker invalidate — the GPR-cached copy of these three VI
-	// regs (if resident in w9..w15) no longer matches the value we just
-	// stored to memory.
 	viCacheInvalidate(REG_MAC_FLAG);
 	viCacheInvalidate(REG_STATUS_FLAG);
 	viCacheInvalidate(REG_CLIP_FLAG);
