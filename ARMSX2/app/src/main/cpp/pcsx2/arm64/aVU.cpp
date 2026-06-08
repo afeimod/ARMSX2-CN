@@ -5367,6 +5367,18 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	};
 	PerPairSkip skip_info[VU1_MAX_BLOCK_PAIRS] = {};
 
+	// Phase 2 deferred-Add accumulator. Replaces the per-pair inline
+	// `Add VU1_CYCLE_REG, ..., fmac_stall` (which compounded over-bump as
+	// later pairs read VU1_CYCLE_REG already-bumped by earlier ones — the SA
+	// dropping-triangle root cause). We instead sum the per-pair fmac_stall
+	// deltas at compile time and emit a single `Add VU1_CYCLE_REG, ...,
+	// total` just before the block-end emitFlushCycleReg, mirroring how
+	// mac's microVU folds mVUcycles into VU->cycle once at the end of the
+	// block. Residual CT-vs-runtime mismatch (CT can't see FDIV/EFU/IALU
+	// helper bumps) is bounded by the block's total non-FMAC stall count
+	// instead of compounding O(N) per intermediate FMAC stall.
+	u32 deferred_static_stall = 0;
+
 	// Stage A+B pre-walk (re-enabled after root-causing the Crazy Taxi bug
 	// from commit 9a68eba8).
 	//
@@ -6574,23 +6586,24 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		// Phase 2 microVU inline FMAC stall (gated by EmuConfig.Cpu.Recompiler.
 		// Vu1InlineFmacStall). Replaces the per-pair `vu1_TestFMACStallReg /
 		// _Reg2` BLs (formerly 17-32% of total CPU on Futurama / GoW2 / Ape
-		// Escape 3) with a single inline `Add VU1_CYCLE_REG, #fmac_stall` —
-		// the same delta the helper would have applied. Pre-walk forced
-		// skipUpperFMACStall0/1 and skipLowerFMACStall0/1 to true above when
-		// the toggle is on, so emitTestUpperStalls/emitTestLowerStalls emit
-		// no FMAC stall code below.
+		// Escape 3) with a single block-end `Add VU1_CYCLE_REG, #total` — the
+		// sum of every pair's stall delta. Pre-walk forced skipUpperFMACStall0/
+		// 1 and skipLowerFMACStall0/1 to true above when the toggle is on, so
+		// emitTestUpperStalls/emitTestLowerStalls emit no FMAC stall code
+		// below. The deferred Add itself is emitted in the epilogue.
 		//
-		// fmac_stall fits in 12-bit unsigned immediate (max 4 cycles per FMAC
-		// pipe + within-block accumulation; cap at 4095 for vixl Add
-		// constraints, well above any realistic value).
+		// Earlier per-pair inline Add compounded over-bump: each later pair's
+		// slot.sCycle was stored at a VU1_CYCLE_REG value already inflated by
+		// prior pairs' stall Adds, so the runtime delta at read time was
+		// smaller than the CT delta we'd Add — producing San Andreas
+		// dropping triangles (VU sync ahead → MTGS/EE timing skew). Deferred
+		// keeps slot.sCycle in pair-count space within the block (mac's
+		// approach), so within-block maturity checks stay sound.
 		if (EmuConfig.Cpu.Recompiler.Vu1InlineFmacStall
 			&& skip_info[i].useStaticFmacStall
 			&& skip_info[i].fmac_stall > 0)
 		{
-			VU1_PERF_BEGIN(_pp_inline_fmac);
-			armAsm->Add(VU1_CYCLE_REG, VU1_CYCLE_REG,
-				static_cast<unsigned>(skip_info[i].fmac_stall));
-			VU1_PERF_END(_pp_inline_fmac, "VU1_InlineFmacStall_0x%04x", pc);
+			deferred_static_stall += static_cast<u32>(skip_info[i].fmac_stall);
 		}
 
 		// 5. Test upper stalls — compile-time-specialized inline. Most upper
@@ -7625,6 +7638,28 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	vfCacheFlushAndInvalidate();
 	// VI cache: write-through so nothing to flush; just reset the tracker.
 	viCacheInvalidateAll();
+
+	// Phase 2 deferred-Add (Vu1InlineFmacStall). Apply the accumulated
+	// per-pair fmac_stall sum once here, just before the block-end flush.
+	// Within the block, VU1_CYCLE_REG stayed in pair-count + non-FMAC-stall
+	// space so slot.sCycle stores and maturity checks stayed self-consistent
+	// (the SA-dropping-triangle compound-bump was per-pair Add re-reading an
+	// already-bumped VU1_CYCLE_REG into the next slot's sCycle). Residual
+	// over-count vs the helper version is bounded by total non-FMAC stalls
+	// in the block instead of compounding O(N) per intermediate stall. vixl
+	// Add immediate range is 12-bit unshifted; on the off chance a single
+	// block accumulates > 4095 cycles of FMAC stall (~1000 pairs of perfect
+	// hazard pile-up — far past VU1_MAX_BLOCK_PAIRS), split into two Adds.
+	if (deferred_static_stall > 0)
+	{
+		u32 remaining = deferred_static_stall;
+		while (remaining > 0)
+		{
+			const u32 chunk = remaining > 4095u ? 4095u : remaining;
+			armAsm->Add(VU1_CYCLE_REG, VU1_CYCLE_REG, chunk);
+			remaining -= chunk;
+		}
+	}
 
 	// Stage C2: flush the cached cycle register to memory before restoring
 	// the caller's x21. From here on VU->cycle is authoritative again.
