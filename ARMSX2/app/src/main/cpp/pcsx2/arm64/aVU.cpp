@@ -3053,6 +3053,17 @@ static VU1BlockEntry* findVariant(u32 pc,
 				sizeof(*required_entry)) != 0)
 				continue;
 		}
+		else if (EmuConfig.Cpu.Recompiler.Vu1CrossBlockPState && blk->entryStateValid)
+		{
+			// Toggle is ON but the caller has no entryState to match (dispatch-
+			// miss path / JR-JALR indirect). Specialised variants assume a
+			// specific entryState — letting dispatch-miss pick one would
+			// under-stall when the runtime state doesn't match. Skip
+			// specialised variants in this lookup so dispatch-miss only sees
+			// the conservative (entryStateValid=false) pool. If no conservative
+			// variant exists, the caller will compile a fresh one.
+			continue;
+		}
 
 		if (it != deque.begin())
 		{
