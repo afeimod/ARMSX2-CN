@@ -4779,9 +4779,23 @@ static void emitFmacInstanceReaderCommit(const armvu1ir::microOp& mo)
 	armAsm->Str(VU1_MACFLAG_REG, MemOperand(VU1_BASE_REG, vi_mac_off));
 
 	// Status flag: slot[mo.sFlag.read].statusflag → VI[REG_STATUS_FLAG] +
-	// pinned w20.
-	armAsm->Ldr(VU1_STATUSFLAG_REG,
+	// pinned w20. UNLIKE mac and clip, status has TWO independent
+	// contributing sources — FMAC writeback owns bits 0xFCF (Z/S/U/O
+	// current + sticky), the FDIV drain (vu1_TestPipes_VU1's FDIV branch
+	// which still runs even with the toggle on, because we don't track
+	// state.q in the analyze pass yet) owns bits 0x30 (D/I current). The
+	// pre-routing helper's status drain explicitly preserved 0x30 from VI
+	// memory when committing the FMAC contribution. Blindly Str'ing the
+	// whole slot here clobbers any FDIV D/I bits the BL drained between
+	// pairs — symptom: missing geometry (FSAND / FSEQ / FSOR see stale D
+	// status and gate the wrong subset of triangles). Merge: take 0x30 from
+	// VI memory, take 0xFCF from the routed slot.
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vi_status_off));   // VI current
+	armAsm->Ldr(w5,
 		MemOperand(VU1_BASE_REG, fmacInstanceOff(mo.sFlag.read, f_statusflag)));
+	armAsm->And(w4, w4, 0x30);                                  // keep FDIV bits
+	armAsm->And(w5, w5, 0xFCF);                                 // FMAC bits
+	armAsm->Orr(VU1_STATUSFLAG_REG, w4, w5);
 	armAsm->Str(VU1_STATUSFLAG_REG, MemOperand(VU1_BASE_REG, vi_status_off));
 
 	// Clip flag: slot[mo.cFlag.read].clipflag → VI[REG_CLIP_FLAG] + pinned w28.
