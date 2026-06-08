@@ -6783,15 +6783,17 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// register is left intact across the (skipped) helper.
 			if (!EmuConfig.Speedhacks.vuSkipStallSim)
 			{
-				// 2026-05-17 REVERTED: emitVu1CallNeonFree + inline FMAC
-				// drain were breaking Futurama main menu. Back to safe
-				// emitVu1Call (full vfCacheFlushAndInvalidate +
-				// viCacheInvalidateAll) until the NEON-clobber
-				// assumption is verified the right way.
+				// 2026-06-08: re-enable emitVu1CallNeonFree path now that we
+				// can isolate it from the previously bundled inline-drain
+				// regression. Helper is verified scalar-only (objdump -d
+				// shows no v/q/d/s register operands) so VF cache stays
+				// valid across the BL. Skips vfCacheFlushAndInvalidate +
+				// vu1BroadcastCacheReset — Adreno spilled-NEON-reload was
+				// dominating per-pair cost in the simpleperf trace.
 				armAsm->Mov(w1, VU1_FMACCOUNT_REG);
 				armAsm->Mov(x2, VU1_CYCLE_REG);
 				armAsm->Mov(x0, VU1_BASE_REG);
-				emitVu1Call(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
+				emitVu1CallNeonFree(reinterpret_cast<const void*>(vu1_TestPipes_VU1));
 				armAsm->Mov(VU1_FMACCOUNT_REG, w0);
 			}
 

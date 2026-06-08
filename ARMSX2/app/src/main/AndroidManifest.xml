@@ -45,6 +45,11 @@
              big cores and peak clocks instead of throttling as a normal app. -->
         <meta-data android:name="android.app.game_mode" android:value="performance" />
 
+        <!-- Profileable from the adb shell. Lets simpleperf record from the
+             release build without flipping debuggable on (which would also
+             change the JIT path and skew the numbers). -->
+        <profileable android:shell="true" tools:targetApi="29" />
+
         <meta-data android:name="android.max_aspect" android:value="2.4" />
 
         <activity
