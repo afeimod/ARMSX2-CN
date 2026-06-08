@@ -470,6 +470,9 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	Vu1InlineFmacStall = false;
 	// Phase 3 microVU cross-block pState propagation — OFF by default.
 	Vu1CrossBlockPState = false;
+	// Inline-emit the FMAC drain instead of BL into vu1_TestPipes_VU1 at
+	// fmacOnlyTestPipes pairs. OFF by default until A/B-tested.
+	Vu1InlineDrainTestPipes = false;
 
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
@@ -556,6 +559,7 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 
 	SettingsWrapBitBool(Vu1InlineFmacStall);
 	SettingsWrapBitBool(Vu1CrossBlockPState);
+	SettingsWrapBitBool(Vu1InlineDrainTestPipes);
 
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);

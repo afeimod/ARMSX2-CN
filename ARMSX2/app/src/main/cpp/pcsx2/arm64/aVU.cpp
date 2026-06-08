@@ -6697,6 +6697,25 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		if (!skip_info[i].skipTestPipes)
 		{
 			VU1_PERF_BEGIN(_pp_s6);
+
+			// Inline-drain fast path. When the pre-walk proves FDIV/EFU/IALU
+			// are empty + carry-safe at this pair (fmacOnlyTestPipes), the
+			// runtime helper would only walk the FMAC ring. We emit that
+			// walk inline, saving the BL + viCacheInvalidateAll + ret per
+			// call. VI[REG_MAC/STATUS/CLIP] memory writes invalidate the
+			// VI cache slots for those three regs (the inline drain stores
+			// directly to memory, bypassing the GPR cache).
+			if (EmuConfig.Cpu.Recompiler.Vu1InlineDrainTestPipes
+				&& skip_info[i].fmacOnlyTestPipes)
+			{
+				emitDrainFmaccountReg();
+				viCacheInvalidate(REG_CLIP_FLAG);
+				viCacheInvalidate(REG_STATUS_FLAG);
+				viCacheInvalidate(REG_MAC_FLAG);
+				emitInlineFmacDrainTestPipes();
+				VU1_PERF_END(_pp_s6, "VU1_TestPipes_inline_0x%04x", pc);
+			}
+			else {
 			// Refactored: cycle (x21) AND fmaccount (w26) passed as args
 			// (x2 / w1) → no Str+Ldr round-trip through memory. Helper
 			// returns new fmaccount in w0; cycle is read-only so no reload.
@@ -6799,6 +6818,7 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 
 			armAsm->Bind(&skip_helper);
 			VU1_PERF_END(_pp_s6, "VU1_TestPipes_0x%04x", pc);
+			} // end else (BL path)
 		}
 
 		// 6b. Decrement VIBackupCycles (needed for correct VI backup reads

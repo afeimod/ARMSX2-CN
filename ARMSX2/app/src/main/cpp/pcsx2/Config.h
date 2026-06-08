@@ -693,6 +693,16 @@ struct Pcsx2Config
 		// measurement on real workloads.
 		bool
 			Vu1CrossBlockPState : 1;
+		// Inline FMAC-drain instead of BL into vu1_TestPipes_VU1 at pairs
+		// where the pre-walk proves the non-FMAC pipes (FDIV/EFU/IALU) are
+		// empty and carry-safe (skip_info[i].fmacOnlyTestPipes). The runtime
+		// helper would only walk the FMAC ring; we emit that walk inline at
+		// the JIT site instead, saving the BL + viCacheInvalidateAll + ret
+		// per call. Mac doesn't need this because it has no runtime FMAC
+		// ring — flag instances are routed at compile time via the
+		// regalloc. Default OFF until A/B-tested in San Andreas + GoW2.
+		bool
+			Vu1InlineDrainTestPipes : 1;
 		BITFIELD_END
 
 		RecompilerOptions();

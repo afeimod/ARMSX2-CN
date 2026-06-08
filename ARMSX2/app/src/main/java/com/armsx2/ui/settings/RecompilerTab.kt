@@ -109,7 +109,9 @@ fun RecompilerTab(state: MutableState<Settings>) {
                 ToggleBubble("VU1 X-block pState", s.vu1CrossBlockPState, modifier = Modifier.weight(1f)) {
                     apply(s.copy(vu1CrossBlockPState = it))
                 }
-                Spacer(Modifier.weight(1f))
+                ToggleBubble("VU1 Inline TestPipes", s.vu1InlineDrainTestPipes, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vu1InlineDrainTestPipes = it))
+                }
                 Spacer(Modifier.weight(1f))
             }
         }
