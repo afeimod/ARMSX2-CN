@@ -86,6 +86,21 @@ data class Settings(
     /** EmuCore/CPU/Recompiler/UseMacVU1 — mac arm64 VU1 recompiler. */
     val useMacVU1: Boolean = false,
 
+    // ---- microVU-style compile-time pipeline-stall folding ----
+    /** EmuCore/CPU/Recompiler/Vu1InlineFmacStall — replace the per-pair
+     *  `vu1_TestFMACStallReg / _Reg2` BLs (formerly 17-32% of total CPU per
+     *  simpleperf) with an inline `Add VU1_CYCLE_REG, #fmac_stall`. Mirrors
+     *  mac's compile-time mVUincCycles + mVUstall fold. Gated by the same
+     *  `fmac_carry_safe` (ct_cycle > 3) guarantee that cross-block carry-in
+     *  FMAC slots have retired at runtime. */
+    val vu1InlineFmacStall: Boolean = false,
+    /** EmuCore/CPU/Recompiler/Vu1CrossBlockPState — propagate predecessor's
+     *  exit pipeline-state to successor block compile, so CARRY_IN_GATE_*
+     *  bounds can shrink (FMAC/IALU=3, FDIV=12, EFU=54). When a predecessor
+     *  links to a successor, the successor variant is specialised for that
+     *  predecessor's exitState. Mirrors mac's microBlockManager pState match. */
+    val vu1CrossBlockPState: Boolean = false,
+
     // ---- EmuCore/GS — renderer accuracy / quality ----
     /** EmuCore/GS/hw_mipmap. */
     val hwMipmap: Boolean = true,
@@ -148,6 +163,8 @@ data class Settings(
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacIOP", "bool", useMacIOP.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU0", "bool", useMacVU0.toString())
         NativeApp.setSetting("EmuCore/CPU/Recompiler", "UseMacVU1", "bool", useMacVU1.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1InlineFmacStall", "bool", vu1InlineFmacStall.toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "Vu1CrossBlockPState", "bool", vu1CrossBlockPState.toString())
         // GS renderer
         NativeApp.setSetting("EmuCore/GS", "hw_mipmap", "bool", hwMipmap.toString())
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
@@ -189,6 +206,8 @@ data class Settings(
         put("useMacIOP", useMacIOP)
         put("useMacVU0", useMacVU0)
         put("useMacVU1", useMacVU1)
+        put("vu1InlineFmacStall", vu1InlineFmacStall)
+        put("vu1CrossBlockPState", vu1CrossBlockPState)
         put("hwMipmap", hwMipmap)
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
@@ -227,6 +246,8 @@ data class Settings(
                 useMacIOP = json.optBoolean("useMacIOP", def.useMacIOP),
                 useMacVU0 = json.optBoolean("useMacVU0", def.useMacVU0),
                 useMacVU1 = json.optBoolean("useMacVU1", def.useMacVU1),
+                vu1InlineFmacStall = json.optBoolean("vu1InlineFmacStall", def.vu1InlineFmacStall),
+                vu1CrossBlockPState = json.optBoolean("vu1CrossBlockPState", def.vu1CrossBlockPState),
                 hwMipmap = json.optBoolean("hwMipmap", def.hwMipmap),
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
@@ -271,6 +292,8 @@ data class Settings(
             if (current.useMacIOP           != base.useMacIOP)           j.put("useMacIOP", current.useMacIOP)
             if (current.useMacVU0           != base.useMacVU0)           j.put("useMacVU0", current.useMacVU0)
             if (current.useMacVU1           != base.useMacVU1)           j.put("useMacVU1", current.useMacVU1)
+            if (current.vu1InlineFmacStall  != base.vu1InlineFmacStall)  j.put("vu1InlineFmacStall", current.vu1InlineFmacStall)
+            if (current.vu1CrossBlockPState != base.vu1CrossBlockPState) j.put("vu1CrossBlockPState", current.vu1CrossBlockPState)
             if (current.hwMipmap            != base.hwMipmap)            j.put("hwMipmap", current.hwMipmap)
             if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
             if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
@@ -305,6 +328,8 @@ data class Settings(
             useMacIOP = if (overrides.has("useMacIOP")) overrides.getBoolean("useMacIOP") else base.useMacIOP,
             useMacVU0 = if (overrides.has("useMacVU0")) overrides.getBoolean("useMacVU0") else base.useMacVU0,
             useMacVU1 = if (overrides.has("useMacVU1")) overrides.getBoolean("useMacVU1") else base.useMacVU1,
+            vu1InlineFmacStall = if (overrides.has("vu1InlineFmacStall")) overrides.getBoolean("vu1InlineFmacStall") else base.vu1InlineFmacStall,
+            vu1CrossBlockPState = if (overrides.has("vu1CrossBlockPState")) overrides.getBoolean("vu1CrossBlockPState") else base.vu1CrossBlockPState,
             hwMipmap = if (overrides.has("hwMipmap")) overrides.getBoolean("hwMipmap") else base.hwMipmap,
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,

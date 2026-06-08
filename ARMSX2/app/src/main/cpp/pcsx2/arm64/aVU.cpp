@@ -2154,6 +2154,34 @@ struct VU1BlockEntry
 	// unpatched incoming edges for correctness). The flag then clears.
 	bool needsRelink;
 
+	// microVU-style cross-block pipeline-state propagation (Phase 3, gated by
+	// EmuConfig.Cpu.Recompiler.Vu1CrossBlockPState):
+	//
+	//   entryState — the microRegInfo this variant was COMPILED FOR. When ON,
+	//   CompileBlock uses this to shrink the CARRY_IN_GATE_* bounds (any pipe
+	//   that entryState says is empty at block entry has its gate set to 0,
+	//   so per-pair stall checks can elide from cycle 0 instead of waiting
+	//   54 cycles for EFU carry-in to drain in CT model).
+	//
+	//   exitState — the microRegInfo this variant LEAVES at block end (== the
+	//   ir.blockEnd computed by the analyze pass). When a predecessor links
+	//   to a successor via tryForwardLink, the predecessor's exitState is
+	//   used to match a successor variant whose entryState matches. Mismatch
+	//   → no link; next runtime dispatch compiles a new variant specialised
+	//   to the predecessor's exit state.
+	//
+	// Both 96 bytes. Memcmp'd for variant lookup when the toggle is on.
+	armvu1ir::microRegInfo entryState;
+	armvu1ir::microRegInfo exitState;
+
+	// True when entryState was populated by a known predecessor's exitState
+	// (via tryForwardLink under the Vu1CrossBlockPState toggle). When false
+	// (default), entryState is zero-initialised and the gate-shrink in the
+	// pre-walk must NOT collapse to 0 — zero bytes mean "no info", not "all
+	// pipes drained." Only populate this on the matching-link compile path
+	// where we KNOW the predecessor drained the pipe before linking.
+	bool entryStateValid;
+
 #ifdef VU1_PROFILE_BLOCKS
 	// Per-block execution counter, bumped at linkEntry by the JIT-emitted
 	// increment. Dumped to logcat on shutdown via DumpTopBlocks(). Guarded
@@ -2985,7 +3013,13 @@ static void destroyVariant(VU1BlockEntry* blk, u32 my_slot)
 // Fast-reject on first-8-byte compare before the full memcmp — most
 // mismatches fail here. VU1.Micro is 16-byte aligned and all slot PCs
 // are 8-byte aligned, so the u64 load is safe.
-static VU1BlockEntry* findVariant(u32 pc)
+// Phase 3 cross-block pState: when `required_entry` is non-null AND the
+// Vu1CrossBlockPState toggle is ON, the lookup ALSO requires the variant's
+// `entryStateValid && entryState == *required_entry`. When the toggle is OFF
+// (default) or `required_entry` is null, behaviour matches the original
+// content-only lookup.
+static VU1BlockEntry* findVariant(u32 pc,
+	const armvu1ir::microRegInfo* required_entry = nullptr)
 {
 	const u32 slot = pc / 8;
 	auto& deque = s_variants[slot];
@@ -2994,6 +3028,8 @@ static VU1BlockEntry* findVariant(u32 pc)
 
 	const u8* live = VU1.Micro + pc;
 	const u64 live_head = *reinterpret_cast<const u64*>(live);
+	const bool xblock = required_entry != nullptr
+		&& EmuConfig.Cpu.Recompiler.Vu1CrossBlockPState;
 
 	for (auto it = deque.begin(); it != deque.end(); ++it)
 	{
@@ -3005,6 +3041,18 @@ static VU1BlockEntry* findVariant(u32 pc)
 		if (snap_bytes > 8
 			&& std::memcmp(blk->snapshot + 8, live + 8, snap_bytes - 8) != 0)
 			continue;
+
+		if (xblock)
+		{
+			// Phase 3: require an entryState-specialised variant; reject
+			// the conservative (entryStateValid=false) one and any specialised
+			// variant whose entryState differs.
+			if (!blk->entryStateValid)
+				continue;
+			if (std::memcmp(&blk->entryState, required_entry,
+				sizeof(*required_entry)) != 0)
+				continue;
+		}
 
 		if (it != deque.begin())
 		{
@@ -3023,17 +3071,87 @@ static VU1BlockEntry* findVariant(u32 pc)
 // `batch` allows the caller to coalesce icache flushes across this call
 // and a subsequent patchWaitingPredecessors. Caller MUST flush before any
 // patched code is executed.
+// Phase 3 cross-block pState: tryForwardLink may recursively trigger a fresh
+// compile when no entryState-matching variant exists for a target. Capped at
+// depth 1 to bound compile work per dispatch — if the target itself wants to
+// link forward, its own exits will be revisited at the next dispatch.
+static thread_local int s_xblockCompileDepth = 0;
+
+// Forward declarations — definitions are further down in this file.
+static VU1BlockEntry* compileBlockVariant(u32 pc,
+	const armvu1ir::microRegInfo* entry_pstate);
+static u32 AnalyzeBlock(u32 startPC);
+static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block);
+
 static void tryForwardLink(VU1BlockEntry& block, VU1IcacheBatch* batch = nullptr)
 {
+	const bool xblock = EmuConfig.Cpu.Recompiler.Vu1CrossBlockPState;
 	for (u32 e = 0; e < block.num_exits; e++)
 	{
 		LinkExit& exit = block.exits[e];
 		if (exit.target_pc == LINK_TARGET_NONE)
 			continue;
-		VU1BlockEntry* target = findVariant(exit.target_pc);
+		VU1BlockEntry* target = nullptr;
+		if (xblock)
+		{
+			target = findVariant(exit.target_pc, &block.exitState);
+			if (!target && s_xblockCompileDepth == 0)
+			{
+				s_xblockCompileDepth = 1;
+				target = compileBlockVariant(exit.target_pc, &block.exitState);
+				s_xblockCompileDepth = 0;
+			}
+		}
+		else
+		{
+			target = findVariant(exit.target_pc);
+		}
 		if (target && target->linkEntry)
 			patchLinkSite(exit, target->linkEntry, batch);
 	}
+}
+
+// Phase 3 cross-block pState: allocate + compile a variant for `pc`.
+// Optionally seeds entryState from a predecessor's exitState so the pre-walk
+// can shrink CARRY_IN_GATE_* bounds (see eff_gate_* in CompileBlock).
+//
+// Shared between the dispatch-miss path (Execute) and tryForwardLink (Phase
+// 3 specialised-variant compile). Caller is responsible for the post-compile
+// link cascade — this function only owns the allocation + compile.
+static VU1BlockEntry* compileBlockVariant(u32 pc,
+	const armvu1ir::microRegInfo* entry_pstate)
+{
+	const u32 slot = pc / 8;
+	const u32 numPairs = AnalyzeBlock(pc);
+	VU1BlockEntry* blk = new VU1BlockEntry{};
+	blk->numPairs = numPairs;
+
+	const u32 snap_bytes = numPairs * 8;
+	blk->snapshot = new u8[snap_bytes];
+	std::memcpy(blk->snapshot, VU1.Micro + pc, snap_bytes);
+
+	// Stamp entryState BEFORE CompileBlock so the pre-walk's eff_gate_*
+	// derivation can pick it up.
+	if (entry_pstate)
+	{
+		blk->entryState = *entry_pstate;
+		blk->entryStateValid = true;
+	}
+
+	blk->codeEntry = CompileBlock(pc, numPairs, blk);
+
+	auto& deque = s_variants[slot];
+	if (deque.size() >= kVariantCapPerSlot)
+	{
+		VU1BlockEntry* victim = deque.back();
+		deque.pop_back();
+		destroyVariant(victim, slot);
+	}
+
+	deque.push_front(blk);
+	indexVariantExits(blk);
+
+	return blk;
 }
 
 // Phase 4 runtime dispatcher for JR/JALR block exits. Given a runtime TPC,
@@ -4965,6 +5083,13 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	ir.info = ir_info;
 	armvu1ir::mvu1AnalyzeBlock(startPC, numPairs, uregs_data, lregs_data, ir);
 
+	// Phase 3 cross-block pState: snapshot the analyze pass's exit-time
+	// microRegInfo into the block's metadata so a successor's tryForwardLink
+	// can match a specialised entryState variant. entryState is captured at
+	// CompileBlock entry above (defaults to zero); exitState is final.
+	if (out_block)
+		out_block->exitState = ir.blockEnd;
+
 	// Step 6b (VIBackupCycles decrement) is observable only when some pair
 	// in the block reads VIBackupCycles — i.e., has an IBxx. If no IBxx,
 	// the per-pair decrement is dead within this block; the only concern
@@ -5133,6 +5258,44 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 	constexpr int CARRY_IN_GATE_FDIV = 12;
 	constexpr int CARRY_IN_GATE_EFU  = 54;
 
+	// Phase 3 cross-block pState: shrink carry-in gates when out_block->entryState
+	// proves the predecessor drained the pipe before linking to us. Each lane
+	// of entryState.VF[v].xyzw / VI[v] / q / p that's zero means the matching
+	// pipe has no in-flight carry-in slot at runtime (predecessor's analyze
+	// pass captured the state at block exit; tryForwardLink only links when
+	// pred.exitState matches our entryState). With the gate at 0, fmac_carry_safe
+	// goes true from pair 1 instead of pair 4, so per-pair stall checks can
+	// elide from block entry.
+	//
+	// When the Vu1CrossBlockPState toggle is OFF, out_block->entryState stays
+	// zero-initialised (the conservative entry assumption) and the
+	// any-entry-state lanes test below sees no zeros → gates default to the
+	// original constants. No behaviour change in OFF mode.
+	int eff_gate_fmac = CARRY_IN_GATE_FMAC;
+	int eff_gate_ialu = CARRY_IN_GATE_IALU;
+	int eff_gate_fdiv = CARRY_IN_GATE_FDIV;
+	int eff_gate_efu  = CARRY_IN_GATE_EFU;
+	if (EmuConfig.Cpu.Recompiler.Vu1CrossBlockPState
+		&& out_block && out_block->entryStateValid)
+	{
+		const armvu1ir::microRegInfo& es = out_block->entryState;
+		bool fmac_clean = true;
+		for (u32 v = 0; v < 32; v++)
+		{
+			if (es.VF[v].x || es.VF[v].y || es.VF[v].z || es.VF[v].w)
+			{ fmac_clean = false; break; }
+		}
+		bool ialu_clean = true;
+		for (u32 v = 0; v < 16; v++)
+		{
+			if (es.VI[v]) { ialu_clean = false; break; }
+		}
+		if (fmac_clean) eff_gate_fmac = 0;
+		if (ialu_clean) eff_gate_ialu = 0;
+		if (es.q == 0)  eff_gate_fdiv = 0;
+		if (es.p == 0)  eff_gate_efu  = 0;
+	}
+
 	struct PerPairSkip
 	{
 		bool skipUpperFMACStall0;
@@ -5235,10 +5398,10 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 			// step 1: cycle++
 			ct_cycle++;
 
-			const bool fmac_carry_safe = (ct_cycle > CARRY_IN_GATE_FMAC);
-			const bool ialu_carry_safe = (ct_cycle > CARRY_IN_GATE_IALU);
-			const bool fdiv_carry_safe = (ct_cycle > CARRY_IN_GATE_FDIV);
-			const bool efu_carry_safe  = (ct_cycle > CARRY_IN_GATE_EFU);
+			const bool fmac_carry_safe = (ct_cycle > eff_gate_fmac);
+			const bool ialu_carry_safe = (ct_cycle > eff_gate_ialu);
+			const bool fdiv_carry_safe = (ct_cycle > eff_gate_fdiv);
+			const bool efu_carry_safe  = (ct_cycle > eff_gate_efu);
 
 			auto aliasFmac = [&](u8 reg, u8 xyzw) -> bool {
 				if (reg == 0)
@@ -5503,6 +5666,42 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 				// `fmac_stall` is sound and we can inline the Add and
 				// suppress the BL. Outside that window the BL stays.
 				skip_info[i].useStaticFmacStall = fmac_carry_safe;
+
+				// Phase 2 (microVU inline-FMAC-stall) — emit-side override.
+				// When the runtime toggle is on AND we're in the carry-safe
+				// window AND fmac_stall > 0, force-skip the per-pair FMAC
+				// stall-check BLs (vu1_TestFMACStallReg / _Reg2). The emit
+				// site will instead bump VU1_CYCLE_REG inline by fmac_stall.
+				//
+				// KNOWN MATH SUBTLETY (likely the 2026-04 GoW glitch root
+				// cause): slot.sCycle is stored at the JIT site as
+				// VU1_CYCLE_REG (runtime cycle WITH accumulated stall bumps —
+				// see emitFMACAddPair). The helper at runtime computes
+				// delta = max(0, slot.sCycle_runtime + 4 - V_runtime). Our
+				// pre-walk computes delta = max(0, slot.sCycle_CT + 4 -
+				// ct_cycle), where both terms are in pair-count (no bumps)
+				// space. When intermediate inline-Adds bumped VU1_CYCLE_REG
+				// between slot insert and the read, helper_delta < CT_delta
+				// by exactly intermediate_bumps. So this inline Add can
+				// OVER-bump runtime cycle, which down-stream cycle-based
+				// decisions (skipTestPipes maturity, block-end VU->cycle
+				// store) see as the VU being "ahead" of where it should be.
+				// Empirically safe in stall-free hot loops (matches mac);
+				// shadow-verify and the user-facing toggle let us catch any
+				// game where it diverges.
+				//
+				// FMAC stall is the only BL we elide this way. FDIV / EFU /
+				// IALU pipe-wait helpers have additional side effects
+				// (efu.Cycle--, ring retirement) and their BLs stay.
+				if (EmuConfig.Cpu.Recompiler.Vu1InlineFmacStall
+					&& skip_info[i].useStaticFmacStall
+					&& skip_info[i].fmac_stall > 0)
+				{
+					skip_info[i].skipUpperFMACStall0 = true;
+					skip_info[i].skipUpperFMACStall1 = true;
+					skip_info[i].skipLowerFMACStall0 = true;
+					skip_info[i].skipLowerFMACStall1 = true;
+				}
 
 				// Intentionally DO NOT mutate `ct_cycle` here. An earlier
 				// version of this block did `ct_cycle = candidate_cycle` to
@@ -6359,6 +6558,28 @@ static u8* CompileBlock(u32 startPC, u32 numPairs, VU1BlockEntry* out_block)
 		{
 			armAsm->Mov(w4, 2u);
 			armAsm->Str(w4, MemOperand(VU1_BASE_REG, ebit_off));
+		}
+
+		// Phase 2 microVU inline FMAC stall (gated by EmuConfig.Cpu.Recompiler.
+		// Vu1InlineFmacStall). Replaces the per-pair `vu1_TestFMACStallReg /
+		// _Reg2` BLs (formerly 17-32% of total CPU on Futurama / GoW2 / Ape
+		// Escape 3) with a single inline `Add VU1_CYCLE_REG, #fmac_stall` —
+		// the same delta the helper would have applied. Pre-walk forced
+		// skipUpperFMACStall0/1 and skipLowerFMACStall0/1 to true above when
+		// the toggle is on, so emitTestUpperStalls/emitTestLowerStalls emit
+		// no FMAC stall code below.
+		//
+		// fmac_stall fits in 12-bit unsigned immediate (max 4 cycles per FMAC
+		// pipe + within-block accumulation; cap at 4095 for vixl Add
+		// constraints, well above any realistic value).
+		if (EmuConfig.Cpu.Recompiler.Vu1InlineFmacStall
+			&& skip_info[i].useStaticFmacStall
+			&& skip_info[i].fmac_stall > 0)
+		{
+			VU1_PERF_BEGIN(_pp_inline_fmac);
+			armAsm->Add(VU1_CYCLE_REG, VU1_CYCLE_REG,
+				static_cast<unsigned>(skip_info[i].fmac_stall));
+			VU1_PERF_END(_pp_inline_fmac, "VU1_InlineFmacStall_0x%04x", pc);
 		}
 
 		// 5. Test upper stalls — compile-time-specialized inline. Most upper

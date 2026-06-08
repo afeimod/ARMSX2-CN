@@ -669,6 +669,30 @@ struct Pcsx2Config
 			UseMacIOP : 1,
 			UseMacVU0 : 1,
 			UseMacVU1 : 1;
+		// microVU-style compile-time pipeline-stall folding (Phase 2 inline FMAC
+		// stall, re-attempt). When ON, per-pair FMAC stall-check BLs
+		// (vu1_TestFMACStallReg / vu1_TestFMACStallReg2 — formerly 17-32% of
+		// total CPU per simpleperf) are replaced by a compile-time inline
+		// `Add VU1_CYCLE_REG, #fmac_stall`, gated by the same fmac_carry_safe
+		// guard (ct_cycle > 3) that proves cross-block carry-in slots have
+		// retired at runtime. Mirrors mac's compile-time mVUincCycles + mVUstall
+		// fold. Default OFF — was reverted 2026-04 due to GoW glitches; needs
+		// shadow-verify pass before enabling.
+		bool
+			Vu1InlineFmacStall : 1;
+		// microVU-style cross-block pipeline-state propagation. When ON, each
+		// VU1 block records its exit-time microRegInfo (per-VF/VI lane
+		// countdowns + Q/P/xgkick state). When a predecessor links to a
+		// successor via direct-B forward link, the predecessor's exitState is
+		// used at the successor's tryForwardLink time to match a specialised
+		// variant whose entryState matches — letting CompileBlock shrink the
+		// CARRY_IN_GATE_* bounds (FMAC=3, IALU=3, FDIV=12, EFU=54 cycle
+		// thresholds for cross-block carry-in safety). With entryState known
+		// for-sure clean, per-pair stall checks can elide from cycle 0 of the
+		// block. Default OFF — variant cache multiplies per-slot; needs
+		// measurement on real workloads.
+		bool
+			Vu1CrossBlockPState : 1;
 		BITFIELD_END
 
 		RecompilerOptions();

@@ -466,6 +466,11 @@ Pcsx2Config::RecompilerOptions::RecompilerOptions()
 	UseMacVU0 = false;
 	UseMacVU1 = false;
 
+	// Phase 2 microVU inline FMAC stall — OFF by default until verified.
+	Vu1InlineFmacStall = false;
+	// Phase 3 microVU cross-block pState propagation — OFF by default.
+	Vu1CrossBlockPState = false;
+
 	// vu and fpu clamping default to standard overflow.
 	vu0Overflow = true;
 	//vu0ExtraOverflow = false;
@@ -548,6 +553,9 @@ void Pcsx2Config::RecompilerOptions::LoadSave(SettingsWrapper& wrap)
 	SettingsWrapBitBool(UseMacIOP);
 	SettingsWrapBitBool(UseMacVU0);
 	SettingsWrapBitBool(UseMacVU1);
+
+	SettingsWrapBitBool(Vu1InlineFmacStall);
+	SettingsWrapBitBool(Vu1CrossBlockPState);
 
 	SettingsWrapBitBool(vu0Overflow);
 	SettingsWrapBitBool(vu0ExtraOverflow);

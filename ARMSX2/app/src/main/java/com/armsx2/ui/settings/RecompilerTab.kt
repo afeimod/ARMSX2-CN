@@ -96,6 +96,22 @@ fun RecompilerTab(state: MutableState<Settings>) {
                     apply(s.copy(useMacVU1 = it))
                 }
             }
+            Text(
+                "microVU pipeline-stall folding (port from mac) — replaces 17-32% of total CPU spent in vu1_TestFMAC* BLs with a compile-time inline Add. Default off until shadow-verify clean.",
+                color = Color(0xFFB0B0B0),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
+            )
+            BubbleGridRow {
+                ToggleBubble("VU1 Inline FMAC stall", s.vu1InlineFmacStall, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vu1InlineFmacStall = it))
+                }
+                ToggleBubble("VU1 X-block pState", s.vu1CrossBlockPState, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(vu1CrossBlockPState = it))
+                }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
+            }
         }
     }
 }
