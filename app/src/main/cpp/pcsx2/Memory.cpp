@@ -51,6 +51,10 @@ BIOS
 #include <TargetConditionals.h>
 #endif
 
+#ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+#define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
+
 namespace Ps2MemSize
 {
 	u32 ExposedRam = MainRam;
@@ -348,14 +352,16 @@ void memSetUserMode() {
 void ba0W16(u32 mem, u16 value)
 {
 	//MEM_LOG("ba000000 Memory write16 address %x value %x", mem, value);
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [iter230] TEMP_DIAG: DVE write trace
 	{
 		static u32 s_dve_w_n = 0;
 		if (s_dve_w_n++ < 40)
-			Console.WriteLn("@@DVE_W16@@ n=%u mem=%08x reg=%02x val=%04x cmd_exec=%d s_ba02=%02x s_ba06=%02x",
-				s_dve_w_n, mem, (unsigned)(mem & 0xFF), (unsigned)value,
-				(int)s_ba_command_executing, (unsigned)s_ba[0x2], (unsigned)s_ba[0x6]);
+				Console.WriteLn("@@DVE_W16@@ n=%u mem=%08x reg=%02x val=%04x cmd_exec=%d s_ba02=%02x s_ba06=%02x",
+					s_dve_w_n, mem, (unsigned)(mem & 0xFF), (unsigned)value,
+					(int)s_ba_command_executing, (unsigned)s_ba[0x2], (unsigned)s_ba[0x6]);
 	}
+#endif
 	u32 masked_mem = (mem & 0xFF);
 
 	if (masked_mem == 0x6) // Status Reg
@@ -413,13 +419,15 @@ void ba0W16(u32 mem, u16 value)
 
 u16 ba0R16(u32 mem)
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [iter230] TEMP_DIAG: DVE read trace
 	{
 		static u32 s_dve_r_n = 0;
 		if (s_dve_r_n++ < 20)
-			Console.WriteLn("@@DVE_R16@@ n=%u mem=%08x cmd_exec=%d s_ba06=%02x",
-				s_dve_r_n, mem, (int)s_ba_command_executing, (unsigned)s_ba[0x6]);
+				Console.WriteLn("@@DVE_R16@@ n=%u mem=%08x cmd_exec=%d s_ba06=%02x",
+					s_dve_r_n, mem, (int)s_ba_command_executing, (unsigned)s_ba[0x6]);
 	}
+#endif
 
 	if (mem == 0x1a000006)
 	{

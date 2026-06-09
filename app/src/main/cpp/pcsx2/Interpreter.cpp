@@ -14,6 +14,10 @@
 
 #include <float.h>
 
+#ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+#define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
+
 using namespace R5900;		// for OPCODE and OpcodeImpl
 
 extern int vu0branch, vu1branch;
@@ -229,6 +233,7 @@ static void execI()
 
 static __fi void _doBranch_shared(u32 tar)
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [TEMP_DIAG] @@DSLL_LOOP_INTERP@@ — log register state at DSLL loop target
 	// Removal condition: ギャップcauseafter identified
 	if (tar == 0x002659f0u) {
@@ -242,6 +247,7 @@ static __fi void _doBranch_shared(u32 tar)
 			s_il++;
 		}
 	}
+#endif
 	branch2 = cpuRegs.branch = 1;
 	execI();
 
@@ -292,6 +298,7 @@ static void doBranch( u32 target )
 {
 	_doBranch_shared( target );
 
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [iter652] @@INTERP_BIOS_TRACE@@ — Interpreter の BIOS ROM 実行パスを記録。
 	// JIT の @@BIOS_BLOCK_TRACE@@ と直接比較し、最初の分岐乖離を特定するため。
 	// 各 BIOS PC は初回到達時のみ記録（loop反復をskip）。cap=500。
@@ -317,6 +324,7 @@ static void doBranch( u32 target )
 			}
 		}
 	}
+#endif
 
 	intUpdateCPUCycles();
 	intEventTest();
@@ -380,6 +388,7 @@ namespace R5900 {
 namespace Interpreter {
 namespace OpcodeImpl {
 
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 static bool IsInterpJumpProbeEnabled()
 {
 	static int s_cached = -1;
@@ -406,9 +415,14 @@ static void LogInterpJumpProbe(const char* tag, u32 pc_now, u32 target, u32 link
 
 	Console.WriteLn(
 		"@@INTERP_JUMP_PROBE@@ idx=%d tag=%s pc=%08x target=%08x ra=%08x code=%08x rs=%u rs_val=%08x",
-		s_count, tag, pc_now, target, link31, code_now, rs, rs_val);
+			s_count, tag, pc_now, target, link31, code_now, rs, rs_val);
 	s_count++;
 }
+#else
+static void LogInterpJumpProbe(const char*, u32, u32, u32, u32, u32, u32)
+{
+}
+#endif
 
 /*********************************************************
 * Jump to target                                         *
@@ -635,6 +649,7 @@ void JR()
 			GoemonPreloadTlb();
 	}
 	LogInterpJumpProbe("JR", cpuRegs.pc, cpuRegs.GPR.r[_Rs_].UL[0], cpuRegs.GPR.n.ra.UL[0], cpuRegs.code, _Rs_, cpuRegs.GPR.r[_Rs_].UL[0]);
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [P9 TEMP_DIAG] @@JR_ZERO_PRE/RET@@ - target saved before doBranch to avoid false positives
 	const u32 jr_target = cpuRegs.GPR.r[_Rs_].UL[0];
 	{
@@ -650,9 +665,12 @@ void JR()
 		static int s_jr0_ret = 0;
 		if (s_jr0_ret < 10 && jr_target < 0x1000) {
 			Console.WriteLn("@@JR_ZERO_RET@@ #%d pc_after=%08x cycle=%u",
-				s_jr0_ret++, cpuRegs.pc, cpuRegs.cycle);
+			s_jr0_ret++, cpuRegs.pc, cpuRegs.cycle);
 		}
 	}
+#else
+	doBranch(cpuRegs.GPR.r[_Rs_].UL[0]);
+#endif
 }
 
 void JALR()
@@ -684,6 +702,7 @@ static void intReset()
 
 void intEventTest()
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [P9 TEMP_DIAG] @@INTET_ENTER@@ - log when cycle > 12000000 (critical vsync window), cap=20
 	{
 		static int s_et_hi = 0;
@@ -693,9 +712,11 @@ void intEventTest()
 				(int)intExitExecution, psxRegs.pc);
 		}
 	}
+#endif
 	// Perform counters, ints, and IOP updates:
 	_cpuEventTest_Shared();
 
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [P9 TEMP_DIAG] @@INTET_AFTER@@ - log after _cpuEventTest_Shared returns (same window)
 	{
 		static int s_et_after = 0;
@@ -705,6 +726,7 @@ void intEventTest()
 				(int)intExitExecution, psxRegs.pc);
 		}
 	}
+#endif
 
 	if (intExitExecution)
 	{
@@ -717,6 +739,7 @@ void intEventTest()
 
 static void intSafeExitExecution()
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [P9 TEMP_DIAG] @@INTERP_SAFE_EXIT@@ - log why/where intExecute is exiting
 	{
 		static int s_exit_count = 0;
@@ -726,6 +749,7 @@ static void intSafeExitExecution()
 			s_exit_count++;
 		}
 	}
+#endif
 	// If we're currently processing events, we can't safely jump out of the interpreter here, because we'll
 	// leave things in an inconsistent state. So instead, we flag it for exiting once cpuEventTest() returns.
 	if (eeEventTestIsActive)
@@ -746,6 +770,7 @@ static void intCancelInstruction()
 
 static void intExecute()
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [P9 TEMP_DIAG] @@INTERP_EXEC_ENTRY@@ - count how many times intExecute() is called
 	{
 		static int s_entry_count = 0;
@@ -753,14 +778,17 @@ static void intExecute()
 			Console.WriteLn("@@INTERP_EXEC_ENTRY@@ #%d booted=%d pc=%08x", s_entry_count++,
 				(int)VMManager::Internal::HasBootedELF(), cpuRegs.pc);
 	}
+#endif
 
 	// This will come back as zero the first time it runs, or on instruction cancel.
 	// It will come back as nonzero when we exit execution.
 	if (fastjmp_set(&intJmpBuf) != 0) {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 		// [P9 TEMP_DIAG] @@INTERP_JMP_RETURN@@ - fastjmp_jmp returned nonzero: intExecute exiting
 		static int s_jmp_count = 0;
 		if (s_jmp_count < 20)
 			Console.WriteLn("@@INTERP_JMP_RETURN@@ #%d pc=%08x cycle=%u", s_jmp_count++, cpuRegs.pc, cpuRegs.cycle);
+#endif
 		return;
 	}
 
@@ -775,6 +803,7 @@ static void intExecute()
 
 			while (true)
 			{
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 				// [iter_DB78_INTERP] @@INTERP_DB78@@ – Interpreter が 0x8000db78 到達時のregister
 				// 目的: JIT a0=0x02000000 vs Interpreter a0=? の差分特定 (cycle>25M以降のみ)
 				// Removal condition: EELOAD entry (0x82000 vs 0x82180) divergence root cause after determined
@@ -971,10 +1000,12 @@ static void intExecute()
 						s_sc_n++;
 					}
 				}
+#endif
 
-				execI();
+					execI();
 
-				// [P12 TEMP_DIAG] @@INTERP_9FC41268@@ + @@INTERP_9FC411C0@@ one-shot
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+					// [P12 TEMP_DIAG] @@INTERP_9FC41268@@ + @@INTERP_9FC411C0@@ one-shot
 				// 目的: 0x9FC41268 (フルbootfunction) への到達と 0x9FC411C0 (BGEZ return check) のverify
 				// Removal condition: JIT vs Interpreter 分岐点が 0x9FC41268 内に確定した後
 				{
@@ -1013,10 +1044,11 @@ static void intExecute()
 							Console.WriteLn("  r%02d=%08x", i, cpuRegs.GPR.r[i].UL[0]);
 						Console.WriteLn("@@COP0_DUMP_INTERP@@ status=%08x epc=%08x cause=%08x",
 							cpuRegs.CP0.r[12], cpuRegs.CP0.r[14], cpuRegs.CP0.r[13]);
+						}
 					}
-				}
+#endif
 
-				if (cpuRegs.pc == EELOAD_START)
+					if (cpuRegs.pc == EELOAD_START)
 				{
 					// The EELOAD _start function is the same across all BIOS versions afaik
 					const u32 mainjump = memRead32(EELOAD_START + 0x9c);

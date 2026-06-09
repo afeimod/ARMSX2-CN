@@ -728,6 +728,91 @@ void VMManager::WarnAboutUnconfiguredController()
 		TRANSLATE_STR("VMManager", "Controller 1 has no input bindings configured."), Host::OSD_WARNING_DURATION);
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+static void RestoreIOSMetalNativeGSHardwareFixes(const GameDatabaseSchema::GameEntry& game, Pcsx2Config::GSOptions& gs)
+{
+	if (gs.Renderer != GSRendererType::Metal || gs.UpscaleMultiplier > 1.0f)
+		return;
+
+	bool restored = false;
+	for (const auto& [id, value] : game.gsHWFixes)
+	{
+		switch (id)
+		{
+			case GameDatabaseSchema::GSHWFixId::AlignSprite:
+				gs.UserHacks_AlignSpriteX = (value > 0);
+				restored = true;
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::MergeSprite:
+				gs.UserHacks_MergePPSprite = (value > 0);
+				restored = true;
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::ForceEvenSpritePosition:
+				gs.UserHacks_ForceEvenSpritePosition = (value > 0);
+				restored = true;
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::BilinearUpscale:
+				if (value >= 0 && value < static_cast<int>(GSBilinearDirtyMode::MaxCount))
+				{
+					gs.UserHacks_BilinearHack = static_cast<GSBilinearDirtyMode>(value);
+					restored = true;
+				}
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::NativePaletteDraw:
+				gs.UserHacks_NativePaletteDraw = (value > 0);
+				restored = true;
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::HalfPixelOffset:
+				if (value >= 0 && value < static_cast<int>(GSHalfPixelOffset::MaxCount))
+				{
+					gs.UserHacks_HalfPixelOffset = static_cast<GSHalfPixelOffset>(value);
+					restored = true;
+				}
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::RoundSprite:
+				gs.UserHacks_RoundSprite = static_cast<s8>(value);
+				restored = true;
+				break;
+
+			case GameDatabaseSchema::GSHWFixId::NativeScaling:
+			{
+				int applied_value = value;
+				if (applied_value >= static_cast<int>(GSNativeScaling::Aggressive))
+					applied_value = static_cast<int>(GSNativeScaling::Normal);
+
+				if (applied_value >= 0 && applied_value < static_cast<int>(GSNativeScaling::MaxCount))
+				{
+					gs.UserHacks_NativeScaling = static_cast<GSNativeScaling>(applied_value);
+					restored = true;
+				}
+			}
+			break;
+
+			default:
+				break;
+		}
+	}
+
+	if (!restored)
+		return;
+
+	std::fprintf(stderr,
+		"@@IOS_METAL_NATIVE_GS_RESTORE@@ serial=\"%s\" game=\"%s\" halfPixelOffset=%d roundSprite=%d nativeScaling=%d alignSprite=%d mergeSprite=%d forceEvenSprite=%d bilinear=%d nativePalette=%d\n",
+		s_disc_serial.c_str(), game.name.c_str(), static_cast<int>(gs.UserHacks_HalfPixelOffset),
+		static_cast<int>(gs.UserHacks_RoundSprite), static_cast<int>(gs.UserHacks_NativeScaling),
+		gs.UserHacks_AlignSpriteX ? 1 : 0, gs.UserHacks_MergePPSprite ? 1 : 0,
+		gs.UserHacks_ForceEvenSpritePosition ? 1 : 0, static_cast<int>(gs.UserHacks_BilinearHack),
+		gs.UserHacks_NativePaletteDraw ? 1 : 0);
+	std::fflush(stderr);
+}
+#endif
+
 void VMManager::ApplyGameFixes()
 {
 	if (!HasBootedELF() && !GSDumpReplayer::IsReplayingDump())
@@ -785,6 +870,9 @@ void VMManager::ApplyGameFixes()
 	// Re-remove upscaling fixes, make sure they don't apply at native res.
 	// We do this in LoadCoreSettings(), but game fixes get applied afterwards because of the unsafe warning.
 	EmuConfig.GS.MaskUpscalingHacks();
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	RestoreIOSMetalNativeGSHardwareFixes(*game, EmuConfig.GS);
+#endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE
 	std::fprintf(stderr,
 		"@@IOS_GAMEFIX_APPLY_END@@ serial=\"%s\" disc_crc=0x%08x current_crc=0x%08x renderer=%s autoFlush=%d halfPixelOffset=%d alignSprite=%d nativeScaling=%d manualUserHacks=%d upscale=%.2f eeClamp=%u vuClamp=%u mvuFlag=%d instantVU1=%d mtvu=%d\n",
@@ -3370,7 +3458,7 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_PAINTBRUSH,
 				TRANSLATE_SV("VMManager", "Blending Accuracy is below Basic, this may break effects in some games."));
 		}
-		if (EmuConfig.GS.HWDownloadMode != GSHardwareDownloadMode::Enabled)
+		if (EmuConfig.GS.HWDownloadMode > GSHardwareDownloadMode::EnabledForceFull)
 		{
 			append(ICON_FA_DOWNLOAD,
 				TRANSLATE_SV("VMManager", "Hardware Download Mode is not set to Accurate, this may break rendering in some games."));
@@ -3755,23 +3843,39 @@ static void InitializeProcessorList()
 	}
 }
 
-void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
-{
-	VMManager::EnsureCPUInfoInitialized();
-
-	Console.WriteLn("Detected %u big cores", s_big_cores);
-
-	if (s_big_cores >= 3)
+	void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 	{
-		Console.WriteLn("  So enabling MTVU.");
-		si.SetBoolValue("EmuCore/Speedhacks", "vuThread", true);
+		VMManager::EnsureCPUInfoInitialized();
+
+#if TARGET_OS_IPHONE
+		const u32 total_physical_cores = s_big_cores + s_small_cores;
+		Console.WriteLn("Detected %u big cores and %u small cores", s_big_cores, s_small_cores);
+
+		if (total_physical_cores >= 3)
+		{
+			Console.WriteLn("  So enabling MTVU.");
+			si.SetBoolValue("EmuCore/Speedhacks", "vuThread", true);
+		}
+		else
+		{
+			Console.WriteLn("  So disabling MTVU.");
+			si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
+		}
+#else
+		Console.WriteLn("Detected %u big cores", s_big_cores);
+
+		if (s_big_cores >= 3)
+		{
+			Console.WriteLn("  So enabling MTVU.");
+			si.SetBoolValue("EmuCore/Speedhacks", "vuThread", true);
+		}
+		else
+		{
+			Console.WriteLn("  So disabling MTVU.");
+			si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
+		}
+#endif
 	}
-	else
-	{
-		Console.WriteLn("  So disabling MTVU.");
-		si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
-	}
-}
 
 #else
 

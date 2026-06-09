@@ -6,10 +6,12 @@
 #include <SDL3/SDL.h>
 
 extern "C" void ARMSX2_SetSDLFullscreen(bool enabled);
+extern "C" bool ARMSX2_IsSDLFullscreen();
 #include "Common.h"
 #include "CDVD/CDVD.h"
 #include "CDVD/CDVDcommon.h"
 #include "VMManager.h"
+#include "pcsx2/MTGS.h"
 #include "Patch.h"
 #include "Achievements.h"
 #include "SIO/Pad/Pad.h"
@@ -839,39 +841,7 @@ static NSString* ARMSX2CurrentCompatibilityIdentityKey()
 
 static NSString* ARMSX2CompatibilityBuiltInPreset(NSString* title, NSString* serial)
 {
-    NSString* haystack = [[NSString stringWithFormat:@"%@ %@", title ?: @"", serial ?: @""] lowercaseString];
-    if ([haystack containsString:@"grand theft auto"] ||
-        [haystack containsString:@"gta"] ||
-        [haystack containsString:@"slus-20946"] ||
-        [haystack containsString:@"sles-52541"] ||
-        [haystack containsString:@"sles-52542"] ||
-        [haystack containsString:@"sles-52543"] ||
-        [haystack containsString:@"sles-52544"] ||
-        [haystack containsString:@"sles-52545"])
-        return ARMSX2CompatibilityProfileMMI;
-
-    if ([haystack containsString:@"god of war"] ||
-        [haystack containsString:@"scus-97399"] ||
-        [haystack containsString:@"scus-97481"] ||
-        [haystack containsString:@"sces-53133"] ||
-        [haystack containsString:@"sces-54206"] ||
-        [haystack containsString:@"scaj-20190"] ||
-        [haystack containsString:@"scka-30006"] ||
-        [haystack containsString:@"slpm-67013"] ||
-        [haystack containsString:@"metal gear solid"] ||
-        [haystack containsString:@"slus-20144"] ||
-        [haystack containsString:@"slus-20554"] ||
-        [haystack containsString:@"slus-20915"] ||
-        [haystack containsString:@"sles-50383"] ||
-        [haystack containsString:@"sles-82042"] ||
-        [haystack containsString:@"sles-82043"] ||
-        [haystack containsString:@"sles-82044"] ||
-        [haystack containsString:@"budokai"] ||
-        [haystack containsString:@"dragon ball"] ||
-        [haystack containsString:@"naruto"])
-        return ARMSX2CompatibilityProfileCOP2VU;
-
-    return @"";
+    return ARMSX2CompatibilityProfileOff;
 }
 
 static NSString* ARMSX2SavedCompatibilityPreset(NSString* identity)
@@ -1249,6 +1219,12 @@ static void ARMSX2ApplyLiveGSIntSetting(const char* section, const char* key, in
         const int clamped = std::clamp(value, 0, static_cast<int>(TexturePreloadingLevel::Full));
         EmuConfig.GS.TexturePreloading = static_cast<TexturePreloadingLevel>(clamped);
         GSConfig.TexturePreloading = static_cast<TexturePreloadingLevel>(clamped);
+    } else if (std::strcmp(key, "UserHacks_SkipDraw_Start") == 0) {
+        EmuConfig.GS.SkipDrawStart = value;
+        GSConfig.SkipDrawStart = value;
+    } else if (std::strcmp(key, "UserHacks_SkipDraw_End") == 0) {
+        EmuConfig.GS.SkipDrawEnd = std::max(EmuConfig.GS.SkipDrawStart, value);
+        GSConfig.SkipDrawEnd = EmuConfig.GS.SkipDrawEnd;
     }
 }
 
@@ -1755,6 +1731,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     ARMSX2_SetSDLFullscreen(enabled ? true : false);
 }
 
++ (BOOL)isSDLFullscreen {
+    return ARMSX2_IsSDLFullscreen() ? YES : NO;
+}
+
 + (nonnull NSString *)buildVersion {
     NSString *ver = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleShortVersionString"] ?: @"?";
     return [NSString stringWithFormat:@"ARMSX2 iOS v%@", ver];
@@ -2183,6 +2163,12 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                         textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
                                         skipDrawStart, skipDrawEndOverride, skipDrawEnd, eeCoreType, mtvu,
                                         enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
+
+    if (VMManager::HasValidVM()) {
+        VMManager::ReloadGameSettings();
+        if (MTGS::IsOpen())
+            MTGS::ApplySettings();
+    }
 }
 
 + (nonnull NSString *)clearCacheForISO:(nonnull NSString *)isoName {

@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits.h>
 #include <mutex>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -26,17 +27,12 @@
 
 #include "fmt/format.h"
 
-#if defined(__FreeBSD__)
-#include "cpuinfo.h"
+#ifndef ARMSX2_ENABLE_MEMORY_MAP_DIAGNOSTICS
+#define ARMSX2_ENABLE_MEMORY_MAP_DIAGNOSTICS 0
 #endif
 
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-static constexpr intptr_t IOS_SHARED_MEMORY_DUMMY_HANDLE = static_cast<intptr_t>(0xDEADBEEF);
-
-static bool IsIOSSharedMemoryDummyHandle(void* ptr)
-{
-	return reinterpret_cast<intptr_t>(ptr) == IOS_SHARED_MEMORY_DUMMY_HANDLE;
-}
+#if defined(__FreeBSD__)
+#include "cpuinfo.h"
 #endif
 
 static __ri uint LinuxProt(const PageProtectionMode& mode)
@@ -75,6 +71,61 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 #endif
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
+static int CreateIOSFileBackedSharedMemory(const char* name, size_t size, int shm_errno)
+{
+	const char* tmpdir = std::getenv("TMPDIR");
+	if (!tmpdir || tmpdir[0] == '\0')
+		tmpdir = "/tmp";
+
+	for (int attempt = 0; attempt < 16; attempt++)
+	{
+		char path[PATH_MAX];
+		const int written = std::snprintf(path, sizeof(path), "%s/armsx2_%s_%u_%d.mem",
+			tmpdir, name, static_cast<unsigned>(getpid()), attempt);
+		if (written <= 0 || static_cast<size_t>(written) >= sizeof(path))
+			break;
+
+		const int fd = open(path, O_RDWR | O_CREAT | O_EXCL, 0600);
+		if (fd < 0)
+		{
+			if (errno == EEXIST)
+				continue;
+
+			std::fprintf(stderr,
+				"@@IOS_SHM_FILE_FALLBACK_FAIL@@ shm_open_errno=%d open_errno=%d path=\"%s\" size=%zu\n",
+				shm_errno, errno, path, size);
+			return -1;
+		}
+
+		if (fcntl(fd, F_SETFD, FD_CLOEXEC) != 0)
+			std::fprintf(stderr, "@@IOS_SHM_CLOEXEC_FAIL@@ errno=%d fd=%d\n", errno, fd);
+
+		if (ftruncate(fd, static_cast<off_t>(size)) < 0)
+		{
+			const int truncate_errno = errno;
+			unlink(path);
+			close(fd);
+			std::fprintf(stderr,
+				"@@IOS_SHM_FILE_FALLBACK_FAIL@@ shm_open_errno=%d ftruncate_errno=%d path=\"%s\" size=%zu\n",
+				shm_errno, truncate_errno, path, size);
+			return -1;
+		}
+
+		const int unlink_errno = (unlink(path) != 0) ? errno : 0;
+		std::fprintf(stderr,
+			"@@IOS_SHM_FILE_FALLBACK@@ shm_open_errno=%d fd=%d size=%zu path=\"%s\" unlink_errno=%d\n",
+			shm_errno, fd, size, path, unlink_errno);
+		return fd;
+	}
+
+	std::fprintf(stderr,
+		"@@IOS_SHM_FILE_FALLBACK_FAIL@@ shm_open_errno=%d reason=path_exhausted size=%zu\n",
+		shm_errno, size);
+	return -1;
+}
+#endif
+
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
 	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
@@ -82,9 +133,9 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 	{
 		const int shm_errno = errno;
 #if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-		std::fprintf(stderr, "@@IOS_SHM_FALLBACK@@ shm_open_errno=%d using anonymous MAP_FIXED backing for %zu bytes\n",
-			shm_errno, size);
-		return reinterpret_cast<void*>(IOS_SHARED_MEMORY_DUMMY_HANDLE);
+		const int file_fd = CreateIOSFileBackedSharedMemory(name, size, shm_errno);
+		if (file_fd >= 0)
+			return reinterpret_cast<void*>(static_cast<intptr_t>(file_fd));
 #endif
 		std::fprintf(stderr, "shm_open failed: %d\n", shm_errno);
 		return nullptr;
@@ -106,10 +157,6 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 
 void HostSys::DestroySharedMemory(void* ptr)
 {
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-	if (IsIOSSharedMemoryDummyHandle(ptr))
-		return;
-#endif
 	close(static_cast<int>(reinterpret_cast<intptr_t>(ptr)));
 }
 
@@ -215,27 +262,12 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 	pxAssert(static_cast<u8*>(map_base) >= m_base_ptr && static_cast<u8*>(map_base) < (m_base_ptr + m_size));
 
 	const uint lnxmode = LinuxProt(mode);
+#if ARMSX2_ENABLE_MEMORY_MAP_DIAGNOSTICS
 	std::fprintf(stderr, "@@SMA_MAP_BEGIN@@ file=%d offset=%zu base=%p size=%zu prot=0x%x\n",
 		file_handle ? 1 : 0, file_offset, map_base, map_size, lnxmode);
+#endif
 	if (file_handle)
 	{
-#if defined(__APPLE__) && TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
-		if (IsIOSSharedMemoryDummyHandle(file_handle))
-		{
-			void* const ptr = mmap(map_base, map_size, lnxmode, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
-			if (ptr == MAP_FAILED)
-			{
-				std::fprintf(stderr, "@@IOS_SHM_MAP_FAIL@@ offset=%zu base=%p size=%zu prot=0x%x err=%d\n",
-					file_offset, map_base, map_size, lnxmode, errno);
-				return nullptr;
-			}
-
-			m_num_mappings++;
-			std::fprintf(stderr, "@@IOS_SHM_MAP_OK@@ ptr=%p offset=%zu size=%zu prot=0x%x mappings=%zu\n",
-				ptr, file_offset, map_size, lnxmode, m_num_mappings);
-			return static_cast<u8*>(ptr);
-		}
-#endif
 		const int fd = static_cast<int>(reinterpret_cast<intptr_t>(file_handle));
 		// MAP_FIXED is okay here, since we've reserved the entire region, and *want* to overwrite the mapping.
 		void* const ptr = mmap(map_base, map_size, lnxmode, MAP_SHARED | MAP_FIXED, fd, static_cast<off_t>(file_offset));
@@ -261,8 +293,10 @@ u8* SharedMemoryMappingArea::Map(void* file_handle, size_t file_offset, void* ma
 	}
 
 	m_num_mappings++;
+#if ARMSX2_ENABLE_MEMORY_MAP_DIAGNOSTICS
 	std::fprintf(stderr, "@@SMA_MAP_OK@@ file=%d base=%p size=%zu prot=0x%x mappings=%zu\n",
 		file_handle ? 1 : 0, map_base, map_size, lnxmode, m_num_mappings);
+#endif
 	return static_cast<u8*>(map_base);
 }
 

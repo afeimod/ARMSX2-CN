@@ -333,6 +333,8 @@ static void mVUclampedArith(mV, const a64::VRegister& to, const a64::VRegister& 
 {
 	const a64::VRegister ct = t1.IsNone() ? RQSCRATCH : t1;
 	const int xyzw = isPS ? 0xf : 0x8;
+	if (!isPS)
+		armAsm->Mov(RQSCRATCH.Q(), to.Q());
 	mVUclamp3(mVU, to, ct, xyzw);
 	mVUclamp3(mVU, from, ct, xyzw);
 	if (isPS)
@@ -354,6 +356,9 @@ static void mVUclampedArith(mV, const a64::VRegister& to, const a64::VRegister& 
 			case mVU_MUL_OP: armAsm->Fmul(to.S(), to.S(), from.S()); break;
 			case mVU_DIV_OP: armAsm->Fdiv(to.S(), to.S(), from.S()); break;
 		}
+		armAsm->Ins(to.V4S(), 1, RQSCRATCH.V4S(), 1);
+		armAsm->Ins(to.V4S(), 2, RQSCRATCH.V4S(), 2);
+		armAsm->Ins(to.V4S(), 3, RQSCRATCH.V4S(), 3);
 	}
 	mVUclamp4(mVU, to, ct, xyzw);
 }

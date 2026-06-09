@@ -148,7 +148,7 @@ static void InitSettings(const std::string& dataRoot) {
         s_macos_settings->SetBoolValue("EmuCore/CPU", "EnableSparseMemory", true);
         s_macos_settings->SetStringValue("SPU2/Output", "Backend", "SDL");
         s_macos_settings->SetIntValue("EmuCore/GS", "VsyncQueueSize", 8);
-        s_macos_settings->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
+        s_macos_settings->SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
         s_macos_settings->Save();
     }
     Host::Internal::SetBaseSettingsLayer(s_macos_settings);
@@ -506,6 +506,76 @@ extern void GSResizeDisplayWindow(u32 width, u32 height, float scale);
 
 static std::vector<u8> s_imguiStandardFontData;
 
+static bool ARMSX2ShouldEnableMTVUByDefault(u32* physical_cores)
+{
+    u32 total_physical_cores = 0;
+    for (const DarwinMisc::CPUClass& cpu_class : DarwinMisc::GetCPUClasses())
+        total_physical_cores += cpu_class.num_physical;
+
+    if (physical_cores)
+        *physical_cores = total_physical_cores;
+
+    return total_physical_cores >= 3;
+}
+
+static void ARMSX2EnsureIOSSpeedhackDefaults(SettingsInterface* si, const char* reason)
+{
+    if (!si)
+        return;
+
+    bool changed = false;
+    if (!si->ContainsValue("EmuCore/Speedhacks", "WaitLoop")) {
+        si->SetBoolValue("EmuCore/Speedhacks", "WaitLoop", true);
+        changed = true;
+    }
+    if (!si->ContainsValue("EmuCore/Speedhacks", "IntcStat")) {
+        si->SetBoolValue("EmuCore/Speedhacks", "IntcStat", true);
+        changed = true;
+    }
+    if (!si->ContainsValue("EmuCore/Speedhacks", "vuFlagHack")) {
+        si->SetBoolValue("EmuCore/Speedhacks", "vuFlagHack", true);
+        changed = true;
+    }
+    if (!si->ContainsValue("EmuCore/Speedhacks", "vu1Instant")) {
+        si->SetBoolValue("EmuCore/Speedhacks", "vu1Instant", true);
+        changed = true;
+    }
+
+    u32 physical_cores = 0;
+    const bool default_mtvu = ARMSX2ShouldEnableMTVUByDefault(&physical_cores);
+    const bool has_vu_thread = si->ContainsValue("EmuCore/Speedhacks", "vuThread");
+    const bool has_legacy_mtvu = si->ContainsValue("EmuCore/Speedhacks", "MTVU");
+    const bool migrated = si->GetBoolValue("ARMSX2iOS/Migrations", "SpeedhackDefaultsV2", false);
+
+    if (!migrated) {
+        const bool current_vu_thread = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", default_mtvu);
+        const bool legacy_false_default =
+            has_legacy_mtvu && !si->GetBoolValue("EmuCore/Speedhacks", "MTVU", false) && !current_vu_thread;
+        const bool mtvu_value = (!has_vu_thread || legacy_false_default) ? default_mtvu : current_vu_thread;
+        si->SetBoolValue("EmuCore/Speedhacks", "vuThread", mtvu_value);
+        si->SetBoolValue("ARMSX2iOS/Migrations", "SpeedhackDefaultsV2", true);
+        std::fprintf(stderr,
+            "@@MTVU_DEFAULT@@ reason=%s physical=%u default=%d had_vuThread=%d had_legacy=%d legacy_false=%d value=%d\n",
+            reason, physical_cores, default_mtvu ? 1 : 0, has_vu_thread ? 1 : 0, has_legacy_mtvu ? 1 : 0,
+            legacy_false_default ? 1 : 0, mtvu_value ? 1 : 0);
+        changed = true;
+    } else {
+        const bool current_vu_thread = si->GetBoolValue("EmuCore/Speedhacks", "vuThread", default_mtvu);
+        std::fprintf(stderr,
+            "@@MTVU_DEFAULT@@ reason=%s physical=%u default=%d migrated=1 value=%d\n",
+            reason, physical_cores, default_mtvu ? 1 : 0, current_vu_thread ? 1 : 0);
+    }
+    std::fflush(stderr);
+
+    if (has_legacy_mtvu) {
+        si->DeleteValue("EmuCore/Speedhacks", "MTVU");
+        changed = true;
+    }
+
+    if (changed)
+        si->Save();
+}
+
 static void ARMSX2ConfigureImGuiFonts(const char* reason)
 {
     const std::string fontPath =
@@ -805,6 +875,7 @@ bool g_touchPadState[64] = {};
 
 // Persistent VM thread lifecycle
 static std::atomic<bool> s_vmThreadActive{false};   // true while VM is executing
+static std::atomic<unsigned int> s_vmHeartbeatGeneration{0};
 std::atomic<bool> s_requestVMStop{false};     // signal VM to stop from UI (extern for ARMSX2Bridge)
 static std::atomic<bool> s_requestVMBoot{false};     // signal VM thread to boot
 static std::mutex s_vmMutex;
@@ -2266,7 +2337,42 @@ namespace Host
     }
 
     // Only needed stubs for linking
-    bool CopyTextToClipboard(const std::string_view text) { return false; }
+    bool CopyTextToClipboard(const std::string_view text)
+    {
+        NSString* nsText = [[NSString alloc] initWithBytes:text.data()
+                                                    length:text.size()
+                                                  encoding:NSUTF8StringEncoding];
+        if (!nsText)
+            return false;
+
+        void (^copyBlock)(void) = ^{
+            UIPasteboard.generalPasteboard.string = nsText;
+        };
+
+        if ([NSThread isMainThread])
+            copyBlock();
+        else
+            dispatch_sync(dispatch_get_main_queue(), copyBlock);
+
+        return true;
+    }
+
+    std::string GetTextFromClipboard()
+    {
+        __block NSString* nsText = nil;
+        void (^pasteBlock)(void) = ^{
+            nsText = UIPasteboard.generalPasteboard.string;
+        };
+
+        if ([NSThread isMainThread])
+            pasteBlock();
+        else
+            dispatch_sync(dispatch_get_main_queue(), pasteBlock);
+
+        const char* utf8 = nsText ? [nsText UTF8String] : nullptr;
+        return utf8 ? std::string(utf8) : std::string();
+    }
+
     void OnOSDMessage(const std::string&, float, u32) {}
     void ReportError(const char*, const char*) {}
     bool ConfirmAction(const char*, const char*, const char*) { return true; }
@@ -2539,23 +2645,38 @@ namespace Host
     {
         static std::atomic<uint> s_last_metrics_frame{0};
         const uint frame = ::g_FrameCount;
+        const float fps = PerformanceMetrics::GetFPS();
+        const float internal_fps = PerformanceMetrics::GetInternalFPS();
+        const float speed = PerformanceMetrics::GetSpeed();
+        const float cpu_usage = PerformanceMetrics::GetCPUThreadUsage();
+        const float vu_usage = PerformanceMetrics::GetVUThreadUsage();
+        const float gs_usage = PerformanceMetrics::GetGSThreadUsage();
+        const float gpu_usage = PerformanceMetrics::GetGPUUsage();
+        const bool hot_sample =
+            (frame > 300 && fps < 58.0f) ||
+            cpu_usage >= 85.0f ||
+            vu_usage >= 35.0f ||
+            gs_usage >= 25.0f ||
+            gpu_usage >= 25.0f;
+        const uint min_frame_delta = hot_sample ? 60 : 300;
         uint last = s_last_metrics_frame.load(std::memory_order_relaxed);
-        if (frame < last + 60 && frame != 1)
+        if (last != 0 && frame < last + min_frame_delta)
             return;
         if (!s_last_metrics_frame.compare_exchange_strong(last, frame, std::memory_order_relaxed))
             return;
 
         std::fprintf(stderr,
-            "@@PERF@@ frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f gs=%.2f state=%d\n",
+            "@@PERF@@ frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f vu=%.2f gs=%.2f gpu=%.2f state=%d\n",
             frame,
             static_cast<unsigned long long>(PerformanceMetrics::GetFrameNumber()),
-            PerformanceMetrics::GetFPS(),
-            PerformanceMetrics::GetInternalFPS(),
-            PerformanceMetrics::GetSpeed(),
-            PerformanceMetrics::GetCPUThreadUsage(),
-            PerformanceMetrics::GetGSThreadUsage(),
+            fps,
+            internal_fps,
+            speed,
+            cpu_usage,
+            vu_usage,
+            gs_usage,
+            gpu_usage,
             static_cast<int>(VMManager::GetState()));
-        std::fflush(stderr);
     }
     void OnAchievementsLoginRequested(Achievements::LoginRequestReason) { ARMSX2_PostRetroAchievementsStateChanged(); }
     bool ShouldPreferHostFileSelector() { return false; }
@@ -2576,6 +2697,12 @@ namespace Host::Internal
 extern "C" void ARMSX2_SetSDLFullscreen(bool enabled) {
     if (Host::g_sdl_window)
         SDL_SetWindowFullscreen(Host::g_sdl_window, enabled);
+}
+
+extern "C" bool ARMSX2_IsSDLFullscreen() {
+    if (!Host::g_sdl_window)
+        return false;
+    return (SDL_GetWindowFlags(Host::g_sdl_window) & SDL_WINDOW_FULLSCREEN) != 0;
 }
 
 static void ARMSX2EnsureGameRenderViewOnMain(const char* reason) {
@@ -2976,7 +3103,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             s_settings_interface->SetBoolValue("EmuCore", "EnableFastBoot", true);
 
             // Speedhacks
-            s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "MTVU", false);
+            s_settings_interface->SetBoolValue("EmuCore/Speedhacks", "vuThread", ARMSX2ShouldEnableMTVUByDefault(nullptr));
 
             // RetroAchievements
             s_settings_interface->SetBoolValue("Achievements", "Enabled", false);
@@ -3041,6 +3168,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     if (!s_settings_interface->ContainsValue("ARMSX2iOS/Gamepad", "MultitapMode")) {
         s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
     }
+    ARMSX2EnsureIOSSpeedhackDefaults(s_settings_interface, "scene-connect");
     ARMSX2SanitizeFrameLimiterConfig("scene-connect");
     ARMSX2ApplyIOSMultitapConfig("scene-connect");
     s_settings_interface->Save();
@@ -3553,6 +3681,8 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             std::fflush(stderr);
             Console.WriteLn("[VM] VM Thread: boot signal received, preparing boot params...");
             s_vmThreadActive.store(true);
+            const unsigned int heartbeat_generation =
+                s_vmHeartbeatGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
 
             // --- Build boot parameters from INI ---
             VMBootParameters boot_params;
@@ -3634,6 +3764,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 Console.Error("CRITICAL: BIOS verification failed inside VM thread.");
                 Host::ReportErrorAsync("BIOS Error", "Validation failed.");
                 s_vmThreadActive.store(false);
+                s_vmHeartbeatGeneration.fetch_add(1, std::memory_order_acq_rel);
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2iOSVMDidShutdown" object:nil];
                 });
@@ -3683,13 +3814,16 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                     static_cast<int>(VMManager::GetState()), ::g_FrameCount);
                 std::fflush(stderr);
 
-                std::thread([]() {
-                    for (int sec = 1; sec <= 30; sec++) {
+                std::thread([heartbeat_generation]() {
+                    for (int sec = 1; sec <= 180; sec++) {
                         std::this_thread::sleep_for(std::chrono::seconds(1));
-                        if (!s_vmThreadActive.load(std::memory_order_relaxed))
+                        if (!s_vmThreadActive.load(std::memory_order_relaxed) ||
+                            s_vmHeartbeatGeneration.load(std::memory_order_acquire) != heartbeat_generation)
                             break;
+                        if (sec != 1 && (sec % 5) != 0)
+                            continue;
                         std::fprintf(stderr,
-                            "@@VM_HEARTBEAT@@ sec=%d state=%d frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f gs=%.2f ee_pc=0x%08x ee_cycle=%lld ee_next=%lld\n",
+                            "@@VM_HEARTBEAT@@ sec=%d state=%d frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f vu=%.2f gs=%.2f gpu=%.2f ee_pc=0x%08x ee_cycle=%lld ee_next=%lld\n",
                             sec,
                             static_cast<int>(VMManager::GetState()),
                             ::g_FrameCount,
@@ -3698,11 +3832,12 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                             PerformanceMetrics::GetInternalFPS(),
                             PerformanceMetrics::GetSpeed(),
                             PerformanceMetrics::GetCPUThreadUsage(),
+                            PerformanceMetrics::GetVUThreadUsage(),
                             PerformanceMetrics::GetGSThreadUsage(),
+                            PerformanceMetrics::GetGPUUsage(),
                             cpuRegs.pc,
                             static_cast<long long>(cpuRegs.cycle),
                             static_cast<long long>(cpuRegs.nextEventCycle));
-                        std::fflush(stderr);
                     }
                 }).detach();
 
@@ -3736,6 +3871,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
 
             // --- Post-shutdown: reset state, notify UI ---
             s_vmThreadActive.store(false);
+            s_vmHeartbeatGeneration.fetch_add(1, std::memory_order_acq_rel);
             s_requestVMStop.store(false);
             Console.WriteLn("[VM] VM Thread: shutdown complete, posting notification");
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -3867,9 +4003,13 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #ifndef ARMSX2_GIT_HASH
 #define ARMSX2_GIT_HASH "unknown"
 #endif
+#ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+#define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_pcsx2_27_gamedb_force_builtin_cover_return_v1\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_pcsx2_27_gow1_native_scaling_probe_v18\n");
+    fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation
     // @@BIOS_GATE@@ build_id=2026-01-14_13-30-00 bundle=(from_nsbundle)

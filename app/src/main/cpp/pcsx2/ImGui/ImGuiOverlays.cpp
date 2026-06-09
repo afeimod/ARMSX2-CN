@@ -88,7 +88,7 @@ extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay();
 extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity();
 extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine();
 
-static constexpr const char* ARMSX2_IOS_OSD_BRAND = "ARMSX2 iOS 2.0";
+static constexpr const char* ARMSX2_IOS_OSD_BRAND = "ARMSX2 iOS 2.1";
 static constexpr const char* ARMSX2_IOS_PCSX2_CORE_VERSION_FALLBACK = "2.7.394";
 
 static const char* ARMSX2IOSJitState(bool enabled)

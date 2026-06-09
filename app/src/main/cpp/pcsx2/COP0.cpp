@@ -4,6 +4,10 @@
 #include "Common.h"
 #include "COP0.h"
 
+#ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+#define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
+
 // Updates the CPU's mode of operation (either, Kernel, Supervisor, or User modes).
 // Currently the different modes are not implemented.
 // Given this function is called so much, it's commented out for now. (rama)
@@ -22,6 +26,7 @@ __ri void cpuUpdateOperationMode()
 
 void WriteCP0Status(u32 value)
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
     // [iter156] stderr→Console.WriteLn にchange: pcsx2_log.txt で BEV クリア履歴をverify
     // Removal condition: BEV クリアの有無とタイミング確定時
     static int status_log_count = 0;
@@ -72,6 +77,7 @@ void WriteCP0Status(u32 value)
         }
         status_log_count++;
     }
+#endif
 
 	COP0_UpdatePCCR();
 	cpuRegs.CP0.n.Status.val = value;
@@ -156,11 +162,13 @@ void COP0_DiagnosticPCCR()
 		Console.Warning("PERF/PCR1 Unsupported Update Event Mode = 0x%x", cpuRegs.PERF.n.pccr.b.Event1);
 }
 extern int branch;
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 static int s_tlbwi_probe_cfg = -1;
 static bool s_tlbwi_probe_wi_done = false;
 static bool s_tlbwi_probe_wr_done = false;
 static int s_tlbwi_probe_wi_count = 0;
 static int s_tlbwi_probe_wr_count = 0;
+#endif
 __fi void COP0_UpdatePCCR()
 {
 	// Counting and counter exceptions are not performed if we are currently executing a Level 2 exception (ERL)
@@ -296,6 +304,7 @@ void MapTLB(const tlbs& t, int i)
 	u32 mask, addr;
 	u32 saddr, eaddr;
 
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// @@MAPTLB_PROBE@@ count MapTLB calls, log first 200 with VPN2/Mask
 	{
 		static std::atomic<u32> s_maptlb_cnt{0};
@@ -328,10 +337,11 @@ void MapTLB(const tlbs& t, int i)
 		if (!s_valid_seen && (t.EntryLo0.V || t.EntryLo1.V))
 		{
 			s_valid_seen = true;
-			Console.WriteLn("[TEMP_DIAG] @@MAPTLB_VALID@@ FIRST_VALID idx=%d vaddr=%08x pfn0=%08x pfn1=%08x lo0=%08x lo1=%08x mask=%08x pc=%08x",
-				i, t.VPN2(), t.PFN0(), t.PFN1(), t.EntryLo0.UL, t.EntryLo1.UL, t.Mask(), cpuRegs.pc);
+				Console.WriteLn("[TEMP_DIAG] @@MAPTLB_VALID@@ FIRST_VALID idx=%d vaddr=%08x pfn0=%08x pfn1=%08x lo0=%08x lo1=%08x mask=%08x pc=%08x",
+					i, t.VPN2(), t.PFN0(), t.PFN1(), t.EntryLo0.UL, t.EntryLo1.UL, t.Mask(), cpuRegs.pc);
 		}
 	}
+#endif
 
 	COP0_LOG("MAP TLB %d: 0x%08X-> [0x%08X 0x%08X] S=%d G=%d ASID=%d Mask=0x%03X EntryLo0 PFN=%x EntryLo0 Cache=%x EntryLo1 PFN=%x EntryLo1 Cache=%x VPN2=%x",
 		i, t.VPN2(), t.PFN0(), t.PFN1(), t.isSPR() >> 31, t.isGlobal(), t.EntryHi.ASID,
@@ -493,6 +503,7 @@ void UnmapTLB(const tlbs& t, int i)
 
 void WriteTLB(int i)
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	// [iter217] Debug: trace WriteTLB calls - total count + selected entries
 	{
 		static u32 s_wt_total = 0;
@@ -511,6 +522,7 @@ void WriteTLB(int i)
 			s_wt_log++;
 		}
 	}
+#endif
 	tlb[i].PageMask.UL = cpuRegs.CP0.n.PageMask;
 	tlb[i].EntryHi.UL = cpuRegs.CP0.n.EntryHi;
 	tlb[i].EntryLo0.UL = cpuRegs.CP0.n.EntryLo0;
@@ -584,11 +596,12 @@ namespace COP0 {
 
 
 
-		void TLBWI()
-		{
-			if (s_tlbwi_probe_cfg < 0)
+			void TLBWI()
 			{
-				s_tlbwi_probe_cfg = iPSX2_GetRuntimeEnvBool("iPSX2_TLBWI_PROBE", false) ? 1 : 0;
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+				if (s_tlbwi_probe_cfg < 0)
+				{
+					s_tlbwi_probe_cfg = iPSX2_GetRuntimeEnvBool("iPSX2_TLBWI_PROBE", false) ? 1 : 0;
 				Console.WriteLn("@@CFG@@ iPSX2_TLBWI_PROBE=%d", s_tlbwi_probe_cfg);
 			}
 			if (s_tlbwi_probe_cfg == 1 && !s_tlbwi_probe_wi_done)
@@ -603,12 +616,13 @@ namespace COP0 {
 			}
 			if (s_tlbwi_probe_cfg == 1 && s_tlbwi_probe_wi_count < 16)
 			{
-				Console.Error("@@TLBWI_TRACE@@ op=TLBWI n=%d pc=%08x index=%08x entryHi=%08x entryLo0=%08x entryLo1=%08x pageMask=%08x badVAddr=%08x",
-					s_tlbwi_probe_wi_count, cpuRegs.pc, cpuRegs.CP0.n.Index, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryLo0,
-					cpuRegs.CP0.n.EntryLo1, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.BadVAddr);
-				s_tlbwi_probe_wi_count++;
-			}
-			const u8 j = cpuRegs.CP0.n.Index & 0x3f;
+					Console.Error("@@TLBWI_TRACE@@ op=TLBWI n=%d pc=%08x index=%08x entryHi=%08x entryLo0=%08x entryLo1=%08x pageMask=%08x badVAddr=%08x",
+						s_tlbwi_probe_wi_count, cpuRegs.pc, cpuRegs.CP0.n.Index, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryLo0,
+						cpuRegs.CP0.n.EntryLo1, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.BadVAddr);
+					s_tlbwi_probe_wi_count++;
+				}
+#endif
+				const u8 j = cpuRegs.CP0.n.Index & 0x3f;
 
 		if (j > 47)
 		{
@@ -625,11 +639,10 @@ namespace COP0 {
 			cpuRegs.CP0.n.Index, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.EntryHi,
 			cpuRegs.CP0.n.EntryLo0, cpuRegs.CP0.n.EntryLo1);
 
-		// iter35: @@TLBWI_IDX41@@ — 第2TLBloop(Index>=41)のcallをトレースしs1停滞をverify
-		// Removal condition: loop脱出root causeafter determined
-		{
-			static int s_cfg = -1;
-			static u32 s_n = 0;
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+			{
+				static int s_cfg = -1;
+				static u32 s_n = 0;
 			if (s_cfg < 0) {
 				s_cfg = std::getenv("iPSX2_TLBWI_IDX41_PROBE") ? 1 : 0;
 				Console.WriteLn("@@CFG@@ iPSX2_TLBWI_IDX41_PROBE=%d", s_cfg);
@@ -637,19 +650,21 @@ namespace COP0 {
 			if (s_cfg == 1 && j >= 41 && s_n < 10) {
 				Console.WriteLn("[TEMP_DIAG] @@TLBWI_IDX41@@ n=%u index=%u s1=%u pc=%08x",
 					s_n, (unsigned)j, cpuRegs.GPR.r[17].UL[0], cpuRegs.pc);
-				s_n++;
+					s_n++;
+				}
 			}
-		}
+#endif
 
-		UnmapTLB(tlb[j], j);
+			UnmapTLB(tlb[j], j);
 		WriteTLB(j);
 	}
 
-		void TLBWR()
-		{
-			if (s_tlbwi_probe_cfg < 0)
+			void TLBWR()
 			{
-				s_tlbwi_probe_cfg = iPSX2_GetRuntimeEnvBool("iPSX2_TLBWI_PROBE", false) ? 1 : 0;
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+				if (s_tlbwi_probe_cfg < 0)
+				{
+					s_tlbwi_probe_cfg = iPSX2_GetRuntimeEnvBool("iPSX2_TLBWI_PROBE", false) ? 1 : 0;
 				Console.WriteLn("@@CFG@@ iPSX2_TLBWI_PROBE=%d", s_tlbwi_probe_cfg);
 			}
 			if (s_tlbwi_probe_cfg == 1 && !s_tlbwi_probe_wr_done)
@@ -664,12 +679,13 @@ namespace COP0 {
 			}
 			if (s_tlbwi_probe_cfg == 1 && s_tlbwi_probe_wr_count < 16)
 			{
-				Console.Error("@@TLBWI_TRACE@@ op=TLBWR n=%d pc=%08x random=%08x entryHi=%08x entryLo0=%08x entryLo1=%08x pageMask=%08x badVAddr=%08x",
-					s_tlbwi_probe_wr_count, cpuRegs.pc, cpuRegs.CP0.n.Random, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryLo0,
-					cpuRegs.CP0.n.EntryLo1, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.BadVAddr);
-				s_tlbwi_probe_wr_count++;
-			}
-			const u8 j = cpuRegs.CP0.n.Random & 0x3f;
+					Console.Error("@@TLBWI_TRACE@@ op=TLBWR n=%d pc=%08x random=%08x entryHi=%08x entryLo0=%08x entryLo1=%08x pageMask=%08x badVAddr=%08x",
+						s_tlbwi_probe_wr_count, cpuRegs.pc, cpuRegs.CP0.n.Random, cpuRegs.CP0.n.EntryHi, cpuRegs.CP0.n.EntryLo0,
+						cpuRegs.CP0.n.EntryLo1, cpuRegs.CP0.n.PageMask, cpuRegs.CP0.n.BadVAddr);
+					s_tlbwi_probe_wr_count++;
+				}
+#endif
+				const u8 j = cpuRegs.CP0.n.Random & 0x3f;
 
 		if (j > 47)
 		{
@@ -952,8 +968,7 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 			cpuRegs.CP0.n.Status.b.EXL = 0;
 		}
 
-        // [TEMP_DIAG] @@ERET_TO_NULL@@ — ERET to PC < 0x1000 detection
-        // Removal condition: PC=0 到達causeafter identified
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
         if (cpuRegs.pc < 0x1000u) {
             static int s_eret_null_n = 0;
             if (s_eret_null_n++ < 5) {
@@ -979,9 +994,6 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
             }
         }
 
-        // [iter659] @@ERET_EELOAD@@ — ERET returns to EELOAD area (0x82000-0x90000)
-        // 目的: LoadExecPS2 SYSCALL 後に JIT/Interp がどの PC に戻るか比較
-        // Removal condition: EELOAD SYSCALL sequence divergence root cause after identified
         {
             const u32 phys_pc = cpuRegs.pc & 0x1FFFFFFFu;
             if (phys_pc >= 0x00082000u && phys_pc < 0x00090000u) {
@@ -997,8 +1009,9 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
                 }
             }
         }
+#endif
 
-		cpuUpdateOperationMode();
+			cpuUpdateOperationMode();
 		cpuSetNextEventDelta(4);
 		intSetBranch();
 	}
@@ -1014,13 +1027,12 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 		}
 	}
 
-	void EI()
-	{
-		// [iter_EI_PROBE] @@EE_EI_CALL@@: log EI call context (cap=30)
-		// Removal condition: EIcallとstatus変化がJIT/Interpreter両modeでverifyできたら
+		void EI()
 		{
-			static u32 s_ei_count = 0;
-			if (s_ei_count < 30) {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+			{
+				static u32 s_ei_count = 0;
+				if (s_ei_count < 30) {
 				++s_ei_count;
 				const bool jit_mode = (Cpu != &intCpu);
 				Console.WriteLn("@@EE_EI_CALL@@ n=%u [%s] pc=%08x status=%08x edi=%d exl=%d erl=%d ksu=%d eie=%d ie=%d",
@@ -1031,10 +1043,11 @@ cpuRegs.PERF.n.pccr, cpuRegs.PERF.n.pcr0, cpuRegs.PERF.n.pcr1, _Imm_ & 0x3F);*/
 					(int)cpuRegs.CP0.n.Status.b.ERL,
 					(int)cpuRegs.CP0.n.Status.b.KSU,
 					(int)cpuRegs.CP0.n.Status.b.EIE,
-					(int)cpuRegs.CP0.n.Status.b.IE);
+						(int)cpuRegs.CP0.n.Status.b.IE);
+				}
 			}
-		}
-		if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
+#endif
+			if (cpuRegs.CP0.n.Status.b._EDI || cpuRegs.CP0.n.Status.b.EXL ||
 			cpuRegs.CP0.n.Status.b.ERL || (cpuRegs.CP0.n.Status.b.KSU == 0))
 		{
 			cpuRegs.CP0.n.Status.b.EIE = 1;

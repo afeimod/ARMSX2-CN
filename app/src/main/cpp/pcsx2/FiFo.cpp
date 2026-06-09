@@ -9,6 +9,10 @@
 #include "Vif.h"
 #include "Vif_Dma.h"
 
+#ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
+#define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
+
 //////////////////////////////////////////////////////////////////////////
 /////////////////////////// Quick & dirty FIFO :D ////////////////////////
 //////////////////////////////////////////////////////////////////////////
@@ -121,15 +125,14 @@ void WriteFIFO_VIF1(const mem128_t* value)
 	pxAssertMsg(ret, "vif stall code not implemented");
 }
 
-// [TEMP_DIAG] GIF FIFO write counter
-// Removal condition: BIOS browserafter confirmed
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 volatile uint32_t g_gif_fifo_write_count = 0;
+#endif
 
 void WriteFIFO_GIF(const mem128_t* value)
 {
+#if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	g_gif_fifo_write_count++;
-	// [TEMP_DIAG] @@GIF_FIFO_DATA@@ — dump first 140 FIFO writes for JIT/Interp comparison
-	// Removal condition: BIOS browserafter confirmed
 	{
 		static u32 s_fifo_log_n = 0;
 		if (s_fifo_log_n < 140) {
@@ -138,6 +141,7 @@ void WriteFIFO_GIF(const mem128_t* value)
 			s_fifo_log_n++;
 		}
 	}
+#endif
 	GUNIT_LOG("WriteFIFO_GIF()");
 	if ((!gifUnit.CanDoPath3() || gif_fifo.fifoSize > 0))
 	{
