@@ -4906,26 +4906,49 @@ static void emitFmacInstanceWriterCommit(const armvu1ir::microOp& mo,
 	}
 }
 
-// Block prologue init: pre-load all 4 instance slots with the entry-time
-// VI[REG_MAC/STATUS/CLIP] value so the first 4 pairs' reader-side commits
-// (which can hit any of slots 0..3 per the findFlagInst {0,1,2,3} init)
-// return the right cross-block value instead of garbage. 12 Strs of pinned
-// regs to slot offsets; pinned regs are already loaded with VI memory by
-// the prologue's emitReloadFlagRegs.
+// Block prologue init: pre-load all 4 instance slots with the cross-block
+// delayed view of mac/status/clip — VI[REG_MAC/STATUS/CLIP] memory.
+//
+// Pinned w19/w20/w28 hold VU->macflag / VU->statusflag / VU->clipflag (the
+// PRIVATE fields), which are the EAGER last-computed values from the
+// predecessor block's last FMAC writeback. VI[REG_MAC/STATUS/CLIP] memory
+// is a SEPARATE location, written by the helper drain (in pre-routing) at
+// slot maturity — that's the 4-cycle-DELAYED view, and lower op readers
+// (FMAND / FSAND / FCAND / FBxx) Ldrh from there expecting the delayed
+// value.
+//
+// Earlier init used the pinned regs, which fed eager values into slot[0..3].
+// The first 4 pairs' reader commits then Strd those eager values to VI[REG_*]
+// memory at every pair, clobbering the cross-block delayed view. BIOS
+// pillars worked but GoW2 floors/walls didn't — game compiler scheduled
+// FCAND with the assumption that VI[REG_CLIP_FLAG] held the pre-routing-
+// drain-style delayed value across the block boundary, but my eager init
+// gave it a routed-but-still-computed-by-previous-block value.
+//
+// Reading from VI memory keeps the pre-routing "delayed view in VI memory"
+// semantic across block links. 3 extra Ldrs (one per flag type), then the
+// 12 Strs are unchanged.
 static void emitFmacInstanceBlockInit()
 {
 	const int64_t f_macflag    = (int64_t)offsetof(fmacPipe, macflag);
 	const int64_t f_statusflag = (int64_t)offsetof(fmacPipe, statusflag);
 	const int64_t f_clipflag   = (int64_t)offsetof(fmacPipe, clipflag);
+	const int64_t vi_mac_off    = (int64_t)offsetof(VURegs, VI)
+	                            + REG_MAC_FLAG    * (int64_t)sizeof(REG_VI);
+	const int64_t vi_status_off = (int64_t)offsetof(VURegs, VI)
+	                            + REG_STATUS_FLAG * (int64_t)sizeof(REG_VI);
+	const int64_t vi_clip_off   = (int64_t)offsetof(VURegs, VI)
+	                            + REG_CLIP_FLAG   * (int64_t)sizeof(REG_VI);
+
+	armAsm->Ldr(w4, MemOperand(VU1_BASE_REG, vi_mac_off));
+	armAsm->Ldr(w5, MemOperand(VU1_BASE_REG, vi_status_off));
+	armAsm->Ldr(w6, MemOperand(VU1_BASE_REG, vi_clip_off));
 
 	for (int inst = 0; inst < 4; inst++)
 	{
-		armAsm->Str(VU1_MACFLAG_REG,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_macflag)));
-		armAsm->Str(VU1_STATUSFLAG_REG,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_statusflag)));
-		armAsm->Str(VU1_CLIPFLAG_REG,
-			MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_clipflag)));
+		armAsm->Str(w4, MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_macflag)));
+		armAsm->Str(w5, MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_statusflag)));
+		armAsm->Str(w6, MemOperand(VU1_BASE_REG, fmacInstanceOff(inst, f_clipflag)));
 	}
 }
 
