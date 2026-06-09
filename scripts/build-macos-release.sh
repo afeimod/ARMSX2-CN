@@ -8,6 +8,7 @@ BACKEND_BUILD_DIR="${BACKEND_BUILD_DIR:-$ROOT_DIR/build-release}"
 BUILD_FFMPEG="${BUILD_FFMPEG:-0}"
 USE_LINKED_FFMPEG="${USE_LINKED_FFMPEG:-OFF}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+PACKAGE_RELEASE="${PACKAGE_RELEASE:-1}"
 NPROCS="$(sysctl -n hw.ncpu)"
 
 sign_macho_files() {
@@ -65,3 +66,7 @@ codesign --force --sign "$SIGN_IDENTITY" "$BACKEND_APP"
 codesign --verify --deep --strict --verbose=2 "$BACKEND_APP"
 
 BACKEND_APP_SOURCE="$BACKEND_APP" REQUIRE_BACKEND=1 "$ROOT_DIR/scripts/build-macos-ui.sh"
+
+if [[ "$PACKAGE_RELEASE" == "1" ]]; then
+	BUILD_APP=0 "$ROOT_DIR/scripts/package-macos-release.sh"
+fi

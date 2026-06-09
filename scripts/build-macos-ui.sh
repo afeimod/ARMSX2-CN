@@ -13,17 +13,41 @@ IOS_ICON_SOURCE="${IOS_ICON_SOURCE:-$ROOT_DIR/../ARMSX2-iOS-pcsx2-2.7-core/app/s
 REQUIRE_BACKEND="${REQUIRE_BACKEND:-0}"
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 SKIP_CODESIGN="${SKIP_CODESIGN:-0}"
+ENTITLEMENTS_FILE="${ENTITLEMENTS_FILE:-$ROOT_DIR/pcsx2/Resources/PCSX2.entitlements}"
+
+codesign_common_args() {
+	if [[ "$SIGN_IDENTITY" == "-" ]]; then
+		printf '%s\n' "--timestamp=none"
+	else
+		printf '%s\n' "--timestamp"
+		printf '%s\n' "--options"
+		printf '%s\n' "runtime"
+	fi
+}
+
+codesign_with_identity() {
+	local entitlements_mode="$1"
+	shift
+	local args=()
+	while IFS= read -r arg; do
+		args+=("$arg")
+	done < <(codesign_common_args)
+	if [[ "$entitlements_mode" == "entitlements" && -f "$ENTITLEMENTS_FILE" ]]; then
+		args+=("--entitlements" "$ENTITLEMENTS_FILE")
+	fi
+	codesign --force --sign "$SIGN_IDENTITY" "${args[@]}" "$@"
+}
 
 sign_macho_files() {
 	local root="$1"
 
 	while IFS= read -r -d '' item; do
-		if [[ "$item" == *".app/Contents/MacOS/"* ]]; then
+		if [[ "$item" == *".app/Contents/MacOS/"* || "$item" == *".app/Contents/_CodeSignature/"* ]]; then
 			continue
 		fi
 		if file "$item" | grep -q "Mach-O"; then
 			codesign --remove-signature "$item" >/dev/null 2>&1 || true
-			codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$item"
+			codesign_with_identity none "$item"
 		fi
 	done < <(find "$root" -type f -print0)
 }
@@ -148,12 +172,12 @@ if [[ "$SKIP_CODESIGN" != "1" ]]; then
 	if [[ -d "$HELPERS" ]]; then
 		sign_macho_files "$HELPERS"
 		while IFS= read -r -d '' helper_app; do
-			codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$helper_app"
+			codesign_with_identity entitlements "$helper_app"
 		done < <(find "$HELPERS" -type d -name "*.app" -print0)
 	fi
 
-	codesign --force --sign "$SIGN_IDENTITY" --timestamp=none "$MACOS/ARMSX2Mac"
-	codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp=none "$APP_DIR"
+	codesign_with_identity none "$MACOS/ARMSX2Mac"
+	codesign_with_identity entitlements "$APP_DIR"
 	codesign --verify --deep --strict --verbose=2 "$APP_DIR"
 fi
 
