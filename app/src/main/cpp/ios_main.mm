@@ -745,17 +745,66 @@ static bool ARMSX2GetConfiguredFastBoot()
         s_settings_interface->GetBoolValue("EmuCore", "EnableFastBoot", false));
 }
 
+static int ARMSX2GetIOSMajorVersion()
+{
+    NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+    return static_cast<int>(version.majorVersion);
+}
+
+static const char* ARMSX2DefaultJITScriptProtocol()
+{
+    return ARMSX2GetIOSMajorVersion() >= 26 ? "universal" : "legacy";
+}
+
+static std::string ARMSX2NormalizeJITScriptProtocol(std::string jitProtocol)
+{
+    std::transform(jitProtocol.begin(), jitProtocol.end(), jitProtocol.begin(), ::tolower);
+    if (jitProtocol == "utm-dolphin" || jitProtocol == "utm_dolphin")
+        return "legacy";
+    if (jitProtocol == "legacy" || jitProtocol == "universal")
+        return jitProtocol;
+    return {};
+}
+
+static void ARMSX2MigrateJITScriptProtocolForIOS(SettingsInterface* si, const char* reason)
+{
+    if (!si)
+        return;
+
+    const int iosMajor = ARMSX2GetIOSMajorVersion();
+    const char* defaultProtocol = ARMSX2DefaultJITScriptProtocol();
+    const bool hadProtocol = si->ContainsValue("ARMSX2iOS/JIT", "ScriptProtocol");
+    const bool migrated = si->GetBoolValue("ARMSX2iOS/Migrations", "JITScriptProtocolByOSV1", false);
+    const std::string currentProtocol = ARMSX2NormalizeJITScriptProtocol(
+        si->GetStringValue("ARMSX2iOS/JIT", "ScriptProtocol", defaultProtocol));
+
+    if (!hadProtocol || (!migrated && iosMajor > 0 && iosMajor < 26 && currentProtocol == "universal")) {
+        si->SetStringValue("ARMSX2iOS/JIT", "ScriptProtocol", defaultProtocol);
+        si->SetBoolValue("ARMSX2iOS/Migrations", "JITScriptProtocolByOSV1", true);
+        si->Save();
+        std::fprintf(stderr,
+            "@@JIT_PROTOCOL_MIGRATE@@ reason=%s ios_major=%d had=%d from=%s to=%s\n",
+            reason ? reason : "unknown", iosMajor, hadProtocol ? 1 : 0, currentProtocol.c_str(), defaultProtocol);
+        std::fflush(stderr);
+        return;
+    }
+
+    if (!migrated) {
+        si->SetBoolValue("ARMSX2iOS/Migrations", "JITScriptProtocolByOSV1", true);
+        si->Save();
+    }
+}
+
 static std::string ARMSX2ResolveJITScriptProtocol()
 {
-    std::string jitProtocol = "universal";
+    std::string jitProtocol = ARMSX2DefaultJITScriptProtocol();
     if (s_settings_interface)
     {
-        jitProtocol = s_settings_interface->GetStringValue("ARMSX2iOS/JIT", "ScriptProtocol", "universal");
-        std::transform(jitProtocol.begin(), jitProtocol.end(), jitProtocol.begin(), ::tolower);
-        if (jitProtocol == "utm-dolphin" || jitProtocol == "utm_dolphin")
-            jitProtocol = "legacy";
-        else if (jitProtocol != "legacy" && jitProtocol != "universal")
-            jitProtocol = s_settings_interface->GetBoolValue("ARMSX2iOS/JIT", "UseUniversalJITScript", true) ? "universal" : "legacy";
+        jitProtocol = ARMSX2NormalizeJITScriptProtocol(
+            s_settings_interface->GetStringValue("ARMSX2iOS/JIT", "ScriptProtocol", ARMSX2DefaultJITScriptProtocol()));
+        if (jitProtocol != "legacy" && jitProtocol != "universal")
+            jitProtocol = s_settings_interface->GetBoolValue(
+                "ARMSX2iOS/JIT", "UseUniversalJITScript", ARMSX2GetIOSMajorVersion() >= 26) ? "universal" : "legacy";
     }
     return jitProtocol;
 }
@@ -764,9 +813,27 @@ static void ARMSX2ApplyJITScriptProtocol(const char* reason)
 {
     const std::string jitProtocol = ARMSX2ResolveJITScriptProtocol();
     setenv("ARMSX2_JIT_PROTOCOL", jitProtocol.c_str(), 1);
-    std::fprintf(stderr, "@@JIT_PROTOCOL_SELECTED@@ reason=%s protocol=%s\n",
-        reason ? reason : "unknown", jitProtocol.c_str());
+    std::fprintf(stderr, "@@JIT_PROTOCOL_SELECTED@@ reason=%s ios_major=%d protocol=%s\n",
+        reason ? reason : "unknown", ARMSX2GetIOSMajorVersion(), jitProtocol.c_str());
     std::fflush(stderr);
+}
+
+static bool ARMSX2IOSRuntimeTelemetryEnabled()
+{
+    static std::atomic<int> s_enabled{-1};
+    int enabled = s_enabled.load(std::memory_order_acquire);
+    if (enabled >= 0)
+        return enabled == 1;
+
+    const char* value = std::getenv("iPSX2_IOS_PERF_TELEMETRY");
+    if (!value || !value[0])
+        value = std::getenv("SIMCTL_CHILD_iPSX2_IOS_PERF_TELEMETRY");
+
+    enabled = (value && std::strcmp(value, "1") == 0) ? 1 : 0;
+    int expected = -1;
+    if (!s_enabled.compare_exchange_strong(expected, enabled, std::memory_order_acq_rel))
+        enabled = expected;
+    return enabled == 1;
 }
 
 static double ARMSX2IOSGetAppRAMGB()
@@ -795,33 +862,44 @@ static const char* ARMSX2IOSHeatStateName(NSProcessInfoThermalState state)
     }
 }
 
-extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay()
+static constexpr bool ARMSX2IOSRetroAchievementsHardcoreAvailable = false;
+
+static void ARMSX2DisableRetroAchievementsHardcoreForIOS(SettingsInterface* si, const char* reason)
 {
-    return s_settings_interface ?
-        s_settings_interface->GetBoolValue("ARMSX2iOS/UI", "OsdShowDeviceStats", true) : true;
+    if (!si)
+        return;
+
+    const bool was_hardcore = si->GetBoolValue("Achievements", "ChallengeMode", false);
+    si->SetBoolValue("Achievements", "ChallengeMode", false);
+
+    if (was_hardcore) {
+        Console.Warning("@@RA_IOS_HARDCORE_DISABLED@@ reason=%s",
+            reason ? reason : "unknown");
+    }
 }
 
-extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity()
+struct ARMSX2IOSDeviceStatsCache
 {
-    const NSProcessInfoThermalState thermal_state = [[NSProcessInfo processInfo] thermalState];
-    const float battery = [[UIDevice currentDevice] batteryLevel];
-    if (thermal_state >= NSProcessInfoThermalStateSerious || (battery >= 0.0f && battery <= 0.15f))
-        return 2;
-    if (thermal_state == NSProcessInfoThermalStateFair || (battery >= 0.0f && battery <= 0.30f))
-        return 1;
-    return 0;
-}
+    bool show = true;
+    int severity = 0;
+    std::string line;
+    std::chrono::steady_clock::time_point last_update;
+};
 
-extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine()
+static std::mutex s_device_stats_mutex;
+static ARMSX2IOSDeviceStatsCache s_device_stats_cache;
+
+static const ARMSX2IOSDeviceStatsCache& ARMSX2IOSRefreshDeviceStatsCacheLocked()
 {
-    static std::mutex s_stats_mutex;
-    static std::string s_cached_line;
-    static std::chrono::steady_clock::time_point s_last_update;
-
     const auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(s_stats_mutex);
-    if (!s_cached_line.empty() && (now - s_last_update) < std::chrono::seconds(1))
-        return s_cached_line.c_str();
+    if (!s_device_stats_cache.line.empty() &&
+        (now - s_device_stats_cache.last_update) < std::chrono::seconds(1))
+    {
+        return s_device_stats_cache;
+    }
+
+    s_device_stats_cache.show = s_settings_interface ?
+        s_settings_interface->GetBoolValue("ARMSX2iOS/UI", "OsdShowDeviceStats", true) : true;
 
     @autoreleasepool {
         UIDevice* device = [UIDevice currentDevice];
@@ -830,6 +908,13 @@ extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine()
         const NSProcessInfoThermalState thermal_state = [[NSProcessInfo processInfo] thermalState];
         const double app_ram_gb = ARMSX2IOSGetAppRAMGB();
         const bool low_power = [[NSProcessInfo processInfo] isLowPowerModeEnabled];
+
+        if (thermal_state >= NSProcessInfoThermalStateSerious || (battery >= 0.0f && battery <= 0.15f))
+            s_device_stats_cache.severity = 2;
+        else if (thermal_state == NSProcessInfoThermalStateFair || (battery >= 0.0f && battery <= 0.30f))
+            s_device_stats_cache.severity = 1;
+        else
+            s_device_stats_cache.severity = 0;
 
         char buffer[192];
         if (battery_percent >= 0) {
@@ -840,10 +925,29 @@ extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine()
                 ARMSX2IOSHeatStateName(thermal_state), app_ram_gb, low_power ? " | Low Power" : "");
         }
 
-        s_cached_line = buffer;
-        s_last_update = now;
-        return s_cached_line.c_str();
+        s_device_stats_cache.line = buffer;
     }
+
+    s_device_stats_cache.last_update = now;
+    return s_device_stats_cache;
+}
+
+extern "C" bool ARMSX2_iOSShouldShowDeviceStatsOverlay()
+{
+    std::lock_guard<std::mutex> lock(s_device_stats_mutex);
+    return ARMSX2IOSRefreshDeviceStatsCacheLocked().show;
+}
+
+extern "C" int ARMSX2_iOSGetDeviceStatsOverlaySeverity()
+{
+    std::lock_guard<std::mutex> lock(s_device_stats_mutex);
+    return ARMSX2IOSRefreshDeviceStatsCacheLocked().severity;
+}
+
+extern "C" const char* ARMSX2_iOSGetDeviceStatsOverlayLine()
+{
+    std::lock_guard<std::mutex> lock(s_device_stats_mutex);
+    return ARMSX2IOSRefreshDeviceStatsCacheLocked().line.c_str();
 }
 
 static float ARMSX2SanitizedNominalScalar(float scalar)
@@ -2751,6 +2855,9 @@ namespace Host
     void OnAchievementsLoginSuccess(char const*, u32, u32, u32) { ARMSX2_PostRetroAchievementsStateChanged(); }
     void OnPerformanceMetricsUpdated()
     {
+        if (!ARMSX2IOSRuntimeTelemetryEnabled())
+            return;
+
         static std::atomic<uint> s_last_metrics_frame{0};
         const uint frame = ::g_FrameCount;
         const float fps = PerformanceMetrics::GetFPS();
@@ -2907,6 +3014,12 @@ protected:
     struct IOSRequest final : Request
     {
         NSURLSessionDataTask* task = nil;
+        std::mutex completion_mutex;
+        bool completion_ready = false;
+        s32 completed_status_code = HTTP_STATUS_ERROR;
+        u32 completed_content_length = 0;
+        std::string completed_content_type;
+        Request::Data completed_data;
 
 #if !__has_feature(objc_arc)
         ~IOSRequest()
@@ -2923,6 +3036,20 @@ protected:
 
     void InternalPollRequests() override
     {
+        for (Request* request : m_pending_http_requests)
+        {
+            IOSRequest* native_request = static_cast<IOSRequest*>(request);
+            std::lock_guard<std::mutex> completion_lock(native_request->completion_mutex);
+            if (!native_request->completion_ready)
+                continue;
+
+            native_request->status_code = native_request->completed_status_code;
+            native_request->content_length = native_request->completed_content_length;
+            native_request->content_type = std::move(native_request->completed_content_type);
+            native_request->data = std::move(native_request->completed_data);
+            native_request->completion_ready = false;
+            native_request->state.store(Request::State::Complete, std::memory_order_release);
+        }
     }
 
     bool StartRequest(Request* request) override
@@ -2977,6 +3104,7 @@ protected:
             NSURLSessionDataTask* task = [session dataTaskWithRequest:url_request completionHandler:
                 ^(NSData* data, NSURLResponse* response, NSError* error) {
                     s32 status_code = HTTP_STATUS_ERROR;
+                    u32 content_length = 0;
                     std::string content_type;
                     Request::Data response_data;
 
@@ -3001,7 +3129,7 @@ protected:
 
                         const long long expected_length = response.expectedContentLength;
                         if (expected_length > 0)
-                            native_request->content_length = static_cast<u32>(std::min<long long>(expected_length, UINT32_MAX));
+                            content_length = static_cast<u32>(std::min<long long>(expected_length, UINT32_MAX));
 
                         if (data.length > 0)
                         {
@@ -3013,10 +3141,14 @@ protected:
                             static_cast<unsigned long>(data.length));
                     }
 
-                    native_request->status_code = status_code;
-                    native_request->content_type = std::move(content_type);
-                    native_request->data = std::move(response_data);
-                    native_request->state.store(Request::State::Complete);
+                    {
+                        std::lock_guard<std::mutex> completion_lock(native_request->completion_mutex);
+                        native_request->completed_status_code = status_code;
+                        native_request->completed_content_length = content_length;
+                        native_request->completed_content_type = std::move(content_type);
+                        native_request->completed_data = std::move(response_data);
+                        native_request->completion_ready = true;
+                    }
                 }];
 
 #if __has_feature(objc_arc)
@@ -3238,6 +3370,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
         }
     }
     ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "scene-connect");
+    ARMSX2MigrateJITScriptProtocolForIOS(s_settings_interface, "scene-connect");
     // One-time migration for existing INI (runs once, then conditions are false)
     if (!s_settings_interface->ContainsValue("SPU2/Output", "Backend")) {
         s_settings_interface->SetStringValue("SPU2/Output", "Backend", "SDL");
@@ -3253,6 +3386,9 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     }
     if (!s_settings_interface->ContainsValue("Achievements", "ChallengeMode")) {
         s_settings_interface->SetBoolValue("Achievements", "ChallengeMode", false);
+    }
+    if (!ARMSX2IOSRetroAchievementsHardcoreAvailable) {
+        ARMSX2DisableRetroAchievementsHardcoreForIOS(s_settings_interface, "scene-connect");
     }
     if (!s_settings_interface->ContainsValue("ARMSX2iOS/Gamepad", "MultitapMode")) {
         s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
@@ -3276,11 +3412,14 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     s_settings_interface->Save();
 
     VMManager::Internal::LoadStartupSettings();
+    if (!ARMSX2IOSRetroAchievementsHardcoreAvailable) {
+        EmuConfig.Achievements.HardcoreMode = false;
+    }
     ARMSX2SanitizeFrameLimiterConfig("after-startup-settings");
     ARMSX2ApplyIOSOsdPresetFromConfig("after-startup-settings");
     VMManager::ApplySettings();
-    if (EmuConfig.Achievements.Enabled && !Achievements::IsActive())
-        Achievements::Initialize();
+    if (EmuConfig.Achievements.Enabled)
+        Console.WriteLn("@@RA_INIT_DEFER@@ reason=scene-connect enabled=1 active=%d", Achievements::IsActive() ? 1 : 0);
     ARMSX2_PostRetroAchievementsStateChanged();
     
     // --- Create SDL Window ---
@@ -3865,6 +4004,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             ARMSX2SanitizeFrameLimiterConfig("pre-vm-initialize");
             ARMSX2EnsureIOSSpeedhackDefaults(s_settings_interface, "pre-vm-initialize");
             ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "pre-vm-initialize");
+            ARMSX2MigrateJITScriptProtocolForIOS(s_settings_interface, "pre-vm-initialize");
             VMManager::Internal::LoadStartupSettings();
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
             EmuConfig.Speedhacks.vuThread =
@@ -3919,32 +4059,34 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                     static_cast<int>(VMManager::GetState()), ::g_FrameCount);
                 std::fflush(stderr);
 
-                std::thread([heartbeat_generation]() {
-                    for (int sec = 1; sec <= 180; sec++) {
-                        std::this_thread::sleep_for(std::chrono::seconds(1));
-                        if (!s_vmThreadActive.load(std::memory_order_relaxed) ||
-                            s_vmHeartbeatGeneration.load(std::memory_order_acquire) != heartbeat_generation)
-                            break;
-                        if (sec != 1 && (sec % 5) != 0)
-                            continue;
-                        std::fprintf(stderr,
-                            "@@VM_HEARTBEAT@@ sec=%d state=%d frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f vu=%.2f gs=%.2f gpu=%.2f ee_pc=0x%08x ee_cycle=%lld ee_next=%lld\n",
-                            sec,
-                            static_cast<int>(VMManager::GetState()),
-                            ::g_FrameCount,
-                            static_cast<unsigned long long>(PerformanceMetrics::GetFrameNumber()),
-                            PerformanceMetrics::GetFPS(),
-                            PerformanceMetrics::GetInternalFPS(),
-                            PerformanceMetrics::GetSpeed(),
-                            PerformanceMetrics::GetCPUThreadUsage(),
-                            PerformanceMetrics::GetVUThreadUsage(),
-                            PerformanceMetrics::GetGSThreadUsage(),
-                            PerformanceMetrics::GetGPUUsage(),
-                            cpuRegs.pc,
-                            static_cast<long long>(cpuRegs.cycle),
-                            static_cast<long long>(cpuRegs.nextEventCycle));
-                    }
-                }).detach();
+                if (ARMSX2IOSRuntimeTelemetryEnabled()) {
+                    std::thread([heartbeat_generation]() {
+                        for (int sec = 1; sec <= 180; sec++) {
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                            if (!s_vmThreadActive.load(std::memory_order_relaxed) ||
+                                s_vmHeartbeatGeneration.load(std::memory_order_acquire) != heartbeat_generation)
+                                break;
+                            if (sec != 1 && (sec % 5) != 0)
+                                continue;
+                            std::fprintf(stderr,
+                                "@@VM_HEARTBEAT@@ sec=%d state=%d frame=%u pm_frame=%llu fps=%.2f internal_fps=%.2f speed=%.2f cpu=%.2f vu=%.2f gs=%.2f gpu=%.2f ee_pc=0x%08x ee_cycle=%lld ee_next=%lld\n",
+                                sec,
+                                static_cast<int>(VMManager::GetState()),
+                                ::g_FrameCount,
+                                static_cast<unsigned long long>(PerformanceMetrics::GetFrameNumber()),
+                                PerformanceMetrics::GetFPS(),
+                                PerformanceMetrics::GetInternalFPS(),
+                                PerformanceMetrics::GetSpeed(),
+                                PerformanceMetrics::GetCPUThreadUsage(),
+                                PerformanceMetrics::GetVUThreadUsage(),
+                                PerformanceMetrics::GetGSThreadUsage(),
+                                PerformanceMetrics::GetGPUUsage(),
+                                cpuRegs.pc,
+                                static_cast<long long>(cpuRegs.cycle),
+                                static_cast<long long>(cpuRegs.nextEventCycle));
+                        }
+                    }).detach();
+                }
 
                 while (true) {
                     Host::PumpMessagesOnCPUThread();
@@ -4113,7 +4255,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_refresh_universal_jit_selector\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_21_vu_jumpcache_ios27_touch_v1\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     
     // [iPSX2] Unification Validation

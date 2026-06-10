@@ -728,6 +728,83 @@ private struct ControllerPressEffect<S: InsettableShape>: View {
     }
 }
 
+private func ARMSX2UsesUIKitPadPressSurface() -> Bool {
+    ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
+}
+
+@MainActor
+private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
+    let content: Content
+    let onPress: (Bool) -> Void
+
+    init(onPress: @escaping (Bool) -> Void, @ViewBuilder content: () -> Content) {
+        self.content = content()
+        self.onPress = onPress
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(content: content, onPress: onPress)
+    }
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .custom)
+        button.backgroundColor = .clear
+        button.isExclusiveTouch = false
+
+        button.addTarget(context.coordinator, action: #selector(Coordinator.touchDown), for: [.touchDown, .touchDragEnter])
+        button.addTarget(context.coordinator, action: #selector(Coordinator.touchUp), for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit])
+
+        let hostedView = context.coordinator.hostingController.view!
+        hostedView.backgroundColor = .clear
+        hostedView.isUserInteractionEnabled = false
+        hostedView.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(hostedView)
+        NSLayoutConstraint.activate([
+            hostedView.topAnchor.constraint(equalTo: button.topAnchor),
+            hostedView.bottomAnchor.constraint(equalTo: button.bottomAnchor),
+            hostedView.leadingAnchor.constraint(equalTo: button.leadingAnchor),
+            hostedView.trailingAnchor.constraint(equalTo: button.trailingAnchor)
+        ])
+
+        return button
+    }
+
+    func updateUIView(_ uiView: UIButton, context: Context) {
+        context.coordinator.onPress = onPress
+        context.coordinator.hostingController.rootView = content
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        let hostingController: UIHostingController<Content>
+        var onPress: (Bool) -> Void
+        private var isPressed = false
+
+        init(content: Content, onPress: @escaping (Bool) -> Void) {
+            self.hostingController = UIHostingController(rootView: content)
+            self.onPress = onPress
+        }
+
+        @objc func touchDown() {
+            guard !isPressed else {
+                return
+            }
+
+            isPressed = true
+            onPress(true)
+        }
+
+        @objc func touchUp() {
+            guard isPressed else {
+                return
+            }
+
+            isPressed = false
+            onPress(false)
+        }
+    }
+}
+
 struct PSBtn: View {
     let sym: String; let clr: Color; let sz: CGFloat; let btn: ARMSX2PadButton
     @State private var on = false
@@ -736,6 +813,25 @@ struct PSBtn: View {
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
+        Group {
+            if ARMSX2UsesUIKitPadPressSurface() {
+                UIKitPadPressSurface(onPress: updatePressed) {
+                    buttonFace
+                }
+            } else {
+                buttonFace
+                    .contentShape(Circle())
+                    .simultaneousGesture(DragGesture(minimumDistance: 0)
+                        .onChanged { _ in updatePressed(true) }
+                        .onEnded { _ in updatePressed(false) })
+            }
+        }
+        .frame(width: sz, height: sz)
+        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+        .animation(.easeOut(duration: 0.06), value: on)
+    }
+
+    private var buttonFace: some View {
         ZStack {
             Circle()
                 .fill(.clear)
@@ -758,18 +854,18 @@ struct PSBtn: View {
                     .scaleEffect(on ? 0.90 : 1.0)
             }
         }
-        .frame(width: sz, height: sz)
-        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-        .animation(.easeOut(duration: 0.06), value: on)
-        .contentShape(Circle())
-            .simultaneousGesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in guard !on else { return }; on = true
-                    EmulatorBridge.shared.setPadButton(btn, pressed: true)
-                    if SettingsStore.shared.hapticFeedback {
-                        HapticManager.medium.impactOccurred()
-                    }
-                }
-                .onEnded { _ in on = false; EmulatorBridge.shared.setPadButton(btn, pressed: false) })
+    }
+
+    private func updatePressed(_ pressed: Bool) {
+        guard on != pressed else {
+            return
+        }
+
+        on = pressed
+        EmulatorBridge.shared.setPadButton(btn, pressed: pressed)
+        if pressed && SettingsStore.shared.hapticFeedback {
+            HapticManager.medium.impactOccurred()
+        }
     }
 }
 
@@ -781,8 +877,27 @@ struct PadBtn: View {
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
+        Group {
+            if ARMSX2UsesUIKitPadPressSurface() {
+                UIKitPadPressSurface(onPress: updatePressed) {
+                    buttonFace
+                }
+            } else {
+                buttonFace
+                    .contentShape(Rectangle())
+                    .simultaneousGesture(DragGesture(minimumDistance: 0)
+                        .onChanged { _ in updatePressed(true) }
+                        .onEnded { _ in updatePressed(false) })
+            }
+        }
+        .frame(width: w, height: h)
+        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
+        .animation(.easeOut(duration: 0.06), value: on)
+    }
+
+    private var buttonFace: some View {
         let shape = RoundedRectangle(cornerRadius: min(w, h) * 0.28, style: .continuous)
-        ZStack {
+        return ZStack {
             shape
                 .fill(.clear)
 
@@ -803,18 +918,18 @@ struct PadBtn: View {
                     .scaleEffect(on ? 0.91 : 1.0)
             }
         }
-        .frame(width: w, height: h)
-        .opacity(padUsesFullSkin ? 1.0 : padOpacity)
-        .animation(.easeOut(duration: 0.06), value: on)
-        .contentShape(Rectangle())
-            .simultaneousGesture(DragGesture(minimumDistance: 0)
-                .onChanged { _ in guard !on else { return }; on = true
-                    EmulatorBridge.shared.setPadButton(btn, pressed: true)
-                    if SettingsStore.shared.hapticFeedback {
-                        HapticManager.medium.impactOccurred()
-                    }
-                }
-                .onEnded { _ in on = false; EmulatorBridge.shared.setPadButton(btn, pressed: false) })
+    }
+
+    private func updatePressed(_ pressed: Bool) {
+        guard on != pressed else {
+            return
+        }
+
+        on = pressed
+        EmulatorBridge.shared.setPadButton(btn, pressed: pressed)
+        if pressed && SettingsStore.shared.hapticFeedback {
+            HapticManager.medium.impactOccurred()
+        }
     }
 }
 

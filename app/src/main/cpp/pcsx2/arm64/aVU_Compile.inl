@@ -730,6 +730,14 @@ _mVUt void* mVUcompileJIT(u32 startPC, uptr ptr)
 {
 	microVU& mVU = mVUx;
 
+	if (doJumpCaching)
+	{
+		microBlock* pBlock = (microBlock*)ptr;
+		microJumpCache& jc = pBlock->jumpCache[startPC / 8];
+		if (jc.prog && jc.prog == mVU.prog.quick[startPC / 8].prog)
+			return jc.codeStart;
+	}
+
 	armSetAsmPtr(mVU.prog.codePtr, mVU.prog.codeEnd - mVU.prog.codePtr, nullptr);
 	armStartBlock();
 	void* result;

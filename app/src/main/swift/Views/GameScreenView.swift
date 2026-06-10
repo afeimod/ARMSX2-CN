@@ -125,7 +125,11 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
-        .fullScreenCover(isPresented: $showPadLayoutEditor) {
+        .fullScreenCover(isPresented: $showPadLayoutEditor, onDismiss: {
+            NSLog("@@PAD_LAYOUT@@ dismiss")
+            showPadLayoutEditor = false
+            updateRuntimeOverlayPause()
+        }) {
             PadLayoutEditView()
         }
         .sheet(isPresented: $showPNACHImporter) {
@@ -199,6 +203,10 @@ struct GameScreenView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .GCControllerDidDisconnect)) { _ in
             refreshExternalControllerConnectionState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("ARMSX2iOSPadLayoutEditorDismissed"))) { _ in
+            showPadLayoutEditor = false
+            updateRuntimeOverlayPause()
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
             refreshRuntimeMenuState()
@@ -609,6 +617,7 @@ struct GameScreenView: View {
 
     private func updateRuntimeOverlayPause() {
         let shouldPause = showSaveStates || showSpeedControl || showCompatibilityLab || showPerGameSettings || showPNACHImporter || showPadLayoutEditor || showResetConfirmation
+        NSLog("@@RUNTIME_OVERLAY_PAUSE@@ should=%d active=%d vm=%d", shouldPause ? 1 : 0, runtimeOverlayPauseActive ? 1 : 0, ARMSX2Bridge.isVMRunning() ? 1 : 0)
         guard runtimeOverlayPauseActive != shouldPause else { return }
 
         runtimeOverlayPauseActive = shouldPause

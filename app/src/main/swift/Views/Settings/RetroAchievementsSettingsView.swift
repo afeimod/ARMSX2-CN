@@ -27,115 +27,139 @@ struct RetroAchievementsSettingsView: View {
                 Toggle(settings.localized("Enable RetroAchievements"), isOn: Binding(
                     get: { achievementsEnabled },
                     set: { newValue in
+                        guard achievementsSupported || !newValue else {
+                            achievementsEnabled = false
+                            ARMSX2Bridge.setRetroAchievementsEnabled(false)
+                            showMessage(title: "RetroAchievements", body: unavailableMessage)
+                            refreshSoon()
+                            return
+                        }
                         achievementsEnabled = newValue
                         ARMSX2Bridge.setRetroAchievementsEnabled(newValue)
                         refreshSoon()
                     }
                 ))
+                .disabled(!achievementsSupported)
 
                 statusRow("Client", value: bool("active") ? "Active" : "Inactive")
                 statusRow("Account", value: accountSummary, localizeValue: !bool("loggedIn"))
             } header: {
                 Text(settings.localized("RetroAchievements"))
             } footer: {
-                Text(settings.localized("Uses the same achievements core as ARMSX2 Android. Login tokens are stored in ARMSX2's local config; passwords are not stored by this screen."))
+                Text(settings.localized(achievementsSupported ?
+                    "Uses the same achievements core as ARMSX2 Android. Login tokens are stored in ARMSX2's local config; passwords are not stored by this screen." :
+                    unavailableMessage))
             }
 
-            Section(settings.localized("Account")) {
-                if bool("loggedIn") {
-                    statusRow("User", value: displayName, localizeValue: false)
-                    statusRow("Points", value: "\(int("points")) hard / \(int("softcorePoints")) soft", localizeValue: false)
-                    if int("unreadMessages") > 0 {
-                        statusRow("Messages", value: "\(int("unreadMessages")) \(settings.localized("unread"))", localizeValue: false)
-                    }
+            if achievementsSupported {
+                Section(settings.localized("Account")) {
+                    if bool("loggedIn") {
+                        statusRow("User", value: displayName, localizeValue: false)
+                        statusRow("Points", value: hardcoreSupported ?
+                            "\(int("points")) hard / \(int("softcorePoints")) soft" :
+                            "\(int("softcorePoints"))", localizeValue: false)
+                        if int("unreadMessages") > 0 {
+                            statusRow("Messages", value: "\(int("unreadMessages")) \(settings.localized("unread"))", localizeValue: false)
+                        }
 
-                    Button(role: .destructive) {
-                        ARMSX2Bridge.logoutRetroAchievements()
-                        refreshSoon()
-                    } label: {
-                        Text(settings.localized("Log Out"))
-                    }
-                } else {
-                    Button {
-                        username = string("username")
-                        password = ""
-                        showingLogin = true
-                    } label: {
-                        Text(settings.localized(loggingIn ? "Logging In..." : "Log In"))
-                    }
-                    .disabled(!achievementsEnabled || loggingIn)
-                }
-            }
-
-            Section {
-                Toggle(settings.localized("Hardcore Mode"), isOn: Binding(
-                    get: { hardcoreEnabled },
-                    set: { newValue in
-                        hardcoreEnabled = newValue
-                        ARMSX2Bridge.setRetroAchievementsHardcore(newValue)
-                        refreshSoon()
-                    }
-                ))
-                .disabled(!achievementsEnabled)
-
-                Toggle(settings.localized("Achievement Notifications"), isOn: Binding(
-                    get: { notificationsEnabled },
-                    set: { newValue in
-                        notificationsEnabled = newValue
-                        ARMSX2Bridge.setRetroAchievementsNotifications(newValue)
-                        refreshSoon()
-                    }
-                ))
-                .disabled(!achievementsEnabled)
-
-                Toggle(settings.localized("Leaderboard Notifications"), isOn: Binding(
-                    get: { leaderboardNotificationsEnabled },
-                    set: { newValue in
-                        leaderboardNotificationsEnabled = newValue
-                        ARMSX2Bridge.setRetroAchievementsLeaderboards(newValue)
-                        refreshSoon()
-                    }
-                ))
-                .disabled(!achievementsEnabled)
-
-                Toggle(settings.localized("In-Game Overlays"), isOn: Binding(
-                    get: { overlaysEnabled },
-                    set: { newValue in
-                        overlaysEnabled = newValue
-                        ARMSX2Bridge.setRetroAchievementsOverlays(newValue)
-                        refreshSoon()
-                    }
-                ))
-                .disabled(!achievementsEnabled)
-            } header: {
-                Text(settings.localized("Modes"))
-            } footer: {
-                Text(settings.localized("Hardcore is enforced by the core and can restrict cheats, save states, and other non-hardcore features while active."))
-            }
-
-            Section(settings.localized("Current Game")) {
-                if bool("hasActiveGame") {
-                    statusRow("Title", value: string("gameTitle", fallback: settings.localized("Unknown Game")), localizeValue: false)
-                    statusRow("Game ID", value: "\(int("gameId"))", localizeValue: false)
-
-                    if int("totalAchievements") > 0 {
-                        statusRow("Achievements", value: "\(int("unlockedAchievements")) / \(int("totalAchievements"))", localizeValue: false)
-                        statusRow("Points", value: "\(int("unlockedPoints")) / \(int("totalPoints"))", localizeValue: false)
-                    } else if bool("hasAchievements") {
-                        statusRow("Achievements", value: "Loaded")
+                        Button(role: .destructive) {
+                            ARMSX2Bridge.logoutRetroAchievements()
+                            refreshSoon()
+                        } label: {
+                            Text(settings.localized("Log Out"))
+                        }
                     } else {
-                        statusRow("Achievements", value: "None found")
+                        Button {
+                            username = string("username")
+                            password = ""
+                            showingLogin = true
+                        } label: {
+                            Text(settings.localized(loggingIn ? "Logging In..." : "Log In"))
+                        }
+                        .disabled(!achievementsEnabled || loggingIn)
+                    }
+                }
+
+                Section {
+                    if hardcoreSupported {
+                        Toggle(settings.localized("Hardcore Mode"), isOn: Binding(
+                            get: { hardcoreEnabled },
+                            set: { newValue in
+                                hardcoreEnabled = newValue
+                                ARMSX2Bridge.setRetroAchievementsHardcore(newValue)
+                                refreshSoon()
+                            }
+                        ))
+                        .disabled(!achievementsEnabled)
                     }
 
-                    if bool("hasLeaderboards") {
-                        statusRow("Leaderboards", value: "Available")
-                    }
+                    Toggle(settings.localized("Achievement Notifications"), isOn: Binding(
+                        get: { notificationsEnabled },
+                        set: { newValue in
+                            notificationsEnabled = newValue
+                            ARMSX2Bridge.setRetroAchievementsNotifications(newValue)
+                            refreshSoon()
+                        }
+                    ))
+                    .disabled(!achievementsEnabled)
 
-                    if bool("hasRichPresence") {
-                        statusRow("Rich Presence", value: string("richPresence", fallback: settings.localized("Active")), localizeValue: false)
+                    Toggle(settings.localized("Leaderboard Notifications"), isOn: Binding(
+                        get: { leaderboardNotificationsEnabled },
+                        set: { newValue in
+                            leaderboardNotificationsEnabled = newValue
+                            ARMSX2Bridge.setRetroAchievementsLeaderboards(newValue)
+                            refreshSoon()
+                        }
+                    ))
+                    .disabled(!achievementsEnabled)
+
+                    Toggle(settings.localized("In-Game Overlays"), isOn: Binding(
+                        get: { overlaysEnabled },
+                        set: { newValue in
+                            overlaysEnabled = newValue
+                            ARMSX2Bridge.setRetroAchievementsOverlays(newValue)
+                            refreshSoon()
+                        }
+                    ))
+                    .disabled(!achievementsEnabled)
+                } header: {
+                    Text(settings.localized("Modes"))
+                } footer: {
+                    Text(settings.localized(hardcoreSupported ?
+                        "Hardcore is enforced by the core and can restrict cheats, save states, and other non-hardcore features while active." :
+                        "Hardcore mode is hidden until RetroAchievements approval is complete."))
+                }
+
+                Section(settings.localized("Current Game")) {
+                    if bool("hasActiveGame") {
+                        statusRow("Title", value: string("gameTitle", fallback: settings.localized("Unknown Game")), localizeValue: false)
+                        statusRow("Game ID", value: "\(int("gameId"))", localizeValue: false)
+
+                        if int("totalAchievements") > 0 {
+                            statusRow("Achievements", value: "\(int("unlockedAchievements")) / \(int("totalAchievements"))", localizeValue: false)
+                            statusRow("Points", value: "\(int("unlockedPoints")) / \(int("totalPoints"))", localizeValue: false)
+                        } else if bool("hasAchievements") {
+                            statusRow("Achievements", value: "Loaded")
+                        } else {
+                            statusRow("Achievements", value: "None found")
+                        }
+
+                        if bool("hasLeaderboards") {
+                            statusRow("Leaderboards", value: "Available")
+                        }
+
+                        if bool("hasRichPresence") {
+                            statusRow("Rich Presence", value: string("richPresence", fallback: settings.localized("Active")), localizeValue: false)
+                        }
+                    } else {
+                        Text(settings.localized("Boot a game while RetroAchievements is enabled to see game progress here."))
+                            .foregroundStyle(.secondary)
                     }
-                } else {
-                    Text(settings.localized("Boot a game while RetroAchievements is enabled to see game progress here."))
+                }
+            } else {
+                Section(settings.localized("Status")) {
+                    statusRow("Status", value: "Temporarily Unavailable")
+                    Text(settings.localized(unavailableMessage))
                         .foregroundStyle(.secondary)
                 }
             }
@@ -174,6 +198,18 @@ struct RetroAchievementsSettingsView: View {
 
     private var displayName: String {
         string("displayName", fallback: string("username", fallback: "Logged in"))
+    }
+
+    private var achievementsSupported: Bool {
+        bool("supported", fallback: true)
+    }
+
+    private var hardcoreSupported: Bool {
+        bool("hardcoreSupported", fallback: true)
+    }
+
+    private var unavailableMessage: String {
+        string("unavailableMessage", fallback: "RetroAchievements is temporarily unavailable in this build.")
     }
 
     private func statusRow(_ title: String, value: String, localizeValue: Bool = true) -> some View {

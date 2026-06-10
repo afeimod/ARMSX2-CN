@@ -103,6 +103,7 @@ struct PadLayoutEditView: View {
                                 .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
                                 Spacer()
                                 Button("Save") {
+                                    NSLog("@@PAD_LAYOUT@@ save portrait=%d landscape=%d", layout.portrait.count, layout.landscape.count)
                                     layout.save()
                                     dismiss()
                                 }
@@ -128,6 +129,10 @@ struct PadLayoutEditView: View {
         .navigationBarHidden(true)
         .statusBarHidden()
         .persistentSystemOverlays(.hidden)
+        .onDisappear {
+            NSLog("@@PAD_LAYOUT@@ disappear")
+            NotificationCenter.default.post(name: Notification.Name("ARMSX2iOSPadLayoutEditorDismissed"), object: nil)
+        }
     }
 
     private var floatingToolbar: some View {
@@ -145,6 +150,7 @@ struct PadLayoutEditView: View {
             .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
             Spacer()
             Button("Save") {
+                NSLog("@@PAD_LAYOUT@@ save portrait=%d landscape=%d", layout.portrait.count, layout.landscape.count)
                 layout.save()
                 dismiss()
             }
@@ -263,6 +269,7 @@ private struct DraggableGroup: View {
         } else {
             layout.portrait[id] = p
         }
+        NSLog("@@PAD_LAYOUT@@ move id=%@ landscape=%d x=%.4f y=%.4f", id, isLandscape ? 1 : 0, Double(x), Double(y))
     }
 
     private func updateScale(_ scale: CGFloat) {
@@ -273,6 +280,7 @@ private struct DraggableGroup: View {
         } else {
             layout.portrait[id] = p
         }
+        NSLog("@@PAD_LAYOUT@@ scale id=%@ landscape=%d scale=%.4f", id, isLandscape ? 1 : 0, Double(scale))
     }
 
     private var groupSize: CGSize {

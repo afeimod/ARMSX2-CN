@@ -136,6 +136,32 @@ void Threading::WorkSema::Reset()
 	m_state = STATE_RUNNING_0;
 }
 
+void Threading::UserspaceSemaphore::WaitWithSpin()
+{
+	int32_t counter = m_counter.load(std::memory_order_relaxed);
+	u32 waited = 0;
+	while (true)
+	{
+		while (counter > 0)
+		{
+			if (m_counter.compare_exchange_weak(counter, counter - 1,
+				std::memory_order_acquire, std::memory_order_relaxed))
+			{
+				return;
+			}
+		}
+
+		if (waited >= SPIN_TIME_NS)
+			break;
+
+		waited += ShortSpin();
+		counter = m_counter.load(std::memory_order_relaxed);
+	}
+
+	if (m_counter.fetch_sub(1, std::memory_order_acquire) <= 0)
+		m_sema.Wait();
+}
+
 #if !defined(__APPLE__) // macOS implementations are in DarwinThreads
 
 Threading::KernelSemaphore::KernelSemaphore()

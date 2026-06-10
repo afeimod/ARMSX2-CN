@@ -475,14 +475,36 @@ bool Achievements::Initialize()
 	if (IsUsingRAIntegration())
 		return true;
 
+	Console.WriteLn("@@RA_INIT@@ stage=begin has_vm=%d active=%d", VMManager::HasValidVM() ? 1 : 0, IsActive() ? 1 : 0);
 	EnsureCacheDirectoriesExist();
 
 	auto lock = GetLock();
 	pxAssertRel(EmuConfig.Achievements.Enabled, "Achievements are enabled");
-	pxAssertRel(!s_client && !s_http_downloader, "No client and downloader");
+	if (s_client || s_http_downloader)
+	{
+		Console.Warning("@@RA_INIT_STALE_CLIENT@@ client=%d downloader=%d",
+			s_client ? 1 : 0, s_http_downloader ? 1 : 0);
+
+		if (s_client && s_http_downloader)
+			return true;
+
+		if (s_client)
+		{
+			rc_client_destroy(s_client);
+			s_client = nullptr;
+		}
+		if (s_http_downloader)
+		{
+			s_http_downloader->WaitForAllRequests();
+			s_http_downloader.reset();
+		}
+	}
 
 	if (!CreateClient(&s_client, &s_http_downloader))
+	{
+		Console.Error("@@RA_INIT@@ stage=create_client_failed");
 		return false;
+	}
 
 	// Hardcore starts off. We enable it on first boot.
 	s_hardcore_mode = false;
@@ -532,6 +554,7 @@ bool Achievements::Initialize()
 	// Set initial notification position
 	UpdateNotificationPosition();
 
+	Console.WriteLn("@@RA_INIT@@ stage=end logged_in_or_logging_in=%d", IsLoggedInOrLoggingIn() ? 1 : 0);
 	return true;
 }
 
@@ -581,9 +604,11 @@ bool Achievements::CreateClient(rc_client_t** client, std::unique_ptr<HTTPDownlo
 
 void Achievements::DestroyClient(rc_client_t** client, std::unique_ptr<HTTPDownloader>* http)
 {
-	(*http)->WaitForAllRequests();
+	if (*http)
+		(*http)->WaitForAllRequests();
 
-	rc_client_destroy(*client);
+	if (*client)
+		rc_client_destroy(*client);
 	*client = nullptr;
 
 	http->reset();
@@ -725,10 +750,24 @@ bool Achievements::Shutdown(bool allow_cancel)
 #endif
 
 	if (!IsActive())
+	{
+		if (s_http_downloader)
+		{
+			Console.Warning("@@RA_SHUTDOWN_STALE_DOWNLOADER@@ client=0 downloader=1");
+			s_http_downloader->WaitForAllRequests();
+			s_http_downloader.reset();
+		}
 		return true;
+	}
 
 	auto lock = GetLock();
-	pxAssertRel(s_client && s_http_downloader, "Has client and downloader");
+	if (!s_client || !s_http_downloader)
+	{
+		Console.Warning("@@RA_SHUTDOWN_STALE_CLIENT@@ client=%d downloader=%d",
+			s_client ? 1 : 0, s_http_downloader ? 1 : 0);
+		DestroyClient(&s_client, &s_http_downloader);
+		return true;
+	}
 
 	DisableHardcoreMode();
 	ClearGameInfo();
@@ -813,16 +852,26 @@ void Achievements::ClientServerCall(
 	};
 
 	HTTPDownloader* http = static_cast<HTTPDownloader*>(rc_client_get_userdata(client));
+	if (!http)
+	{
+		Console.Error("@@RA_HTTP@@ missing_downloader url=%s", request && request->url ? request->url : "<null>");
+		rc_api_server_response_t rr = {};
+		rr.http_status_code = RC_API_SERVER_RESPONSE_CLIENT_ERROR;
+		callback(&rr, callback_data);
+		return;
+	}
 
 	// TODO: Content-type for post
 	if (request->post_data)
 	{
+		Console.WriteLn("@@RA_HTTP@@ post url=%s", request->url ? request->url : "<null>");
 		// const auto pd = std::string_view(request->post_data);
 		// Console.WriteLn(fmt::format("Server POST: {}", pd.substr(0, std::min<size_t>(pd.length(), 10))).c_str());
 		http->CreatePostRequest(request->url, request->post_data, std::move(hd_callback));
 	}
 	else
 	{
+		Console.WriteLn("@@RA_HTTP@@ get url=%s", request->url ? request->url : "<null>");
 		http->CreateRequest(request->url, std::move(hd_callback));
 	}
 }
@@ -1060,6 +1109,15 @@ void Achievements::BeginLoadGame()
 	}
 
 	s_load_game_request = rc_client_begin_load_game(s_client, s_game_hash.c_str(), ClientLoadGameCallback, nullptr);
+	if (!s_load_game_request)
+	{
+		Console.Error("@@RA_LOAD_GAME@@ begin_failed hash=%s", s_game_hash.c_str());
+		DisableHardcoreMode();
+	}
+	else
+	{
+		Console.WriteLn("@@RA_LOAD_GAME@@ begin hash=%s", s_game_hash.c_str());
+	}
 }
 
 void Achievements::ClientLoadGameCallback(int result, const char* error_message, rc_client_t* client, void* userdata)
@@ -1116,7 +1174,8 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
 	s_game_icon_url = info->badge_url;
 
 	// ensure fullscreen UI is ready for notifications
-	MTGS::RunOnGSThread(&ImGuiManager::InitializeFullscreenUI);
+	if (MTGS::IsOpen())
+		MTGS::RunOnGSThread(&ImGuiManager::InitializeFullscreenUI);
 
 	if (const std::string_view badge_name = info->badge_name; !badge_name.empty())
 	{

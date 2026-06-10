@@ -425,6 +425,26 @@ static dispatch_queue_t ARMSX2RetroAchievementsQueue()
     return queue;
 }
 
+static constexpr bool ARMSX2RetroAchievementsAvailable = true;
+static constexpr bool ARMSX2RetroAchievementsHardcoreAvailable = false;
+
+static NSString* ARMSX2RetroAchievementsUnavailableMessage()
+{
+    return @"Hardcore mode is hidden until RetroAchievements approval is complete.";
+}
+
+static void ARMSX2SaveBaseSettingBool(const char* section, const char* key, bool value);
+
+static void ARMSX2ForceRetroAchievementsHardcoreOff()
+{
+    Pcsx2Config::AchievementsOptions old_config = EmuConfig.Achievements;
+    EmuConfig.Achievements.HardcoreMode = false;
+    ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", false);
+
+    if (Achievements::IsActive())
+        Achievements::UpdateSettings(old_config);
+}
+
 static bool ARMSX2EnsureAchievementsClientInitialized()
 {
     if (!EmuConfig.Achievements.Enabled)
@@ -3150,6 +3170,9 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 #pragma mark - RetroAchievements
 
 + (nonnull NSDictionary<NSString *, id> *)retroAchievementsState {
+    if (!ARMSX2RetroAchievementsHardcoreAvailable && EmuConfig.Achievements.HardcoreMode)
+        ARMSX2ForceRetroAchievementsHardcoreOff();
+
     std::string username;
     std::string displayName;
     std::string avatarPath;
@@ -3226,6 +3249,9 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     }
 
     return @{
+        @"supported": @(ARMSX2RetroAchievementsAvailable),
+        @"hardcoreSupported": @(ARMSX2RetroAchievementsHardcoreAvailable),
+        @"unavailableMessage": ARMSX2RetroAchievementsUnavailableMessage(),
         @"enabled": @(EmuConfig.Achievements.Enabled),
         @"active": @(active),
         @"loggedIn": @(loggedIn),
@@ -3261,13 +3287,19 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
         if (EmuConfig.Achievements.Enabled == enable) {
             ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+            if (!enable || !ARMSX2RetroAchievementsHardcoreAvailable)
+                ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", false);
             ARMSX2_PostRetroAchievementsStateChanged();
             return;
         }
 
         ARMSX2UpdateAchievementsSettings(^{
             EmuConfig.Achievements.Enabled = enable;
+            if (!enable || !ARMSX2RetroAchievementsHardcoreAvailable)
+                EmuConfig.Achievements.HardcoreMode = false;
             ARMSX2SaveBaseSettingBool("Achievements", "Enabled", enable);
+            if (!enable || !ARMSX2RetroAchievementsHardcoreAvailable)
+                ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", false);
         });
         NSLog(@"[ARMSX2Bridge] RetroAchievements enabled=%d", enable ? 1 : 0);
     });
@@ -3276,6 +3308,14 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 + (void)setRetroAchievementsHardcore:(BOOL)enabled {
     const bool enable = enabled ? true : false;
     dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
+        if (!ARMSX2RetroAchievementsHardcoreAvailable) {
+            ARMSX2ForceRetroAchievementsHardcoreOff();
+            ARMSX2_PostRetroAchievementsStateChanged();
+            if (enable)
+                NSLog(@"[ARMSX2Bridge] RetroAchievements hardcore rejected: unavailable");
+            return;
+        }
+
         if (EmuConfig.Achievements.HardcoreMode == enable) {
             ARMSX2SaveBaseSettingBool("Achievements", "ChallengeMode", enable);
             ARMSX2_PostRetroAchievementsStateChanged();

@@ -1197,6 +1197,26 @@ static void recCacheFlushEntry(RecGprCacheState& cache, size_t index)
 	entry.dirty = false;
 }
 
+static void recCacheDiscardGuest(RecGprCacheState& cache, u32 guest)
+{
+	if (guest == 0)
+		return;
+
+	const int found = recCacheFind(cache, guest);
+	if (found >= 0)
+		cache.entries[static_cast<size_t>(found)] = RecGprCacheEntry();
+}
+
+static void recCacheFlushGuest(RecGprCacheState& cache, u32 guest)
+{
+	if (guest == 0)
+		return;
+
+	const int found = recCacheFind(cache, guest);
+	if (found >= 0)
+		recCacheFlushEntry(cache, static_cast<size_t>(found));
+}
+
 static void recCacheFlushAll(RecGprCacheState& cache)
 {
 	for (size_t i = 0; i < std::size(cache.entries); i++)
@@ -1404,6 +1424,247 @@ static bool recTryTranslateCachedStore(u32 bits, u32 rt, u32 rs, s32 imm, RecGpr
 	return true;
 }
 
+static bool recTryTranslateCachedLoadQuad(u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+{
+	static const a64::Register RADDR = a64::x9;
+	static const a64::Register RHOST = a64::x10;
+
+	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	armAsm->And(RADDR.W(), RADDR.W(), ~0x0F);
+	const RecGprCacheState pre_load_cache = cache;
+
+	// LQ overwrites the full 128-bit destination. The scalar GPR cache only tracks
+	// the low 64 bits, so discard any cached low half after the address has been
+	// computed. If rt==rs, the address still used the old value above.
+	recCacheDiscardGuest(cache, rt);
+
+	a64::Label slow_path;
+	a64::Label done;
+	recEmitVmapHostPointer(RHOST, RADDR, &slow_path);
+	armAsm->Ldr(RQSCRATCH, a64::MemOperand(RHOST));
+	if (rt != 0)
+		armAsm->Str(RQSCRATCH, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rt)));
+	armAsm->B(&done);
+
+	armAsm->Bind(&slow_path);
+	recCacheEmitFlushAll(pre_load_cache);
+	armEmitVtlbReadQuad(RQSCRATCH, RADDR);
+	if (rt != 0)
+		armAsm->Str(RQSCRATCH, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rt)));
+
+	armAsm->Bind(&done);
+	return true;
+}
+
+static bool recTryTranslateCachedStoreQuad(u32 rt, u32 rs, s32 imm, RecGprCacheState& cache)
+{
+	static const a64::Register RADDR = a64::x9;
+	static const a64::Register RHOST = a64::x10;
+
+	recEmitCachedEffectiveAddr(cache, rs, imm, RADDR);
+	armAsm->And(RADDR.W(), RADDR.W(), ~0x0F);
+
+	// SQ reads the whole 128-bit GPR from memory. If prior scalar cached ops dirtied
+	// the low half of rt, write it back first so the vector load sees a coherent GPR.
+	recCacheFlushGuest(cache, rt);
+	armAsm->Ldr(RQSCRATCH, a64::MemOperand(RESTATEPTR, EE_GPR_OFFSET(rt)));
+	const RecGprCacheState pre_store_cache = cache;
+
+	a64::Label slow_path;
+	a64::Label done;
+	recEmitVmapHostPointer(RHOST, RADDR, &slow_path);
+	armAsm->Str(RQSCRATCH, a64::MemOperand(RHOST));
+	armAsm->B(&done);
+
+	armAsm->Bind(&slow_path);
+	recCacheEmitFlushAll(pre_store_cache);
+	armEmitVtlbWriteQuad(RADDR, RQSCRATCH);
+
+	armAsm->Bind(&done);
+	return true;
+}
+
+static bool recTryTranslateCachedConstOp(u32 op, RecGprConstState& const_state, RecGprCacheState& cache)
+{
+	const u32 opcode = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f;
+	const u32 rt = (op >> 16) & 0x1f;
+	const u32 rd = (op >> 11) & 0x1f;
+	const u32 sa = (op >> 6) & 0x1f;
+	const u32 funct = op & 0x3f;
+	const s32 imm = static_cast<s16>(op);
+	const u32 imm_u = static_cast<u16>(op);
+
+	auto known = [&](u32 reg) -> bool {
+		return const_state.known[reg];
+	};
+	auto value = [&](u32 reg) -> u64 {
+		return const_state.value[reg];
+	};
+	auto emit_known = [&](u32 reg, u64 val) -> bool {
+		if (reg != 0)
+		{
+			const a64::Register& dst = recCacheDest(cache, reg);
+			armAsm->Mov(dst, val);
+		}
+		recConstSetKnown(const_state, reg, val);
+		return true;
+	};
+
+	switch (opcode)
+	{
+		case 0x08: // ADDI
+		case 0x09: // ADDIU
+			if (!known(rs))
+				return false;
+			return emit_known(rt, recSignExtend32(static_cast<u32>(value(rs)) + static_cast<u32>(imm)));
+
+		case 0x18: // DADDI
+		case 0x19: // DADDIU
+			if (!known(rs))
+				return false;
+			return emit_known(rt, value(rs) + static_cast<u64>(static_cast<s64>(imm)));
+
+		case 0x0A: // SLTI
+			if (!known(rs))
+				return false;
+			return emit_known(rt, (static_cast<s64>(value(rs)) < static_cast<s64>(imm)) ? 1 : 0);
+
+		case 0x0B: // SLTIU
+			if (!known(rs))
+				return false;
+			return emit_known(rt, (value(rs) < static_cast<u64>(static_cast<s64>(imm))) ? 1 : 0);
+
+		case 0x0C: // ANDI
+			if (!known(rs))
+				return false;
+			return emit_known(rt, value(rs) & imm_u);
+
+		case 0x0D: // ORI
+			if (!known(rs))
+				return false;
+			return emit_known(rt, value(rs) | imm_u);
+
+		case 0x0E: // XORI
+			if (!known(rs))
+				return false;
+			return emit_known(rt, value(rs) ^ imm_u);
+
+		case 0x0F: // LUI
+			return emit_known(rt, recSignExtend32(static_cast<u32>(imm_u) << 16));
+
+		case 0x00:
+			break;
+
+		default:
+			return false;
+	}
+
+	switch (funct)
+	{
+		case 0x00: // SLL
+			if (!known(rt)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rt)) << sa));
+		case 0x02: // SRL
+			if (!known(rt)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rt)) >> sa));
+		case 0x03: // SRA
+			if (!known(rt)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(static_cast<s32>(static_cast<u32>(value(rt))) >> sa)));
+		case 0x04: // SLLV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rt)) << (value(rs) & 0x1f)));
+		case 0x06: // SRLV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rt)) >> (value(rs) & 0x1f)));
+		case 0x07: // SRAV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(static_cast<s32>(static_cast<u32>(value(rt))) >> (value(rs) & 0x1f))));
+		case 0x14: // DSLLV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, value(rt) << (value(rs) & 0x3f));
+		case 0x16: // DSRLV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, value(rt) >> (value(rs) & 0x3f));
+		case 0x17: // DSRAV
+			if (!known(rt) || !known(rs)) return false;
+			return emit_known(rd, static_cast<u64>(static_cast<s64>(value(rt)) >> (value(rs) & 0x3f)));
+		case 0x38: // DSLL
+			if (!known(rt)) return false;
+			return emit_known(rd, value(rt) << sa);
+		case 0x3A: // DSRL
+			if (!known(rt)) return false;
+			return emit_known(rd, value(rt) >> sa);
+		case 0x3B: // DSRA
+			if (!known(rt)) return false;
+			return emit_known(rd, static_cast<u64>(static_cast<s64>(value(rt)) >> sa));
+		case 0x3C: // DSLL32
+			if (!known(rt)) return false;
+			return emit_known(rd, value(rt) << (sa + 32));
+		case 0x3E: // DSRL32
+			if (!known(rt)) return false;
+			return emit_known(rd, value(rt) >> (sa + 32));
+		case 0x3F: // DSRA32
+			if (!known(rt)) return false;
+			return emit_known(rd, static_cast<u64>(static_cast<s64>(value(rt)) >> (sa + 32)));
+
+		case 0x20: // ADD
+		case 0x21: // ADDU
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rs)) + static_cast<u32>(value(rt))));
+		case 0x22: // SUB
+		case 0x23: // SUBU
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, recSignExtend32(static_cast<u32>(value(rs)) - static_cast<u32>(value(rt))));
+		case 0x2C: // DADD
+		case 0x2D: // DADDU
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, value(rs) + value(rt));
+		case 0x2E: // DSUB
+		case 0x2F: // DSUBU
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, value(rs) - value(rt));
+		case 0x24: // AND
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, value(rs) & value(rt));
+		case 0x25: // OR
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, value(rs) | value(rt));
+		case 0x26: // XOR
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, value(rs) ^ value(rt));
+		case 0x27: // NOR
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, ~(value(rs) | value(rt)));
+		case 0x2A: // SLT
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, (static_cast<s64>(value(rs)) < static_cast<s64>(value(rt))) ? 1 : 0);
+		case 0x2B: // SLTU
+			if (!known(rs) || !known(rt)) return false;
+			return emit_known(rd, (value(rs) < value(rt)) ? 1 : 0);
+
+		case 0x0A: // MOVZ
+			if (!known(rt))
+				return false;
+			if (value(rt) != 0)
+				return true;
+			if (!known(rs))
+				return false;
+			return emit_known(rd, value(rs));
+		case 0x0B: // MOVN
+			if (!known(rt))
+				return false;
+			if (value(rt) == 0)
+				return true;
+			if (!known(rs))
+				return false;
+			return emit_known(rd, value(rs));
+
+		default:
+			return false;
+	}
+}
+
 static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 {
 	const u32 opcode = op >> 26;
@@ -1527,11 +1788,13 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 		case OP_LW:  return recTryTranslateCachedLoad(32, true,  rt, rs, imm, cache);
 		case OP_LWU: return recTryTranslateCachedLoad(32, false, rt, rs, imm, cache);
 		case OP_LD:  return recTryTranslateCachedLoad(64, false, rt, rs, imm, cache);
+		case OP_LQ:  return recTryTranslateCachedLoadQuad(rt, rs, imm, cache);
 
 		case OP_SB: return recTryTranslateCachedStore(8,  rt, rs, imm, cache);
 		case OP_SH: return recTryTranslateCachedStore(16, rt, rs, imm, cache);
 		case OP_SW: return recTryTranslateCachedStore(32, rt, rs, imm, cache);
 		case OP_SD: return recTryTranslateCachedStore(64, rt, rs, imm, cache);
+		case OP_SQ: return recTryTranslateCachedStoreQuad(rt, rs, imm, cache);
 
 		case 0x00:
 			break;
@@ -1723,6 +1986,9 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache)
 
 static bool recTranslateOpOptimized(u32 op, RecGprConstState& const_state, RecGprCacheState& cache)
 {
+	if (recTryTranslateCachedConstOp(op, const_state, cache))
+		return true;
+
 	if (recTryTranslateCachedOp(op, cache))
 	{
 		if (!recConstApplyCachedEffects(op, const_state))
