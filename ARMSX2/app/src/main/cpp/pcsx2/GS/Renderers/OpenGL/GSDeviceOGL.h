@@ -115,6 +115,15 @@ public:
 	using OMDepthStencilSelector = GSHWDrawConfig::DepthStencilSelector;
 	using OMColorMaskSelector = GSHWDrawConfig::ColorMaskSelector;
 
+	enum TextureUnit : u32
+	{
+		TEXTURE_TEXTURE,
+		TEXTURE_PALETTE,
+		TEXTURE_RT,
+		TEXTURE_PRIMID,
+		TEXTURE_DEPTH,
+	};
+
 	struct alignas(16) ProgramSelector
 	{
 		PSSelector ps;
@@ -124,7 +133,7 @@ public:
 		__fi bool operator==(const ProgramSelector& p) const { return BitEqual(*this, p); }
 		__fi bool operator!=(const ProgramSelector& p) const { return !BitEqual(*this, p); }
 	};
-	static_assert(sizeof(ProgramSelector) == 16, "Program selector is 16 bytes");
+	static_assert(sizeof(ProgramSelector) == 32, "Program selector is 32 bytes");
 
 	struct ProgramSelectorHash
 	{
@@ -184,12 +193,22 @@ private:
 	struct
 	{
 		std::string vs;
-		GLProgram ps[static_cast<int>(ShaderConvert::Count)]; // program object
+		std::vector<GLProgram> ps; // program object
 		GLuint ln = 0; // sampler object
 		GLuint pt = 0; // sampler object
 		GSDepthStencilOGL* dss = nullptr;
 		GSDepthStencilOGL* dss_write = nullptr;
 	} m_convert;
+
+	GLProgram& GetConvertProgram(ShaderConvertSelector shader)
+	{
+		return m_convert.ps[shader.Index()];
+	}
+
+	GLProgram& GetConvertProgram(ShaderConvert shader)
+	{
+		return m_convert.ps[ShaderConvertSelector(shader).Index()];
+	}
 
 	GLProgram m_present[static_cast<int>(PresentShader::Count)];
 
@@ -255,8 +274,8 @@ private:
 
 	GSTexture* CreateSurface(GSTexture::Type type, int width, int height, int levels, GSTexture::Format format) override;
 
-	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const bool linear) override;
-	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, bool linear, const InterlaceConstantBuffer& cb) override;
+	void DoMerge(GSTexture* sTex[3], GSVector4* sRect, GSTexture* dTex, GSVector4* dRect, const GSRegPMODE& PMODE, const GSRegEXTBUF& EXTBUF, u32 c, const Filter filter) override;
+	void DoInterlace(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, ShaderInterlace shader, Filter filter, const InterlaceConstantBuffer& cb) override;
 
 	bool CompileFXAAProgram();
 	void DoFXAA(GSTexture* sTex, GSTexture* dTex) override;
@@ -281,9 +300,9 @@ private:
 	void SetIndexBuffer(std::unique_ptr<GLStreamBuffer>& buffer, const void* index, size_t count);
 
 protected:
+	using GSDevice::DoStretchRect; // Suppress overloaded virtual function warning
 	virtual void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect,
-		GSHWDrawConfig::ColorMaskSelector cms, ShaderConvert shader, bool linear) override;
-
+		ShaderConvertSelector shader, Filter filter) override;
 public:
 	GSDeviceOGL();
 	virtual ~GSDeviceOGL();
@@ -341,19 +360,24 @@ public:
 	void InsertDebugMessage(DebugMessageCategory category, const char* fmt, ...) override;
 
 	// BlitRect *does* mess with GL state, be sure to re-bind.
-	void BlitRect(GSTexture* sTex, const GSVector4i& r, const GSVector2i& dsize, bool at_origin, bool linear);
+	void BlitRect(GSTexture* sTex, const GSVector4i& r, const GSVector2i& dsize, bool at_origin, Filter filter);
 
-	void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool linear);
-	void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool alpha_blend, OMColorMaskSelector cms, bool linear);
-	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, PresentShader shader, float shaderTime, bool linear) override;
+	void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, Filter filter);
+	void DoStretchRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, const GLProgram& ps, bool alpha_blend, OMColorMaskSelector cms, Filter filter);
+	void PresentRect(GSTexture* sTex, const GSVector4& sRect, GSTexture* dTex, const GSVector4& dRect, PresentShader shader, float shaderTime, Filter filter) override;
 	void UpdateCLUTTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, GSTexture* dTex, u32 dOffset, u32 dSize) override;
 	void ConvertToIndexedTexture(GSTexture* sTex, float sScale, u32 offsetX, u32 offsetY, u32 SBW, u32 SPSM, GSTexture* dTex, u32 DBW, u32 DPSM) override;
 	void FilteredDownsampleTexture(GSTexture* sTex, GSTexture* dTex, u32 downsample_factor, const GSVector2i& clamp_min, const GSVector4& dRect) override;
 
-	void DrawMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvert shader) override;
+	void DrawMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, GSTexture* dTex, ShaderConvertSelector shader) override;
 	void DoMultiStretchRects(const MultiStretchRect* rects, u32 num_rects, const GSVector2& ds);
 
 	void RenderHW(GSHWDrawConfig& config) override;
+	void FeedbackCopyAndBind(const GSHWDrawConfig& config,
+		GSTexture* rt, GSTexture* rt_clone, GSTexture* ds, GSTexture* ds_clone, const GSVector4i& copyarea);
+	void FeedbackCopyAndBind(const GSHWDrawConfig& config,
+		GSTexture* rt, GSTexture* rt_clone, GSTexture* ds, GSTexture* ds_clone,
+		const GSVector4i& copyarea, const GSVector4i& samplearea);
 	void SendHWDraw(const GSHWDrawConfig& config,
 		GSTexture* draw_rt_clone, GSTexture* draw_rt, GSTexture* draw_ds_clone, GSTexture* draw_ds,
 		const bool one_barrier, const bool full_barrier);

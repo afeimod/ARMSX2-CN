@@ -388,9 +388,8 @@ enum class GSDumpCompressionMethod : u8
 enum class SavestateCompressionMethod : u8
 {
 	Uncompressed = 0,
-	Deflate64 = 1,
-	Zstandard = 2,
-	LZMA2 = 3
+	Deflate = 1,
+	Zstandard = 2
 };
 
 enum class SavestateCompressionLevel : u8
@@ -404,6 +403,7 @@ enum class SavestateCompressionLevel : u8
 enum class GSHardwareDownloadMode : u8
 {
 	Enabled,
+	EnabledForceFull,
 	NoReadbacks,
 	Unsynchronized,
 	Disabled
@@ -857,6 +857,9 @@ struct Pcsx2Config
 					HWMipmap : 1,
 					HWAccurateAlphaTest : 1,
 					HWAA1 : 1,
+					HWROV : 1,
+					HWROVLogging : 1,
+					HWROVBarriersVK : 1,
 					ManualUserHacks : 1,
 					UserHacks_AlignSpriteX : 1,
 					UserHacks_CPUFBConversion : 1,

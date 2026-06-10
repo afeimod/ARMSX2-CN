@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <pthread.h>
 #include <stdio.h>
+#include <mutex>
 #include "PrecompiledHeader.h"
 #include "tests/arm64/run_tests.h"
 #include "tests/core/run_patch_tests.h"
@@ -85,6 +86,19 @@ std::atomic<bool> s_execute_exit{false};
 int s_window_width = 0;
 int s_window_height = 0;
 ANativeWindow* s_window = nullptr;
+// Guards s_window against the UI-thread surfaceChanged/surfaceDestroyed
+// writers racing the GS thread's AcquireRenderWindow reader. Without it the
+// GS thread can read s_window an instant before the UI thread releases the
+// final reference — vkCreateAndroidSurfaceKHR then does RefBase::incStrong
+// on freed memory (observed as recurring SIGSEGV fault_addr=0x4 in the GS
+// thread). The lock is only held for pointer swaps and a refcount bump, so
+// the UI thread never waits on GPU work.
+static std::mutex s_window_mutex;
+// The GS thread's own reference on the window it last acquired, released on
+// the next acquire or via ReleaseRenderWindow. Keeps the window alive past
+// the UI thread dropping its reference; surface creation on an abandoned
+// (but live) window fails cleanly instead of crashing.
+static ANativeWindow* s_acquired_window = nullptr;
 
 static MemorySettingsInterface s_settings_interface;
 // File-backed RetroAchievements credentials store. Holds Token (written by
@@ -823,36 +837,80 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceChanged(JNIEnv *env, jclass clazz,
                                                             jobject p_surface, jint p_width, jint p_height) {
-    if(s_window) {
-        ANativeWindow_release(s_window);
-        s_window = nullptr;
-    }
-
-    if(p_surface != nullptr) {
-        s_window = ANativeWindow_fromSurface(env, p_surface);
-    }
-
-    if(p_width > 0 && p_height > 0) {
-        s_window_width = p_width;
-        s_window_height = p_height;
-        if(MTGS::IsOpen()) {
-            MTGS::UpdateDisplayWindow();
+    {
+        std::lock_guard<std::mutex> lock(s_window_mutex);
+        if(s_window) {
+            ANativeWindow_release(s_window);
+            s_window = nullptr;
         }
+        if(p_surface != nullptr) {
+            s_window = ANativeWindow_fromSurface(env, p_surface);
+        }
+        if(p_width > 0 && p_height > 0) {
+            s_window_width = p_width;
+            s_window_height = p_height;
+        }
+    }
+
+    if(p_width > 0 && p_height > 0 && MTGS::IsOpen()) {
+        MTGS::UpdateDisplayWindow();
     }
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_onNativeSurfaceDestroyed(JNIEnv *env, jclass clazz) {
-    if(s_window) {
-        ANativeWindow_release(s_window);
-        s_window = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(s_window_mutex);
+        if(s_window) {
+            ANativeWindow_release(s_window);
+            s_window = nullptr;
+        }
+    }
+    // Tear the swapchain down now rather than letting the GS thread keep
+    // presenting into the dead window until a failed present forces a
+    // recreate. AcquireRenderWindow reports Surfaceless while s_window is
+    // null, so the recreate path skips swapchain creation cleanly. Async
+    // post to the GS thread — safe from the UI thread.
+    if(MTGS::IsOpen()) {
+        MTGS::UpdateDisplayWindow();
     }
 }
 
 
 std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 {
+    WindowInfo _windowInfo;
+    memset(&_windowInfo, 0, sizeof(_windowInfo));
+
+    std::lock_guard<std::mutex> lock(s_window_mutex);
+
+    // Drop the previous acquisition's reference — at most one outstanding.
+    if (s_acquired_window) {
+        ANativeWindow_release(s_acquired_window);
+        s_acquired_window = nullptr;
+    }
+
+    // The Android surface dies and is reborn across overlay opens / resizes /
+    // backgrounding: onNativeSurfaceChanged releases s_window before creating
+    // the replacement, and onNativeSurfaceDestroyed leaves it null. Report
+    // Surfaceless in that window instead of Type::Android with a null handle —
+    // GSDeviceVK::UpdateWindow/GSDeviceOGL handle Surfaceless by skipping
+    // swapchain creation, while a null handle reaches vkCreateAndroidSurfaceKHR
+    // and SIGSEGVs inside the loader (RefBase::incStrong on null+4). The next
+    // onNativeSurfaceChanged triggers MTGS::UpdateDisplayWindow and we
+    // re-acquire the real surface.
+    if (!s_window) {
+        _windowInfo.type = WindowInfo::Type::Surfaceless;
+        return _windowInfo;
+    }
+
+    // Take our own reference so the UI thread releasing its reference (next
+    // surfaceChanged/Destroyed) can't free the window out from under the GS
+    // thread. Surface creation on an abandoned-but-live window fails cleanly.
+    ANativeWindow_acquire(s_window);
+    s_acquired_window = s_window;
+
     float _fScale = 1.0;
     if (s_window_width > 0 && s_window_height > 0) {
         int _nSize = s_window_width;
@@ -862,8 +920,6 @@ std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
         _fScale = (float)_nSize / 800.0f;
     }
     ////
-    WindowInfo _windowInfo;
-    memset(&_windowInfo, 0, sizeof(_windowInfo));
     _windowInfo.type = WindowInfo::Type::Android;
     _windowInfo.surface_width = s_window_width;
     _windowInfo.surface_height = s_window_height;
@@ -874,7 +930,11 @@ std::optional<WindowInfo> Host::AcquireRenderWindow(bool recreate_window)
 }
 
 void Host::ReleaseRenderWindow() {
-
+    std::lock_guard<std::mutex> lock(s_window_mutex);
+    if (s_acquired_window) {
+        ANativeWindow_release(s_acquired_window);
+        s_acquired_window = nullptr;
+    }
 }
 
 static s32 s_loop_count = 1;
@@ -1340,6 +1400,11 @@ void Host::OpenURL(const std::string_view url)
 bool Host::CopyTextToClipboard(const std::string_view text)
 {
     return false;
+}
+
+std::string Host::GetTextFromClipboard()
+{
+    return {};
 }
 
 void Host::BeginTextInput()

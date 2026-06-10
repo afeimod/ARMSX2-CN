@@ -2862,6 +2862,7 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 	};
 	static constexpr const char* s_hw_download[] = {
 		FSUI_NSTR("Accurate (Recommended)"),
+		FSUI_NSTR("Accurate Force Full (Can Reduce Readbacks)"),
 		FSUI_NSTR("Disable Readbacks (Synchronize GS Thread)"),
 		FSUI_NSTR("Unsynchronized (Non-Deterministic)"),
 		FSUI_NSTR("Disabled (Ignore Transfers)"),
@@ -3030,6 +3031,8 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 		DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_SPLOTCH, "Blending Accuracy"),
 			FSUI_CSTR("Determines the level of accuracy when emulating blend modes not supported by the host graphics API."), "EmuCore/GS",
 			"accurate_blending_unit", static_cast<int>(AccBlendLevel::Basic), s_blending_options, std::size(s_blending_options), true);
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_EYE_DROPPER, "Edge AA (AA1)"), FSUI_CSTR("Enables emulation of the GS's edge anti-aliasing (AA1)."),
+			"EmuCore/GS", "HWAA1", false);
 		DrawToggleSetting(
 			bsi, FSUI_ICONSTR(ICON_FA_BULLSEYE, "Mipmapping"), FSUI_CSTR("Enables emulation of the GS's texture mipmapping."), "EmuCore/GS", "hw_mipmap", true);
 	}
@@ -3040,8 +3043,6 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 			10);
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_TOILET, "Auto Flush (Software)"),
 			FSUI_CSTR("Force a primitive flush when a framebuffer is also an input texture."), "EmuCore/GS", "autoflush_sw", true);
-		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_EYE_DROPPER, "Edge AA (AA1)"), FSUI_CSTR("Enables emulation of the GS's edge anti-aliasing (AA1)."),
-			"EmuCore/GS", "aa1", true);
 		DrawToggleSetting(
 			bsi, FSUI_ICONSTR(ICON_FA_BULLSEYE, "Mipmapping"), FSUI_CSTR("Enables emulation of the GS's texture mipmapping."), "EmuCore/GS", "mipmap", true);
 	}
@@ -3283,10 +3284,17 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 	if (show_advanced_settings)
 	{
 		MenuHeading(FSUI_CSTR("Advanced"));
+		if (is_hardware && effective_renderer != GSRendererType::OGL)
+		{
+			DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_LAYER_GROUP, "Rasterizer Ordered View"),
+				FSUI_CSTR("Enables Rasterizer Ordered View (ROV), which allows feedback loops to be executed with fewer draw calls. Can improve performance in feedback heavy games "
+					  "with higher accuracy settings."),
+				"EmuCore/GS", "HWROV", true);
+		}
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_FORWARD, "Skip Presenting Duplicate Frames"),
 			FSUI_CSTR("Skips displaying frames that don't change in 25/30fps games. Can improve speed, but increase input lag/make frame pacing "
 					  "worse."),
-			"EmuCore/GS", "SkipDuplicateFrames", false);
+			"EmuCore/GS", "SkipDuplicateFrames", true);
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_ENVELOPE, "Disable Mailbox Presentation"),
 			FSUI_CSTR("Forces the use of FIFO over Mailbox presentation, i.e. double buffering instead of triple buffering. "
 					  "Usually results in worse frame pacing."),
@@ -3315,6 +3323,9 @@ void FullscreenUI::DrawGraphicsSettingsPage(SettingsInterface* bsi, bool show_ad
 			"EmuCore/GS", "DisableShaderCache", false);
 		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_BAN, "Disable Vertex Shader Expand"), FSUI_CSTR("Falls back to the CPU for expanding sprites/lines."),
 			"EmuCore/GS", "DisableVertexShaderExpand", false);
+		DrawToggleSetting(bsi, FSUI_ICONSTR(ICON_FA_ROAD_BARRIER, "ROV Barriers Vulkan"),
+			FSUI_CSTR("Forces extra barriers when using ROV with Vulkan to fix graphical issues present in some games and hardware configurations."),
+			"EmuCore/GS", "HWROVBarriersVK", false);
 		DrawIntListSetting(bsi, FSUI_ICONSTR(ICON_FA_DOWNLOAD, "Texture Preloading"),
 			FSUI_CSTR(
 				"Uploads full textures to the GPU on use, rather than only the utilized regions. Can improve performance in some games."),
@@ -4900,9 +4911,8 @@ void FullscreenUI::DrawAdvancedSettingsPage()
 
 	static constexpr const char* s_savestate_compression_type[] = {
 		FSUI_NSTR("Uncompressed"),
-		FSUI_NSTR("Deflate64"),
+		FSUI_NSTR("Deflate"),
 		FSUI_NSTR("Zstandard"),
-		FSUI_NSTR("LZMA2"),
 	};
 
 	static constexpr const char* s_savestate_compression_ratio[] = {
@@ -5268,10 +5278,10 @@ TRANSLATE_NOOP("FullscreenUI", "Selects where trilinear filtering is utilized wh
 TRANSLATE_NOOP("FullscreenUI", "Selects where anisotropic filtering is utilized when rendering textures.");
 TRANSLATE_NOOP("FullscreenUI", "Selects the type of dithering applies when the game requests it.");
 TRANSLATE_NOOP("FullscreenUI", "Determines the level of accuracy when emulating blend modes not supported by the host graphics API.");
+TRANSLATE_NOOP("FullscreenUI", "Enables emulation of the GS's edge anti-aliasing (AA1).");
 TRANSLATE_NOOP("FullscreenUI", "Enables emulation of the GS's texture mipmapping.");
 TRANSLATE_NOOP("FullscreenUI", "Number of threads to use in addition to the main GS thread for rasterization.");
 TRANSLATE_NOOP("FullscreenUI", "Force a primitive flush when a framebuffer is also an input texture.");
-TRANSLATE_NOOP("FullscreenUI", "Enables emulation of the GS's edge anti-aliasing (AA1).");
 TRANSLATE_NOOP("FullscreenUI", "Hardware Fixes");
 TRANSLATE_NOOP("FullscreenUI", "Disables automatic hardware fixes, allowing you to set fixes manually.");
 TRANSLATE_NOOP("FullscreenUI", "CPU Sprite Render Size");
@@ -5348,7 +5358,7 @@ TRANSLATE_NOOP("FullscreenUI", "Adjusts gamma. 50 is normal.");
 TRANSLATE_NOOP("FullscreenUI", "Adjusts saturation. 50 is normal.");
 TRANSLATE_NOOP("FullscreenUI", "Applies a shader which replicates the visual effects of different styles of television set.");
 TRANSLATE_NOOP("FullscreenUI", "Advanced");
-TRANSLATE_NOOP("FullscreenUI", "Skip Presenting Duplicate Frames");
+TRANSLATE_NOOP("FullscreenUI", "Enables Rasterizer Ordered View (ROV), which allows feedback loops to be executed with fewer draw calls. Can improve performance in feedback heavy games with higher accuracy settings.");
 TRANSLATE_NOOP("FullscreenUI", "Skips displaying frames that don't change in 25/30fps games. Can improve speed, but increase input lag/make frame pacing worse.");
 TRANSLATE_NOOP("FullscreenUI", "Disable Mailbox Presentation");
 TRANSLATE_NOOP("FullscreenUI", "Forces the use of FIFO over Mailbox presentation, i.e. double buffering instead of triple buffering. Usually results in worse frame pacing.");
@@ -5367,7 +5377,7 @@ TRANSLATE_NOOP("FullscreenUI", "Disable Shader Cache");
 TRANSLATE_NOOP("FullscreenUI", "Prevents the loading and saving of shaders/pipelines to disk.");
 TRANSLATE_NOOP("FullscreenUI", "Disable Vertex Shader Expand");
 TRANSLATE_NOOP("FullscreenUI", "Falls back to the CPU for expanding sprites/lines.");
-TRANSLATE_NOOP("FullscreenUI", "Texture Preloading");
+TRANSLATE_NOOP("FullscreenUI", "Forces extra barriers when using ROV with Vulkan to fix graphical issues present in some games and hardware configurations.");
 TRANSLATE_NOOP("FullscreenUI", "Uploads full textures to the GPU on use, rather than only the utilized regions. Can improve performance in some games.");
 TRANSLATE_NOOP("FullscreenUI", "NTSC Frame Rate");
 TRANSLATE_NOOP("FullscreenUI", "Determines what frame rate NTSC games run at.");
@@ -5705,6 +5715,7 @@ TRANSLATE_NOOP("FullscreenUI", "Full (Hash Cache)");
 TRANSLATE_NOOP("FullscreenUI", "Force Disabled");
 TRANSLATE_NOOP("FullscreenUI", "Force Enabled");
 TRANSLATE_NOOP("FullscreenUI", "Accurate (Recommended)");
+TRANSLATE_NOOP("FullscreenUI", "Accurate Force Full (Can Reduce Readbacks)");
 TRANSLATE_NOOP("FullscreenUI", "Disable Readbacks (Synchronize GS Thread)");
 TRANSLATE_NOOP("FullscreenUI", "Unsynchronized (Non-Deterministic)");
 TRANSLATE_NOOP("FullscreenUI", "Disabled (Ignore Transfers)");
@@ -5777,9 +5788,8 @@ TRANSLATE_NOOP("FullscreenUI", "Internal");
 TRANSLATE_NOOP("FullscreenUI", "Negative");
 TRANSLATE_NOOP("FullscreenUI", "Positive");
 TRANSLATE_NOOP("FullscreenUI", "Chop/Zero (Default)");
-TRANSLATE_NOOP("FullscreenUI", "Deflate64");
+TRANSLATE_NOOP("FullscreenUI", "Deflate");
 TRANSLATE_NOOP("FullscreenUI", "Zstandard");
-TRANSLATE_NOOP("FullscreenUI", "LZMA2");
 TRANSLATE_NOOP("FullscreenUI", "Low (Fast)");
 TRANSLATE_NOOP("FullscreenUI", "Medium (Recommended)");
 TRANSLATE_NOOP("FullscreenUI", "Very High (Slow, Not Recommended)");
@@ -5867,10 +5877,10 @@ TRANSLATE_NOOP("FullscreenUI", "Trilinear Filtering");
 TRANSLATE_NOOP("FullscreenUI", "Anisotropic Filtering");
 TRANSLATE_NOOP("FullscreenUI", "Dithering");
 TRANSLATE_NOOP("FullscreenUI", "Blending Accuracy");
+TRANSLATE_NOOP("FullscreenUI", "Edge AA (AA1)");
 TRANSLATE_NOOP("FullscreenUI", "Mipmapping");
 TRANSLATE_NOOP("FullscreenUI", "Software Rendering Threads");
 TRANSLATE_NOOP("FullscreenUI", "Auto Flush (Software)");
-TRANSLATE_NOOP("FullscreenUI", "Edge AA (AA1)");
 TRANSLATE_NOOP("FullscreenUI", "Manual Hardware Fixes");
 TRANSLATE_NOOP("FullscreenUI", "Load Textures");
 TRANSLATE_NOOP("FullscreenUI", "Asynchronous Texture Loading");
@@ -5887,7 +5897,21 @@ TRANSLATE_NOOP("FullscreenUI", "Shade Boost Brightness");
 TRANSLATE_NOOP("FullscreenUI", "Shade Boost Contrast");
 TRANSLATE_NOOP("FullscreenUI", "Shade Boost Saturation");
 TRANSLATE_NOOP("FullscreenUI", "TV Shaders");
+TRANSLATE_NOOP("FullscreenUI", "Rasterizer Ordered View");
+TRANSLATE_NOOP("FullscreenUI", "Skip Presenting Duplicate Frames");
+TRANSLATE_NOOP("FullscreenUI", "Disable Mailbox Presentation");
 TRANSLATE_NOOP("FullscreenUI", "Extended Upscaling Multipliers");
+TRANSLATE_NOOP("FullscreenUI", "Hardware Download Mode");
+TRANSLATE_NOOP("FullscreenUI", "Allow Exclusive Fullscreen");
+TRANSLATE_NOOP("FullscreenUI", "Override Texture Barriers");
+TRANSLATE_NOOP("FullscreenUI", "GS Dump Compression");
+TRANSLATE_NOOP("FullscreenUI", "Disable Framebuffer Fetch");
+TRANSLATE_NOOP("FullscreenUI", "Disable Shader Cache");
+TRANSLATE_NOOP("FullscreenUI", "Disable Vertex Shader Expand");
+TRANSLATE_NOOP("FullscreenUI", "ROV Barriers Vulkan");
+TRANSLATE_NOOP("FullscreenUI", "Texture Preloading");
+TRANSLATE_NOOP("FullscreenUI", "NTSC Frame Rate");
+TRANSLATE_NOOP("FullscreenUI", "PAL Frame Rate");
 TRANSLATE_NOOP("FullscreenUI", "OSD Scale");
 TRANSLATE_NOOP("FullscreenUI", "OSD Margin");
 TRANSLATE_NOOP("FullscreenUI", "OSD Messages Position");
