@@ -1,35 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string-array name="renderers">
-        <item>Auto</item>
+        <item>Automàtic</item>
         <item>OpenGL</item>
-        <item>Software</item>
+        <item>Programari</item>
         <item>Vulkan</item>
     </string-array>
     <string-array name="gpu_profile_override">
-        <item>Auto (Recommended)</item>
-        <item>Force Mali</item>
-        <item>Force Adreno</item>
+        <item>Automàtic (recomanat)</item>
+        <item>Forçar Mali</item>
+        <item>Forçar Adreno</item>
     </string-array>
     <string-array name="texture_filtering">
-        <item>PS2 (default)</item>
-        <item>Forced</item>
-        <item>Nearest</item>
+        <item>PS2 (Per defecte)</item>
+        <item>Forçat</item>
+        <item>Més proper</item>
     </string-array>
     <string-array name="interlace_modes">
-        <item>Automatic</item>
-        <item>Off</item>
+        <item>Automàtic</item>
+        <item>Desactivat</item>
         <item>Weave TFF</item>
         <item>Weave BFF</item>
         <item>Bob TFF</item>
         <item>Bob BFF</item>
         <item>Blend TFF</item>
         <item>Blend BFF</item>
-        <item>Adaptive TFF</item>
-        <item>Adaptive BFF</item>
+        <item>Adaptatiu TFF</item>
+        <item>Adaptatiu BFF</item>
     </string-array>
     <string-array name="cas_modes">
-        <item>None (Default)</item>
+        <item>Cap (Per defecte)</item>
         <item>Sharpen Only (Internal)</item>
         <item>Sharpen and Resize (Display)</item>
     </string-array>
