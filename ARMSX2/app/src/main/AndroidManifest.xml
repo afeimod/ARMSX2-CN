@@ -5,28 +5,60 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="archos.permission.FULLSCREEN.FULL" />
+    <!-- Coil fetches PS2 cover art from raw.githubusercontent.com on the
+         games-list screen. Without INTERNET the games list still works
+         but covers all show as the placeholder. -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         tools:ignore="ScopedStorage" />
 
+    <!-- "All files access" — required on Android 11+ when the user picks a
+         system folder outside the app's scoped sandbox (e.g. /storage/emulated/0/ARMSX2).
+         emucore's POSIX FileSystem (fopen/fread/mkdir) goes straight to the
+         kernel and scoped storage rejects raw POSIX writes to user-owned
+         public dirs even with a SAF persistable URI grant. The grant is
+         issued at runtime via Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION;
+         users who keep system files in the default app-private dir don't
+         need to enable it. -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+
     <application
+        android:name=".Pasx2Application"
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
+        android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:isGame="true"
+        android:appCategory="game"
         android:theme="@style/Theme.PASX2"
         android:allowNativeHeapPointerTagging="false"
+        tools:targetApi="31"
         >
+        <!-- Declare game mode support (Android 12+) — routes app through GameManager
+             performance profile so the OS scheduler and CPU/GPU governors prefer
+             big cores and peak clocks instead of throttling as a normal app. -->
+        <meta-data android:name="android.app.game_mode" android:value="performance" />
+
+        <!-- Profileable from the adb shell. Lets simpleperf record from the
+             release build without flipping debuggable on (which would also
+             change the JIT path and skew the numbers). -->
+        <profileable android:shell="true" tools:targetApi="29" />
+
         <meta-data android:name="android.max_aspect" android:value="2.4" />
 
         <activity
             android:name=".Main"
             android:screenOrientation="sensorLandscape"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize"
-            android:exported="true">
+            android:hardwareAccelerated="true"
+            android:exported="true"
+            android:resizeableActivity="false">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

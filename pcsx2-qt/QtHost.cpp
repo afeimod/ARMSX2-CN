@@ -77,6 +77,7 @@ namespace QtHost
 	static void SaveSettings();
 	static void HookSignals();
 	static void RegisterTypes();
+	static void InitializeClipboard();
 	static bool RunSetupWizard();
 	std::optional<bool> DownloadFile(QWidget* parent, const QString& title, std::string url, std::vector<u8>* data);
 } // namespace QtHost
@@ -96,6 +97,8 @@ static bool s_run_setup_wizard = false;
 static bool s_cleanup_after_update = false;
 static bool s_boot_and_debug = false;
 static std::atomic_int s_vm_locked_with_dialog = 0;
+static std::string s_clipboard_cache;
+static std::mutex s_clipboard_cache_mutex;
 
 //////////////////////////////////////////////////////////////////////////
 // CPU Thread
@@ -1131,16 +1134,6 @@ void Host::OnAchievementsHardcoreModeChanged(bool enabled)
 	emit g_emu_thread->onAchievementsHardcoreModeChanged(enabled);
 }
 
-void Host::OnCoverDownloaderOpenRequested()
-{
-	emit g_emu_thread->onCoverDownloaderOpenRequested();
-}
-
-void Host::OnCreateMemoryCardOpenRequested()
-{
-	emit g_emu_thread->onCreateMemoryCardOpenRequested();
-}
-
 bool Host::ShouldPreferHostFileSelector()
 {
 #ifdef __linux__
@@ -1676,6 +1669,12 @@ bool Host::CopyTextToClipboard(const std::string_view text)
 	return true;
 }
 
+std::string Host::GetTextFromClipboard()
+{
+	std::lock_guard<std::mutex> lock(s_clipboard_cache_mutex);
+	return s_clipboard_cache;
+}
+
 void Host::BeginTextInput()
 {
 	QInputMethod* method = qApp->inputMethod();
@@ -2086,7 +2085,8 @@ void QtHost::PrintCommandLineHelp(const std::string_view progname)
 	std::fprintf(stderr, "  -version: Displays version information and exits.\n");
 	std::fprintf(stderr, "  -batch: Enables batch mode (exits after shutting down).\n");
 	std::fprintf(stderr, "  -nogui: Hides main window while running (implies batch mode).\n");
-	std::fprintf(stderr, "  -portable: Force enable portable mode to store data in local PCSX2 path instead of the default configuration path.\n");
+	std::fprintf(stderr, "  -portable: Force enable portable mode to store data in local PCSX2 path instead of the default configuration path. Overrides '-datapath'.\n");
+	std::fprintf(stderr, "  -datapath <path>: Specify the directory to be used for all application data.\n");
 	std::fprintf(stderr, "  -elf <file>: Overrides the boot ELF with the specified filename.\n");
 	std::fprintf(stderr, "  -gameargs <string>: passes the specified quoted space-delimited string of launch arguments.\n");
 	std::fprintf(stderr, "  -disc <path>: Uses the specified host DVD drive as a source.\n");
@@ -2163,6 +2163,12 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 			else if (CHECK_ARG(QStringLiteral("-portable")))
 			{
 				EmuConfig.IsPortableMode = true;
+				continue;
+			}
+			else if (CHECK_ARG_PARAM(QStringLiteral("-datapath")))
+			{
+				std::string path = (++it)->toStdString();
+				EmuConfig.CustomDataPath = path;
 				continue;
 			}
 			else if (CHECK_ARG(QStringLiteral("-fastboot")))
@@ -2297,7 +2303,7 @@ bool QtHost::ParseCommandLineOptions(const QStringList& args, std::shared_ptr<VM
 		Console.Warning("Skipping autoboot due to no boot parameters.");
 		autoboot.reset();
 	}
-	
+
 	if(autoboot && autoboot->start_turbo.value_or(false) && autoboot->start_unlimited.value_or(false))
 	{
 		Console.Warning("Both turbo and unlimited frame limit modes requested. Using unlimited.");
@@ -2354,6 +2360,26 @@ void QtHost::RegisterTypes()
 	qRegisterMetaType<Achievements::LoginRequestReason>();
 }
 
+void QtHost::InitializeClipboard()
+{
+	QClipboard* clipboard = QGuiApplication::clipboard();
+	if (clipboard)
+	{
+		{
+			std::lock_guard<std::mutex> lock(s_clipboard_cache_mutex);
+			s_clipboard_cache = clipboard->text().toStdString();
+		}
+		QObject::connect(clipboard, &QClipboard::dataChanged, []() {
+			QClipboard* cb = QGuiApplication::clipboard();
+			if (cb)
+			{
+				std::lock_guard<std::mutex> lock(s_clipboard_cache_mutex);
+				s_clipboard_cache = cb->text().toStdString();
+			}
+		});
+	}
+}
+
 bool QtHost::RunSetupWizard()
 {
 	SetupWizardDialog dialog;
@@ -2401,6 +2427,8 @@ int main(int argc, char* argv[])
 	QtHost::RegisterTypes();
 
 	PCSX2MainApplication app(argc, argv);
+
+	QtHost::InitializeClipboard();
 
 #ifndef _WIN32
 	if (!PerformEarlyHardwareChecks())

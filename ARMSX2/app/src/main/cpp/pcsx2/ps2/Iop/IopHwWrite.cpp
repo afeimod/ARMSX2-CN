@@ -11,6 +11,7 @@
 #include "DEV9/DEV9.h"
 #include "USB/USB.h"
 #include "IopCounters.h"
+#include "PS1DrvTrace.h"
 #include "IopDma.h"
 #include "R3000A.h"
 
@@ -326,11 +327,18 @@ static __fi void _HwWrite_16or32_Page1( u32 addr, T val )
 			//	case 0x05e: serial_baud_write( val ); break;
 
 			mcase(HW_ISTAT):
+				// PSX HW_ISTAT write: bits cleared in val clear the matching IRQ
+				// status flags; bits set in val are preserved. Writing 0xFFFFFFFF
+				// is a no-op (preserve all). The original code had a hack that
+				// spuriously set CDROM (bit 2) and DMA (bit 3) IRQs when val ==
+				// 0xFFFFFFFF — hardware-incorrect and a likely source of state-
+				// machine corruption (e.g. FF8 new-game looping back when the
+				// game's IRQ-handling library wrote 0xFFFFFFFF as an ack).
+				PS1DRV_LOG_IRQ("HW_ISTAT write val=0x%08x prev_ISTAT=0x%08x cleared=0x%08x new_ISTAT=0x%08x",
+					(u32)val, psxHu32(HW_ISTAT),
+					psxHu32(HW_ISTAT) & ~(u32)val,
+					psxHu32(HW_ISTAT) & (u32)val);
 				psxHu(addr) &= val;
-				if (val == 0xffffffff) {
-					psxHu32(addr) |= 1 << 2;
-					psxHu32(addr) |= 1 << 3;
-				}
 			break;
 
 			mcase(HW_ISTAT+2):

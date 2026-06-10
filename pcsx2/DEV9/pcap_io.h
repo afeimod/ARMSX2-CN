@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #pragma once
+#if !defined(__ANDROID__)
 #include "pcap.h"
+#endif
 #include "net.h"
 #include "PacketReader/MAC_Address.h"
 
@@ -14,7 +16,9 @@ void unload_pcap();
 class PCAPAdapter : public NetAdapter
 {
 private:
+#if !defined(__ANDROID__)
 	pcap_t* hpcap = nullptr;
+#endif
 
 	bool switched;
 	bool blocking;
@@ -38,6 +42,9 @@ public:
 private:
 	bool InitPCAP(const std::string& adapter, bool promiscuous);
 	bool SetMACSwitchedFilter(PacketReader::MAC_Address mac);
+
+	bool RecvPCAPPacket(NetPacket* pkt);
+	bool SendPCAPPacket(const NetPacket* pkt);
 
 	void SetMACBridgedRecv(NetPacket* pkt);
 	void SetMACBridgedSend(NetPacket* pkt);

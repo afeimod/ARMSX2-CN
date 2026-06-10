@@ -1492,7 +1492,8 @@ void psxRecompileNextInstruction(bool delayslot, bool swapped_delayslot)
 	}
 
 	psxRegs.code = iopMemRead32(psxpc);
-	s_psxBlockCycles++;
+	extern u32 g_iopCycleMultiplier;
+	s_psxBlockCycles += g_iopCycleMultiplier;
 	psxpc += 4;
 
 	g_pCurInstInfo++;

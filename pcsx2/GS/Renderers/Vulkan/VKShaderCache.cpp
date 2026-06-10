@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include "GS/GSShaderCompileIndicator.h"
 #include "GS/GS.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
@@ -99,6 +100,61 @@ static void FillPipelineCacheHeader(VK_PIPELINE_CACHE_HEADER* header)
 	std::memcpy(header->uuid, GSDeviceVK::GetInstance()->GetDeviceProperties().pipelineCacheUUID, VK_UUID_SIZE);
 }
 
+#if defined(__ANDROID__)
+
+// Android: shaderc is statically linked, call functions directly.
+namespace dyn_shaderc
+{
+	static bool Open();
+	static void Close();
+
+	static shaderc_compiler_t s_compiler = nullptr;
+
+	// Direct function pointers to the statically-linked shaderc.
+	static constexpr auto shaderc_compiler_initialize = ::shaderc_compiler_initialize;
+	static constexpr auto shaderc_compiler_release = ::shaderc_compiler_release;
+	static constexpr auto shaderc_compile_options_initialize = ::shaderc_compile_options_initialize;
+	static constexpr auto shaderc_compile_options_release = ::shaderc_compile_options_release;
+	static constexpr auto shaderc_compile_options_set_source_language = ::shaderc_compile_options_set_source_language;
+	static constexpr auto shaderc_compile_options_set_generate_debug_info = ::shaderc_compile_options_set_generate_debug_info;
+	static constexpr auto shaderc_compile_options_set_optimization_level = ::shaderc_compile_options_set_optimization_level;
+	static constexpr auto shaderc_compile_options_set_target_env = ::shaderc_compile_options_set_target_env;
+	static constexpr auto shaderc_compile_into_spv = ::shaderc_compile_into_spv;
+	static constexpr auto shaderc_result_release = ::shaderc_result_release;
+	static constexpr auto shaderc_result_get_length = ::shaderc_result_get_length;
+	static constexpr auto shaderc_result_get_num_warnings = ::shaderc_result_get_num_warnings;
+	static constexpr auto shaderc_result_get_bytes = ::shaderc_result_get_bytes;
+	static constexpr auto shaderc_result_get_error_message = ::shaderc_result_get_error_message;
+	static constexpr auto shaderc_result_get_compilation_status = ::shaderc_result_get_compilation_status;
+} // namespace dyn_shaderc
+
+bool dyn_shaderc::Open()
+{
+	if (s_compiler)
+		return true;
+
+	s_compiler = shaderc_compiler_initialize();
+	if (!s_compiler)
+	{
+		ERROR_LOG("shaderc_compiler_initialize() failed");
+		return false;
+	}
+
+	std::atexit(&dyn_shaderc::Close);
+	return true;
+}
+
+void dyn_shaderc::Close()
+{
+	if (s_compiler)
+	{
+		shaderc_compiler_release(s_compiler);
+		s_compiler = nullptr;
+	}
+}
+
+#else // !__ANDROID__
+
 #define SHADERC_FUNCTIONS(X) \
 	X(shaderc_compiler_initialize) \
 	X(shaderc_compiler_release) \
@@ -143,8 +199,10 @@ bool dyn_shaderc::Open()
 #else
 	// Use versioned, bundle post-processing adds it..
 	const std::string libname = DynamicLibrary::GetVersionedFilename("shaderc_shared", 1);
+	// Debian packages the library as libshaderc.so.1
+	const std::string libname_fallback = DynamicLibrary::GetVersionedFilename("shaderc", 1);
 #endif
-	if (!s_library.Open(libname.c_str(), &error))
+	if (!s_library.Open(libname.c_str(), &error) && !s_library.Open(libname_fallback.c_str(), &error))
 	{
 		ERROR_LOG("Failed to load shaderc: {}", error.GetDescription());
 		return false;
@@ -191,6 +249,8 @@ void dyn_shaderc::Close()
 #undef SHADERC_FUNCTIONS
 #undef SHADERC_INIT_FUNCTIONS
 
+#endif // !__ANDROID__
+
 static void DumpBadShader(std::string_view code, std::string_view errors)
 {
 	const std::string filename = Path::Combine(EmuFolders::Logs, fmt::format("pcsx2_bad_shader_{}.txt", ++s_next_bad_shader_id));
@@ -229,6 +289,8 @@ std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileShaderToSPV(
 	std::optional<VKShaderCache::SPIRVCodeVector> ret;
 	if (!dyn_shaderc::Open())
 		return ret;
+
+	const GSShaderCompileIndicator::CompileTimer compile_timer;
 
 	shaderc_compile_options_t options = dyn_shaderc::shaderc_compile_options_initialize();
 	pxAssertRel(options, "shaderc_compile_options_initialize() failed");

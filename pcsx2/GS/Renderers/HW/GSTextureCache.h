@@ -30,6 +30,8 @@ public:
 
 	constexpr static u32 MAX_BP = 0x3fff;
 
+	constexpr static GSVector4 FullSrcRect = GSVector4::cxpr(0.0f, 0.0f, 1.0f, 1.0f);
+
 	constexpr static bool CheckOverlap(const u32 a_bp, const u32 a_bp_end, const u32 b_bp, const u32 b_bp_end) noexcept
 	{
 		u32 b_bp_start_synced = b_bp;
@@ -261,7 +263,7 @@ public:
 
 		bool OverlapsValid(u32 bp, u32 bw, u32 psm, const GSVector4i& rect) const;
 
-		__fi bool HasValidAlpha() const { return (m_valid_alpha_low | m_valid_alpha_high); }
+		__fi bool HasValidAlpha() const { return (m_valid_alpha_low || m_valid_alpha_high); }
 		bool HasValidBitsForFormat(u32 psm, bool req_color, bool req_alpha, bool width_match);
 
 		void ResizeDrawn(const GSVector4i& rect);
@@ -485,6 +487,20 @@ protected:
 
 	Source* CreateMergedSource(GIFRegTEX0 TEX0, GIFRegTEXA TEXA, SourceRegion region, float scale);
 
+	// Used in target lookup functions to determine new sizes of targets.
+	struct RescaleHelper
+	{
+		RescaleHelper(const GSVector2i& size, float scale);
+		void CalcRescale(const Target* tgt);
+		void SetNewSize(const GSVector2i& new_size, float scale);
+
+		const GSVector2i m_size;
+		float m_scale;
+		GSVector2i m_new_size{};
+		GSVector2i m_new_scaled_size{};
+		GSVector4 m_dRect{};
+		bool m_clear = true;
+	};
 public:
 	GSTextureCache();
 	~GSTextureCache();
@@ -516,13 +532,23 @@ public:
 
 	Target* FindTargetOverlap(Target* target, int type, int psm);
 	void CombineAlignedInsideTargets(Target* target, GSTextureCache::Source* src = nullptr);
-	Target* LookupTarget(GIFRegTEX0 TEX0, const GSVector2i& size, float scale, int type, bool used = true, u32 fbmask = 0,
-		bool is_frame = false, bool preload = GSConfig.PreloadFrameWithGSData, bool preserve_rgb = true, bool preserve_alpha = true,
-		const GSVector4i draw_rc = GSVector4i::zero(), bool is_shuffle = false, bool possible_clear = false, bool preserve_scale = false, GSTextureCache::Source* src = nullptr, GSTextureCache::Target* ds = nullptr, int offset = -1);
-	Target* CreateTarget(GIFRegTEX0 TEX0, const GSVector2i& size, const GSVector2i& valid_size, float scale, int type, bool used = true, u32 fbmask = 0,
-		bool is_frame = false, bool preload = GSConfig.PreloadFrameWithGSData, bool preserve_target = true,
+
+private:
+	Target* ProcessTargetAfterLookup(RescaleHelper& rescaler, Target* dst, GIFRegTEX0 TEX0, const GSVector2i& size, int type,
+		bool used, u32 fbmask, bool is_frame, bool preload, bool preserve_rgb = true, bool preserve_alpha = true,
+		const GSVector4i draw_rc = GSVector4i::zero(), bool is_shuffle = false, bool possible_clear = false,
+		bool preserve_scale = false, GSTextureCache::Source* src = nullptr, GSTextureCache::Target* ds = nullptr, int offset = -1);
+
+public:
+	Target* CreateTarget(GIFRegTEX0 TEX0, const GSVector2i& size, const GSVector2i& valid_size, float scale, int type, bool used = true,
+		u32 fbmask = 0, bool is_frame = false, bool preload = GSConfig.PreloadFrameWithGSData, bool preserve_target = true,
 		const GSVector4i draw_rc = GSVector4i::zero(), GSTextureCache::Source* src = nullptr);
+
 	Target* LookupDisplayTarget(GIFRegTEX0 TEX0, const GSVector2i& size, float scale, bool is_feedback);
+
+	Target* LookupDrawTarget(GIFRegTEX0 TEX0, const GSVector2i& size, float scale, int type, bool used = true, u32 fbmask = 0,
+		bool preload = GSConfig.PreloadFrameWithGSData, bool preserve_rgb = true, bool preserve_alpha = true,
+		const GSVector4i draw_rc = GSVector4i::zero(), bool is_shuffle = false, bool possible_clear = false, bool preserve_scale = false, GSTextureCache::Source* src = nullptr, GSTextureCache::Target* ds = nullptr, int offset = -1);
 
 	/// Looks up a target in the cache, and only returns it if the BP/BW match exactly.
 	Target* GetExactTarget(u32 BP, u32 BW, int type, u32 end_bp);
@@ -549,10 +575,10 @@ public:
 		HashCacheEntry* hc_entry, bool new_texture_is_shared);
 
 	/// Converts single color value to depth using the specified shader expression.
-	static float ConvertColorToDepth(u32 c, ShaderConvert convert);
+	static float ConvertColorToDepth(u32 c, u32 src_bpp, u32 dst_bpp);
 
 	/// Converts single depth value to colour using the specified shader expression.
-	static u32 ConvertDepthToColor(float d, ShaderConvert convert);
+	static u32 ConvertDepthToColor(float d, u32 dst_bpp);
 
 	/// Copies RGB channels from depth target to a color target.
 	bool CopyRGBFromDepthToColor(Target* dst, Target* depth_src);

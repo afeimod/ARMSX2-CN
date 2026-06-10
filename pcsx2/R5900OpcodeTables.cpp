@@ -25,7 +25,7 @@ namespace R5900
 	{
 		// Generates an entry for the given opcode name.
 		// Assumes the default function naming schemes for interpreter and recompiler  functions.
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#if defined(_M_X86) || defined(__aarch64__) || defined(_M_ARM64) // ARM64: rec functions provided by arm64/*.cpp
 	#	define MakeOpcode( name, cycles, flags ) \
 		static const OPCODE name = { \
 			#name, \

@@ -18,6 +18,13 @@
 #ifndef __APPLE__
 #include <ucontext.h>
 #endif
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+static int memfd_create_wrapper(const char* name, unsigned int flags)
+{
+	return static_cast<int>(syscall(__NR_memfd_create, name, flags));
+}
+#endif
 
 #include "fmt/format.h"
 
@@ -63,6 +70,15 @@ std::string HostSys::GetFileMappingName(const char* prefix)
 
 void* HostSys::CreateSharedMemory(const char* name, size_t size)
 {
+#if defined(__ANDROID__)
+	// Android: memfd_create available since API 26 (our minSdk), no shm_open until API 30
+	const int fd = memfd_create_wrapper(name, 0);
+	if (fd < 0)
+	{
+		std::fprintf(stderr, "memfd_create failed: %d\n", errno);
+		return nullptr;
+	}
+#else
 	const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
 	if (fd < 0)
 	{
@@ -72,6 +88,7 @@ void* HostSys::CreateSharedMemory(const char* name, size_t size)
 
 	// we're not going to be opening this mapping in other processes, so remove the file
 	shm_unlink(name);
+#endif
 
 	// ensure it's the correct size
 	if (ftruncate(fd, static_cast<off_t>(size)) < 0)
@@ -226,11 +243,6 @@ namespace PageFaultHandler
 
 #ifdef ARCH_ARM64
 
-void HostSys::FlushInstructionCache(void* address, u32 size)
-{
-	__builtin___clear_cache(reinterpret_cast<char*>(address), reinterpret_cast<char*>(address) + size);
-}
-
 [[maybe_unused]] static bool IsStoreInstruction(const void* ptr)
 {
 	u32 bits;
@@ -325,6 +337,8 @@ void PageFaultHandler::SignalHandler(int sig, siginfo_t* info, void* ctx)
 bool PageFaultHandler::Install(Error* error)
 {
 	std::unique_lock lock(s_exception_handler_mutex);
+	if (s_installed)
+		return true;
 	pxAssertRel(!s_installed, "Page fault handler has already been installed.");
 
 	struct sigaction sa;

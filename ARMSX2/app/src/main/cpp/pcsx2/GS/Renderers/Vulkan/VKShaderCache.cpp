@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: 2002-2026 PCSX2 Dev Team
 // SPDX-License-Identifier: GPL-3.0+
 
+#include "GS/GSShaderCompileIndicator.h"
 #include "GS/GS.h"
 #include "GS/Renderers/Vulkan/GSDeviceVK.h"
 #include "GS/Renderers/Vulkan/VKBuilders.h"
@@ -198,8 +199,10 @@ bool dyn_shaderc::Open()
 #else
 	// Use versioned, bundle post-processing adds it..
 	const std::string libname = DynamicLibrary::GetVersionedFilename("shaderc_shared", 1);
+	// Debian packages the library as libshaderc.so.1
+	const std::string libname_fallback = DynamicLibrary::GetVersionedFilename("shaderc", 1);
 #endif
-	if (!s_library.Open(libname.c_str(), &error))
+	if (!s_library.Open(libname.c_str(), &error) && !s_library.Open(libname_fallback.c_str(), &error))
 	{
 		ERROR_LOG("Failed to load shaderc: {}", error.GetDescription());
 		return false;
@@ -286,6 +289,8 @@ std::optional<VKShaderCache::SPIRVCodeVector> VKShaderCache::CompileShaderToSPV(
 	std::optional<VKShaderCache::SPIRVCodeVector> ret;
 	if (!dyn_shaderc::Open())
 		return ret;
+
+	const GSShaderCompileIndicator::CompileTimer compile_timer;
 
 	shaderc_compile_options_t options = dyn_shaderc::shaderc_compile_options_initialize();
 	pxAssertRel(options, "shaderc_compile_options_initialize() failed");

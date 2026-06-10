@@ -9,6 +9,8 @@
 
 #include "Mdec.h"
 #include "IopHw.h"
+#include "IopDma.h"
+#include "R3000A.h"
 
 struct
 {
@@ -253,6 +255,17 @@ void psxDma0(u32 adr, u32 bcr, u32 chcr)
 		mdec.rl = (u16*)PSXM(0); //mdec.rl = (u16*)PSXM(adr);
 	}
 
+	// Defer DMA completion to mimic real-MDEC bus-bandwidth pacing. PS1DRV
+	// and games poll DMA0_CHCR.BUSY between MDEC operations, so leaving BUSY
+	// set during the transfer window throttles the IOP main loop. Cycle cost
+	// approximated as base PARAM_MDEC_DELAY_CYCLE (DKWDRV default 0x1F4=500)
+	// + 1 IOP cycle per word transferred (bus bandwidth ~= 1 word/cycle).
+	const s32 mdec_in_cycles = 500 + size;
+	PSX_INT(IopEvt_DmaMDECin, mdec_in_cycles);
+}
+
+void psxDMAMDECinInterrupt()
+{
 	HW_DMA0_CHCR &= ~0x01000000;
 	psxDmaInterrupt(0);
 }
@@ -303,6 +316,18 @@ void psxDma1(u32 adr, u32 bcr, u32 chcr)
 			MDEC_LOG(" data %08X  %08X ", iopMemRead32((adr & 0x00FFFFFF) + (i * 4)), mdecArr2[i]);
 	}
 
+	// Defer DMA completion. MDEC OUT charges decode-throughput cycles in
+	// addition to bus-transfer cycles; per-DKWDRV PARAM_MDEC_DELAY_CYCLE
+	// default is 0x1F4 (500). Real PSX MDEC decode is ~9000 cycles per
+	// macroblock — at 192 u32/MB (24-bit) that's ~47 cycles per output word.
+	// We use a conservative 8 cycles/word to bound the throttle without
+	// overshooting; tune up if FMV is still too fast relative to game logic.
+	const s32 mdec_out_cycles = 500 + (size2 * 8);
+	PSX_INT(IopEvt_DmaMDECout, mdec_out_cycles);
+}
+
+void psxDMAMDECoutInterrupt()
+{
 	HW_DMA1_CHCR &= ~0x01000000;
 	psxDmaInterrupt(1);
 }

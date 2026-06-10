@@ -9,9 +9,16 @@ else()
 endif()
 target_link_libraries(PCSX2 PRIVATE PCSX2_FLAGS)
 
-target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_17)
+target_compile_features(PCSX2_FLAGS INTERFACE cxx_std_20)
 target_compile_definitions(PCSX2_FLAGS INTERFACE "${PCSX2_DEFS}")
 target_compile_options(PCSX2_FLAGS INTERFACE "${PCSX2_WARNINGS}")
+
+if(ANDROID)
+	target_compile_definitions(PCSX2_FLAGS INTERFACE
+		"PCSX2_CORE=1"
+		"DISABLE_RECORDING"
+	)
+endif()
 
 # Check that people use the good file
 if(NOT TOP_CMAKE_WAS_SOURCED)
@@ -131,6 +138,7 @@ set(pcsx2Sources
 	VUmicro.cpp
 	VU0micro.cpp
 	VU0microInterp.cpp
+	VU1Fingerprint.cpp
 	VU1micro.cpp
 	VU1microInterp.cpp
 	VUflags.cpp
@@ -200,6 +208,7 @@ set(pcsx2Headers
 	VMManager.h
 	vtlb.h
 	VUflags.h
+	VU1Fingerprint.h
 	VUmicro.h
 	VUops.h)
 
@@ -504,6 +513,7 @@ set(pcsx2GSSources
 	GS/Renderers/Common/GSDevice.cpp
 	GS/Renderers/Common/GSDirtyRect.cpp
 	GS/Renderers/Common/GSFunctionMap.cpp
+	GS/Renderers/Common/GSGPUProfile.cpp
 	GS/Renderers/Common/GSRenderer.cpp
 	GS/Renderers/Common/GSTexture.cpp
 	GS/Renderers/Common/GSVertexTrace.cpp
@@ -544,6 +554,7 @@ set(pcsx2GSHeaders
 	GS/Renderers/Common/GSDevice.h
 	GS/Renderers/Common/GSDirtyRect.h
 	GS/Renderers/Common/GSFastList.h
+	GS/Renderers/Common/GSGPUProfile.h
 	GS/Renderers/Common/GSFunctionMap.h
 	GS/Renderers/Common/GSRenderer.h
 	GS/Renderers/Common/GSTexture.h
@@ -606,9 +617,14 @@ if(USE_OPENGL)
 		list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextWGL.h)
 		target_link_libraries(PCSX2_FLAGS INTERFACE opengl32.lib WinPixEventRuntime::WinPixEventRuntime)
 	else()
-		if(X11_API OR WAYLAND_API)
+		if(ANDROID OR X11_API OR WAYLAND_API)
 			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGL.cpp)
 			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGL.h)
+		endif()
+
+		if(ANDROID)
+			list(APPEND pcsx2GSSources GS/Renderers/OpenGL/GLContextEGLAndroid.cpp)
+			list(APPEND pcsx2GSHeaders GS/Renderers/OpenGL/GLContextEGLAndroid.h)
 		endif()
 
 		if(X11_API)
@@ -651,6 +667,10 @@ if(USE_VULKAN)
 	)
 	target_link_libraries(PCSX2_FLAGS INTERFACE vulkan-headers)
 	target_include_directories(PCSX2_FLAGS INTERFACE ${SHADERC_INCLUDE_DIR})
+	if(ANDROID AND CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+		# VKLoader.cpp's adrenotools_open_libvulkan splice needs adrenotools/driver.h.
+		target_link_libraries(PCSX2_FLAGS INTERFACE adrenotools)
+	endif()
 endif()
 
 set(pcsx2GSMetalShaders
@@ -832,6 +852,9 @@ set(pcsx2HostSources
 	Host/AudioStream.cpp
 	Host/CubebAudioStream.cpp
 	Host/SDLAudioStream.cpp)
+if(ANDROID)
+	list(APPEND pcsx2HostSources Host/OboeAudioStream.cpp)
+endif()
 
 set(pcsx2HostHeaders
 	Host/AudioStream.h
@@ -1050,20 +1073,85 @@ set(pcsx2x86Headers
 	)
 
 # ARM64
+# File layout aligned with arm64/mac/ for direct apples-to-apples comparison.
+# Mac-only files (aR5900FPU = our COP1, aR5900Arith = our ALU+Move+Shift
+# combined). Android-port-only files keep their Android names with the
+# new aXxx prefix (aR5900COP0/COP2/Backprop/Misc/Trap, aR3000Atables, aDMAC,
+# aVTLB, aVU0*).
 set(pcsx2arm64Sources
 	arm64/AsmHelpers.cpp
 	arm64/Vif_Dynarec.cpp
 	arm64/Vif_UnpackNEON.cpp
 	arm64/RecStubs.cpp
-	arm64/iR5900_arm64.cpp
-	arm64/iR5900Branch_arm64.cpp
-	arm64/iR5900Stubs_arm64.cpp
+	arm64/aVTLB.cpp
+	arm64/aR5900.cpp
+	arm64/aR5900Arith.cpp
+	arm64/aR5900Branch.cpp
+	arm64/aR5900LoadStore.cpp
+	arm64/aR5900MultDiv.cpp
+	arm64/aR5900FPU.cpp
+	arm64/aR5900MMI.cpp
+	arm64/aR5900Misc.cpp
+	arm64/aR5900Trap.cpp
+	arm64/aR5900COP0.cpp
+	arm64/aR5900COP2.cpp
+	arm64/aR5900Backprop.cpp
+	arm64/aVU0.cpp
+	arm64/aVU.cpp
+	arm64/aDMAC.cpp
+	arm64/aR3000A.cpp
+	arm64/aR3000Atables.cpp
 	x86/BaseblockEx.cpp
+	# macOS-port arm64 EE/IOP/VU recompiler, namespaced into pcsx2_macrec.
+	# Lives alongside the original native backend so VMManager can route per CPU.
+	arm64/mac/AsmHelpers.cpp
+	arm64/mac/RecStubs.cpp
+	arm64/mac/Vif_Dynarec.cpp
+	arm64/mac/Vif_UnpackNEON.cpp
+	arm64/mac/aR3000A.cpp
+	arm64/mac/aR5900.cpp
+	arm64/mac/aR5900Arith.cpp
+	arm64/mac/aR5900Branch.cpp
+	arm64/mac/aR5900FPU.cpp
+	arm64/mac/aR5900LoadStore.cpp
+	arm64/mac/aR5900MMI.cpp
+	arm64/mac/aR5900MultDiv.cpp
+	arm64/mac/aVU.cpp
 	)
 
 set(pcsx2arm64Headers
 	arm64/AsmHelpers.h
 	arm64/arm64Emitter.h
+	arm64/InterpFlags.h
+	arm64/TraceBlocks.h
+	arm64/Vif_UnpackNEON.h
+	arm64/aR3000A.h
+	arm64/aDMAC.h
+	arm64/aVU0.h
+	arm64/aVU0_Upper.inl
+	arm64/aVU0_Lower.inl
+	arm64/aVU.h
+	arm64/aVU_IR.h
+	arm64/aVU_Upper.inl
+	arm64/aVU_Lower.inl
+	arm64/mac/AsmHelpers.h
+	arm64/mac/Vif_UnpackNEON.h
+	arm64/mac/aR3000A.h
+	arm64/mac/aR5900.h
+	arm64/mac/aVU.h
+	arm64/mac/aVU_IR.h
+	arm64/mac/aVU_Misc.h
+	arm64/mac/aVU_Alloc.inl
+	arm64/mac/aVU_Analyze.inl
+	arm64/mac/aVU_Branch.inl
+	arm64/mac/aVU_Clamp.inl
+	arm64/mac/aVU_Compile.inl
+	arm64/mac/aVU_Flags.inl
+	arm64/mac/aVU_Lower.inl
+	arm64/mac/aVU_Misc.inl
+	arm64/mac/aVU_Tables.inl
+	arm64/mac/aVU_Upper.inl
+	arm64/mac/MacBackend.h
 )
 
 # These ones benefit a lot from LTO
@@ -1136,6 +1224,12 @@ if(ANDROID)
 	target_sources(PCSX2 PRIVATE
 		Android/AndroidStubs.cpp
 		Android/AndroidPcapStubs.cpp
+	)
+	find_library(log-lib log)
+	target_link_libraries(PCSX2_FLAGS INTERFACE
+		oboe
+		android
+		${log-lib}
 	)
 endif()
 
@@ -1232,21 +1326,14 @@ target_include_directories(PCSX2_FLAGS INTERFACE
 	"${CMAKE_BINARY_DIR}/common/include"
 	"${FFMPEG_INCLUDE_DIRS}"
 )
-if(ANDROID)
-	# Desktop #includes use "bin/resources/shaders/..." — on Android these live under assets/.
-	# Point an include dir so "bin/resources/..." resolves to the assets location.
-	get_filename_component(_ANDROID_BIN_PARENT "${CMAKE_SOURCE_DIR}/../../../../src/main/assets/resources/shaders/.." ABSOLUTE)
-	# _ANDROID_BIN_PARENT = .../assets/resources — we need parent of "bin", where bin/resources/shaders exists
-	# Include is "bin/resources/shaders/common/ffx_a.h" so we need dir D where D/bin/resources/shaders/common/ffx_a.h exists
-	# assets = .../app/src/main/assets, assets/resources/shaders/common/ffx_a.h exists
-	# So we need D/bin = assets, meaning D = assets/.. with bin renamed. Easiest: just copy the two headers.
-	set(_FFX_SRC "${CMAKE_SOURCE_DIR}/../assets/resources/shaders/common")
-	get_filename_component(_FFX_SRC "${_FFX_SRC}" ABSOLUTE)
-	set(_FFX_DST "${CMAKE_BINARY_DIR}/bin/resources/shaders/common")
-	file(MAKE_DIRECTORY "${_FFX_DST}")
-	file(COPY "${_FFX_SRC}/ffx_a.h" "${_FFX_SRC}/ffx_cas.h" DESTINATION "${_FFX_DST}")
-	target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_BINARY_DIR}")
-endif()
+# Copy FFX shader headers so "bin/resources/shaders/..." #includes resolve.
+# On both Android and desktop ARMSX2, these live under assets/, not bin/.
+set(_FFX_SRC "${CMAKE_SOURCE_DIR}/../assets/resources/shaders/common")
+get_filename_component(_FFX_SRC "${_FFX_SRC}" ABSOLUTE)
+set(_FFX_DST "${CMAKE_BINARY_DIR}/bin/resources/shaders/common")
+file(MAKE_DIRECTORY "${_FFX_DST}")
+file(COPY "${_FFX_SRC}/ffx_a.h" "${_FFX_SRC}/ffx_cas.h" DESTINATION "${_FFX_DST}")
+target_include_directories(PCSX2_FLAGS INTERFACE "${CMAKE_BINARY_DIR}")
 
 set_source_files_properties(PrecompiledHeader.cpp PROPERTIES HEADER_FILE_ONLY TRUE)
 if(COMMAND target_precompile_headers)

@@ -4,7 +4,7 @@ plugins {
 }
 
 android {
-    namespace = "com.pasx2"
+    namespace = "com.armsx2"
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -12,23 +12,13 @@ android {
     }
 
     defaultConfig {
-        applicationId = "com.pasx2"
+        applicationId = "com.armsx2"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        externalNativeBuild {
-            cmake {
-                // pass flags to clang
-                arguments += "-DANDROID=true"
-                arguments += "-DANDROID_STL=c++_static"
-                arguments += "-DCMAKE_BUILD_TYPE=Release"
-                arguments += "-DCMAKE_C_FLAGS=-O2 -ffp-contract=off"
-                arguments += "-DCMAKE_CXX_FLAGS=-O2 -ffp-contract=off"
-            }
-        }
         ndk {
             abiFilters.add("arm64-v8a")
         }
@@ -37,10 +27,46 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // Sign release with the debug keystore so it's installable on-device
+            // without a separate signing config. NOT for distribution — the debug
+            // keystore is well-known and not secure for Play Store uploads.
+            // Replace with a real release signingConfig before publishing.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DANDROID=true"
+                    arguments += "-DANDROID_STL=c++_static"
+                    arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
+                }
+            }
+        }
+        debug {
+            // Keep PCSX2_DEBUG/VIXL_DEBUG defines (via CMAKE_BUILD_TYPE=Debug)
+            // but compile at -O3 to match release's
+            // codegen. -O0 was exposing a JIT-adjacent crash in MGS2 that
+            // -O3 release didn't hit, which narrows the cause to stack/
+            // uninitialised-local fragility rather than the debug defines.
+            // -ffp-contract=off was previously kept for VU1 bit-exactness
+            // but only affects C/C++ FP code, not JIT-emitted FMUL/FADD.
+            // Removing it lets the compiler fuse a*b+c → FMADD in counters,
+            // GS software renderer, SPU2 audio mixing, IPU, VIF unpack —
+            // significant FP-heavy paths. JIT'd VU FMAC semantics are
+            // unaffected because the recompiler emits explicit Fmul+Fadd.
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DANDROID=true"
+                    arguments += "-DANDROID_STL=c++_static"
+                    arguments += "-DCMAKE_BUILD_TYPE=Debug"
+                    arguments += "-DCMAKE_C_FLAGS=-O3 -g"
+                    arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
+                }
+            }
         }
     }
     compileOptions {
@@ -52,6 +78,36 @@ android {
             path = file("src/main/cpp/CMakeLists.txt")
         }
     }
+    buildFeatures {
+        // Generated BuildConfig.DEBUG used by Main.kt's debug-only auto-boot
+        // path. AGP 8 made this opt-in.
+        buildConfig = true
+    }
+
+    packaging {
+        jniLibs {
+            // libadrenotools requires `useLegacyPackaging = true` so the
+            // hook .so files (hook_impl, main_hook, file_redirect_hook,
+            // gsl_alloc_hook) get extracted to ApplicationInfo.nativeLibraryDir
+            // at install time. Without this, AGP leaves them inside the apk
+            // and adrenotools' linker-namespace bypass can't find them by
+            // path — the custom Vulkan driver load silently falls back to
+            // the system loader.
+            useLegacyPackaging = true
+        }
+    }
+}
+
+// Android Studio's "Build > Clean Project" runs the `clean` task, but AGP
+// leaves `app/.cxx/` (the CMake/Ninja workspace) in place. Stale .cxx state
+// can lead to ghost builds — old object files linking against newer headers,
+// or vice versa. Wire `cleanCxx` into `clean` so the native build workspace
+// gets wiped too.
+tasks.register<Delete>("cleanCxx") {
+    delete(layout.projectDirectory.dir(".cxx"))
+}
+tasks.named("clean") {
+    dependsOn("cleanCxx")
 }
 
 dependencies {
@@ -67,8 +123,13 @@ dependencies {
     implementation(libs.composeIcons.lineAwesome)
 
     implementation(libs.kotlin.reflect)
+    implementation(libs.androidx.compose.ui.tooling.preview)
+    implementation(libs.androidx.compose.foundation)
+    implementation(libs.androidx.documentfile)
+    implementation(libs.coil.compose)
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    debugImplementation(libs.androidx.compose.ui.tooling)
 }

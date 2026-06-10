@@ -15,6 +15,7 @@
 
 #include "Hardware.h"
 #include "IPU/IPUdma.h"
+#include "arm64/aDMAC.h"
 
 #include "Elfheader.h"
 #include "CDVD/CDVD.h"
@@ -273,8 +274,8 @@ static __fi bool _cpuTestInterrupts()
 		/* These are 'pcsx2 interrupts', they handle asynchronous stuff
 		   that depends on the cycle timings */
 		TESTINT(VU_MTVU_BUSY, MTVUInterrupt);
-		TESTINT(DMAC_VIF1, vif1Interrupt);
-		TESTINT(DMAC_GIF, gifInterrupt);
+		TESTINT(DMAC_VIF1, recDMACInterrupt_VIF1);
+		TESTINT(DMAC_GIF, recDMACInterrupt_GIF);
 		TESTINT(DMAC_SIF0, EEsif0Interrupt);
 		TESTINT(DMAC_SIF1, EEsif1Interrupt);
 		// Profile-guided Optimization (sorta)
@@ -285,14 +286,14 @@ static __fi bool _cpuTestInterrupts()
 			| (1 << DMAC_FROM_SPR) | (1 << DMAC_TO_SPR) | (1 << DMAC_MFIFO_VIF) | (1 << DMAC_MFIFO_GIF)
 			| (1 << VIF_VU0_FINISH) | (1 << VIF_VU1_FINISH) | (1 << IPU_PROCESS)))
 		{
-			TESTINT(DMAC_VIF0, vif0Interrupt);
+			TESTINT(DMAC_VIF0, recDMACInterrupt_VIF0);
 
-			TESTINT(DMAC_FROM_IPU, ipu0Interrupt);
-			TESTINT(DMAC_TO_IPU, ipu1Interrupt);
+			TESTINT(DMAC_FROM_IPU, recDMACInterrupt_IPU0);
+			TESTINT(DMAC_TO_IPU, recDMACInterrupt_IPU1);
 			TESTINT(IPU_PROCESS, ipuCMDProcess);
 
-			TESTINT(DMAC_FROM_SPR, SPRFROMinterrupt);
-			TESTINT(DMAC_TO_SPR, SPRTOinterrupt);
+			TESTINT(DMAC_FROM_SPR, recDMACInterrupt_SPR0);
+			TESTINT(DMAC_TO_SPR, recDMACInterrupt_SPR1);
 
 			TESTINT(DMAC_MFIFO_VIF, vifMFIFOInterrupt);
 			TESTINT(DMAC_MFIFO_GIF, gifMFIFOInterrupt);
@@ -369,6 +370,7 @@ __fi void _cpuEventTest_Shared()
 	// be able to read the value before the exception handler clears it).
 
 	uint mask = intcInterrupt() | dmacInterrupt();
+
 	if (cpuIntsEnabled(mask))
 		cpuException(mask, cpuRegs.branch);
 
@@ -434,8 +436,24 @@ __fi void _cpuEventTest_Shared()
 	CpuVU1->ExecuteBlock();
 
 	// ---- Schedule Next Event Test --------------
-	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
-	const int nextIopEventDeta = ((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier);
+	// Hot path: PS2 mode has PSXCLK=36864000 fixed, so PS2CLK/PSXCLK is exactly
+	// 8 — encode as shift to skip the per-event u32→float conversion + float
+	// division + truncate. PS1 mode (PSXCLK=33868800, set via SBUS_F240 write
+	// in HwWrite.cpp) keeps the precise float path so the IOP↔EE ratio matches
+	// R3000AInterpreter.cpp's PS1 path (cnum=1280/cdenom=147). Mirrors the
+	// old armsx2 port's Android fast-path but gated on PSXCLK so PS1 stays
+	// correct. _cpuEventTest_Shared is 8–10% of CPU at BIOS idle.
+	const s32 iopDelta = static_cast<s32>(psxRegs.iopNextEventCycle - psxRegs.cycle);
+	s32 nextIopEventDeta;
+	if (PSXCLK == 36864000) [[likely]]
+	{
+		nextIopEventDeta = iopDelta << 3;
+	}
+	else
+	{
+		const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+		nextIopEventDeta = static_cast<s32>(iopDelta * mutiplier);
+	}
 	// 8 or more cycles behind and there's an event scheduled
 	if (EEsCycle >= nextIopEventDeta)
 	{
@@ -448,7 +466,7 @@ __fi void _cpuEventTest_Shared()
 	else
 	{
 		// Otherwise IOP is caught up/not doing anything so we can wait for the next event.
-		cpuSetNextEventDelta(((psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier) - EEsCycle);
+		cpuSetNextEventDelta(nextIopEventDeta - EEsCycle);
 	}
 
 	// Apply vsync and other counter nextCycles
@@ -700,6 +718,7 @@ void eeloadHook()
 				{
 					// Overwrite OSDSYS with game's ELF name
 					strcpy((char*)PSM(g_osdsys_str), elfname.c_str());
+					break;
 				}
 			}
 		}

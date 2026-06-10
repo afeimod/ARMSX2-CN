@@ -187,6 +187,7 @@ public:
 protected:
 	bool Seek(std::FILE* f, u32 adr);
 	bool Create(const char* mcdFile, uint sizeInMB);
+	bool CreatePS1(const char* mcdFile);
 };
 
 uint FileMcd_GetMtapPort(uint slot)
@@ -249,6 +250,32 @@ std::string FileMcd_GetDefaultName(uint slot)
 		return StringUtil::StdStringFromFormat("Mcd%03u.ps2", slot + 1);
 }
 
+// PS1-mode memcard swap. When the IOP enters PS1 mode (SBUS_F240 bit 19 in
+// HwWrite.cpp), HwWrite calls FileMcd_SetPS1Mode(true) which closes the
+// PS2 (.ps2, 8MB) memcards and re-opens PS1 (.mcr, 128KB) memcards in their
+// place. Reset to false at FileMcd_EmuOpen so each VM session starts in PS2
+// mode by default.
+static bool s_ps1_mcd_mode = false;
+
+// Derives the PS1 memcard filename for a slot by replacing the configured
+// PS2 extension with .mcr. Slot 1 with PS2 file "Mcd001.ps2" becomes
+// "Mcd001.mcr". Lives alongside the PS2 memcard so PS1 saves don't touch
+// PS2 save data.
+static std::string GetPs1McdPath(uint slot)
+{
+	std::string base = EmuConfig.FullpathToMcd(slot);
+	for (const char* ext : { ".ps2", ".bin", ".mc2" })
+	{
+		const size_t elen = std::strlen(ext);
+		if (base.size() >= elen && base.compare(base.size() - elen, elen, ext) == 0)
+		{
+			base.resize(base.size() - elen);
+			break;
+		}
+	}
+	return base + ".mcr";
+}
+
 FileMemoryCard::FileMemoryCard()
 {
 	for (u8 slot = 0; slot < 8; slot++)
@@ -276,23 +303,41 @@ void FileMemoryCard::Open()
 				continue;
 		}
 
-		const std::string fname = EmuConfig.FullpathToMcd(slot);
+		// Ensure both the PS2 (.ps2) and PS1 (.mcr) sidecar files exist for
+		// every slot — they're a pair, the active one is selected by mode at
+		// runtime. Pre-creating both means the .mcr files are visible in the
+		// memcards directory alongside the .ps2 files at all times, which
+		// matches how the user thinks about the memcard set.
+		const std::string ps2_fname = EmuConfig.FullpathToMcd(slot);
+		const std::string ps1_fname = GetPs1McdPath(slot);
 
-		if (!EmuConfig.Mcd[slot].Enabled || fname.empty())
+		if (!EmuConfig.Mcd[slot].Enabled || ps2_fname.empty())
 		{
 			Console.WriteLnFmt("McdSlot {} [File]: [disabled/empty filename]", slot);
 			continue;
 		}
 
-		if (FileSystem::GetPathFileSize(fname.c_str()) <= 0)
+		if (FileSystem::GetPathFileSize(ps2_fname.c_str()) <= 0)
 		{
-			if (!Create(fname.c_str(), 8))
+			if (!Create(ps2_fname.c_str(), 8))
 			{
 				Host::ReportErrorAsync(TRANSLATE_SV("MemoryCard", "Memory Card Creation Failed"),
 					fmt::format(TRANSLATE_FS("MemoryCard", "Could not create the memory card:\n{}"),
-						fname));
+						ps2_fname));
 			}
 		}
+		if (FileSystem::GetPathFileSize(ps1_fname.c_str()) <= 0)
+		{
+			if (!CreatePS1(ps1_fname.c_str()))
+			{
+				Host::ReportErrorAsync(TRANSLATE_SV("MemoryCard", "Memory Card Creation Failed"),
+					fmt::format(TRANSLATE_FS("MemoryCard", "Could not create the PS1 memory card:\n{}"),
+						ps1_fname));
+			}
+		}
+
+		// Pick which one to actually open based on the current mode.
+		const std::string fname = s_ps1_mcd_mode ? ps1_fname : ps2_fname;
 
 		if (fname.ends_with(".bin") || fname.ends_with(".mc2"))
 		{
@@ -394,6 +439,125 @@ bool FileMemoryCard::Create(const char* mcdFile, uint sizeInMB)
 		if (std::fwrite(buf, sizeof(buf), 1, fp.get()) != 1)
 			return false;
 	}
+	return true;
+}
+
+// Creates a 128KB PS1 memory card, fully formatted so the PS1 BIOS / game
+// recognizes it as a valid blank card. A 0xFF-filled file is rejected as
+// "UNFORMATTED" — without the magic 'MC' header in sector 0 plus the free-
+// directory entries in sectors 1-15, Crash and other PS1 games display the
+// "please insert memory card" prompt.
+//
+// Format laid out per psx-spx (controllersandmemorycards.md, "Memory Card
+// Frame Layouts"):
+//   Block 0 (header block, sectors 0-63):
+//     Sector 0       Header Frame: "MC" + zeros + XOR (=0x0E)
+//     Sectors 1-15   Directory Frames: state=0xA0 (Free), next=0xFFFF, XOR
+//     Sectors 16-35  Broken Sector List: state=0xFFFFFFFF (no broken)
+//     Sectors 36-55  Broken Sector Replacement Data (0xFF)
+//     Sectors 56-62  Unused (0xFF)
+//     Sector 63      Write Test Frame (same as Header)
+//   Blocks 1-15 (save data, sectors 64-1023): 0xFF
+bool FileMemoryCard::CreatePS1(const char* mcdFile)
+{
+	Console.WriteLn("(FileMcd) Creating new formatted 128KB PS1 memory card: %s", mcdFile);
+
+	auto fp = FileSystem::OpenManagedCFile(mcdFile, "wb");
+	if (!fp)
+		return false;
+
+	const auto write_sector = [&fp](const u8* sector) -> bool {
+		return std::fwrite(sector, 128, 1, fp.get()) == 1;
+	};
+
+	const auto compute_xor = [](u8* sector) {
+		u8 x = 0;
+		for (int i = 0; i < 127; i++)
+			x ^= sector[i];
+		sector[127] = x;
+	};
+
+	// Sector 0: Header Frame ("MC" + zeros + XOR).
+	{
+		u8 sector[128] = {};
+		sector[0] = 'M'; // 0x4D
+		sector[1] = 'C'; // 0x43
+		compute_xor(sector);
+		if (!write_sector(sector))
+			return false;
+	}
+
+	// Sectors 1-15: Directory Frames (15 entries, all Free).
+	for (int i = 1; i <= 15; i++)
+	{
+		u8 sector[128] = {};
+		sector[0] = 0xA0; // Free, freshly formatted
+		sector[8] = 0xFF; // next block pointer = FFFF (no link)
+		sector[9] = 0xFF;
+		compute_xor(sector);
+		if (!write_sector(sector))
+			return false;
+	}
+
+	// Sectors 16-35: Broken Sector List (20 entries, all "no broken sector").
+	for (int i = 16; i <= 35; i++)
+	{
+		u8 sector[128] = {};
+		sector[0] = 0xFF; // broken sector position = -1 (none)
+		sector[1] = 0xFF;
+		sector[2] = 0xFF;
+		sector[3] = 0xFF;
+		sector[8] = 0xFF; // many cards write FFFF here
+		sector[9] = 0xFF;
+		compute_xor(sector);
+		if (!write_sector(sector))
+			return false;
+	}
+
+	// Sectors 36-55: Broken Sector Replacement Data (20 entries, all 0xFF).
+	{
+		u8 sector[128];
+		std::memset(sector, 0xFF, sizeof(sector));
+		for (int i = 36; i <= 55; i++)
+		{
+			if (!write_sector(sector))
+				return false;
+		}
+	}
+
+	// Sectors 56-62: Unused (7 entries, all 0xFF).
+	{
+		u8 sector[128];
+		std::memset(sector, 0xFF, sizeof(sector));
+		for (int i = 56; i <= 62; i++)
+		{
+			if (!write_sector(sector))
+				return false;
+		}
+	}
+
+	// Sector 63: Write Test Frame (same shape as Header Frame).
+	{
+		u8 sector[128] = {};
+		sector[0] = 'M';
+		sector[1] = 'C';
+		compute_xor(sector);
+		if (!write_sector(sector))
+			return false;
+	}
+
+	// Blocks 1-15 (save data, 15 blocks × 64 sectors × 128 bytes = 120KB).
+	{
+		u8 buf[1024];
+		std::memset(buf, 0xFF, sizeof(buf));
+		// 120KB = 120 chunks of 1024 bytes.
+		for (int i = 0; i < 120; i++)
+		{
+			if (std::fwrite(buf, sizeof(buf), 1, fp.get()) != 1)
+				return false;
+		}
+	}
+
 	return true;
 }
 
@@ -603,16 +767,61 @@ void FileMcd_SetType()
 	}
 }
 
+// Establish the PS1 power-up FLAG byte (0x08 = "directory not yet read")
+// for every memcard slot. Called from every memcard-open path so each fresh
+// card-insert event matches real-PSX power-up state. Sio0::Initialize sets
+// this once per emulator-process at VM creation, but subsequent VM reboots,
+// disc swaps, and PS1-mode toggles don't re-run it, leaving FLAG at whatever
+// the prior session left (often 0 after PS1Write cleared bit 3).
+static void InitPS1McdFlags()
+{
+	for (int i = 0; i < 2; i++)
+	{
+		for (int j = 0; j < 4; j++)
+			mcds[i][j].FLAG = 0x08;
+	}
+}
+
 void FileMcd_EmuOpen()
 {
 	if (FileMcd_Open)
 		return;
 	FileMcd_Open = true;
 
+	// s_ps1_mcd_mode is set by VMManager based on disc type *before* calling
+	// FileMcd_Reopen, so the EmuOpen invoked from there picks up the right
+	// file set on first open. Don't reset it here.
 
 	Mcd::impl.Open();
 	Mcd::implFolder.SetFiltering(true);
 	Mcd::implFolder.Open();
+
+	InitPS1McdFlags();
+}
+
+void FileMcd_SetPS1Mode(bool ps1_mode)
+{
+	if (s_ps1_mcd_mode == ps1_mode)
+		return;
+
+	if (FileMcd_Open)
+	{
+		Console.WriteLn("FileMcd: switching memcard set to %s mode", ps1_mode ? "PS1 (.mcr)" : "PS2 (.ps2)");
+		Mcd::implFolder.Close();
+		Mcd::impl.Close();
+		s_ps1_mcd_mode = ps1_mode;
+		Mcd::impl.Open();
+		Mcd::implFolder.SetFiltering(true);
+		Mcd::implFolder.Open();
+		// Re-establish FLAG=0x08 — the swap presents a freshly-inserted
+		// card to the running game. Without this, FLAG keeps whatever
+		// value the prior PS2-mode session left (or stays at 0).
+		InitPS1McdFlags();
+	}
+	else
+	{
+		s_ps1_mcd_mode = ps1_mode;
+	}
 }
 
 void FileMcd_EmuClose()

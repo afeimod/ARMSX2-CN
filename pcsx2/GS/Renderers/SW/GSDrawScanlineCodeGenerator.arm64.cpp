@@ -77,8 +77,10 @@ static const auto& _d4_f = v9;
 static const auto& _test = v8;
 static const auto& _fd = v2;
 
-#define _local(field) MemOperand(_locals, offsetof(GSScanlineLocalData, field))
-#define _global(field) MemOperand(_globals, offsetof(GSScanlineGlobalData, field))
+// Yay, you can't offsetof with non-constant array indices in GCC
+#define OFFSETOF(base, field) (reinterpret_cast<uptr>(&reinterpret_cast<base*>(0)->field))
+#define _local(field) MemOperand(_locals, OFFSETOF(GSScanlineLocalData, field))
+#define _global(field) MemOperand(_globals, OFFSETOF(GSScanlineGlobalData, field))
 #define armAsm (&m_emitter)
 
 GSDrawScanlineCodeGenerator::GSDrawScanlineCodeGenerator(u64 key, void* code, size_t maxsize)
@@ -2266,7 +2268,12 @@ void GSDrawScanlineCodeGenerator::ReadTexelImplLoadTexLOD(const Register& addr, 
 {
 	pxAssert(addr.IsX());
 	pxAssert(m_sel.mmin);
-	armAsm->Ldr(addr.W(), m_sel.lcm ? _global(lod.i.U32[lod]) : _local(temp.lod.i.U32[lod]));
+	{
+		const int lod_lane_offset = lod * sizeof(u32);
+		armAsm->Ldr(addr.W(), m_sel.lcm
+			? MemOperand(_globals, offsetof(GSScanlineGlobalData, lod.i) + lod_lane_offset)
+			: MemOperand(_locals, offsetof(GSScanlineLocalData, temp.lod.i) + lod_lane_offset));
+	}
 	if (mip_offset != 0)
 		armAsm->Add(addr.W(), addr.W(), mip_offset);
 	armAsm->Ldr(addr.X(), MemOperand(_global_tex0, addr, LSL, 3));

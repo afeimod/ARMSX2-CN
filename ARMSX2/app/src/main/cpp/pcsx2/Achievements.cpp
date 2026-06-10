@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -62,6 +63,10 @@ namespace Achievements
 	static constexpr float GAME_COMPLETE_NOTIFICATION_TIME = 20.0f;
 	static constexpr float LEADERBOARD_STARTED_NOTIFICATION_TIME = 3.0f;
 	static constexpr float LEADERBOARD_FAILED_NOTIFICATION_TIME = 3.0f;
+
+	static constexpr const char* DEFAULT_INFO_SOUND_NAME = "sounds/achievements/message.wav";
+	static constexpr const char* DEFAULT_UNLOCK_SOUND_NAME = "sounds/achievements/unlock.wav";
+	static constexpr const char* DEFAULT_LBSUBMIT_SOUND_NAME = "sounds/achievements/lbsubmit.wav";
 
 	static constexpr float INDICATOR_FADE_IN_TIME = 0.1f;
 	static constexpr float INDICATOR_FADE_OUT_TIME = 0.5f;
@@ -392,6 +397,192 @@ bool Achievements::HasAchievements()
 	return s_has_achievements;
 }
 
+std::string Achievements::GetAchievementsAsJSON()
+{
+	// JSON-quote a string into the buffer, escaping the bare minimum so
+	// org.json on the Java side can parse the payload. We don't expect
+	// achievement titles/descriptions to contain control chars beyond \n,
+	// but escape them defensively. Characters > 0x7F are passed through —
+	// the JSON spec allows raw UTF-8 in string contents.
+	auto append_json_string = [](std::string& dst, const char* src) {
+		dst += '"';
+		if (src)
+		{
+			for (const char* p = src; *p; ++p)
+			{
+				const unsigned char c = static_cast<unsigned char>(*p);
+				switch (c)
+				{
+					case '"':  dst += "\\\""; break;
+					case '\\': dst += "\\\\"; break;
+					case '\n': dst += "\\n";  break;
+					case '\r': dst += "\\r";  break;
+					case '\t': dst += "\\t";  break;
+					default:
+						if (c < 0x20)
+						{
+							char esc[8];
+							std::snprintf(esc, sizeof(esc), "\\u%04x", c);
+							dst += esc;
+						}
+						else
+						{
+							dst += static_cast<char>(c);
+						}
+						break;
+				}
+			}
+		}
+		dst += '"';
+	};
+
+	std::string out;
+	out.reserve(4096);
+	out += '{';
+
+	auto lock = GetLock();
+
+	const bool active = HasActiveGame() && s_has_achievements;
+
+	// `s_client` is the persistent rc_client created by Achievements::Initialize,
+	// which only runs when a VM is initialized AND EmuConfig.Achievements.Enabled.
+	// On Android the user typically logs in BEFORE loading a game, via the
+	// overlay's right-side panel — that path uses a TEMPORARY client which is
+	// destroyed when Login returns. So `rc_client_get_user_info(s_client)` reports
+	// "not logged in" even though the auth token was just written to the secrets
+	// layer. Fall back to the persisted Username / Token to detect post-login
+	// state. Token lives in the LAYER_SECRETS in-memory store; Username in BASE.
+	const rc_client_user_t* user = s_client ? rc_client_get_user_info(s_client) : nullptr;
+	std::string display_name;
+	bool logged_in = false;
+	if (user && user->display_name)
+	{
+		display_name = user->display_name;
+		logged_in = true;
+	}
+	else
+	{
+		const std::string saved_user = Host::GetBaseStringSettingValue("Achievements", "Username", "");
+		const std::string saved_token = Host::GetStringSettingValue("Achievements", "Token");
+		if (!saved_user.empty() && !saved_token.empty())
+		{
+			display_name = saved_user;
+			logged_in = true;
+		}
+	}
+
+	out += "\"active\":";
+	out += active ? "true" : "false";
+	out += ",\"loggedIn\":";
+	out += logged_in ? "true" : "false";
+	out += ",\"hardcore\":";
+	out += s_hardcore_mode ? "true" : "false";
+	out += ",\"userName\":";
+	append_json_string(out, display_name.c_str());
+
+	out += ",\"items\":[";
+
+	if (active && s_client)
+	{
+		// Build a fresh list — don't reuse s_achievement_list, that one's
+		// owned by the ImGui pause-menu Achievements window and we don't
+		// want to step on its lifecycle.
+		rc_client_achievement_list_t* list = rc_client_create_achievement_list(
+			s_client, RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL,
+			RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+
+		if (list)
+		{
+			// Same display order the ImGui window uses.
+			static constexpr u32 bucket_order[] = {
+				RC_CLIENT_ACHIEVEMENT_BUCKET_ACTIVE_CHALLENGE,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_RECENTLY_UNLOCKED,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_UNLOCKED,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_ALMOST_THERE,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_LOCKED,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_UNOFFICIAL,
+				RC_CLIENT_ACHIEVEMENT_BUCKET_UNSUPPORTED,
+			};
+
+			bool first = true;
+			for (u32 bucket_type : bucket_order)
+			{
+				for (u32 b = 0; b < list->num_buckets; b++)
+				{
+					const rc_client_achievement_bucket_t& bucket = list->buckets[b];
+					if (bucket.bucket_type != bucket_type)
+						continue;
+					for (u32 a = 0; a < bucket.num_achievements; a++)
+					{
+						const rc_client_achievement_t* ach = bucket.achievements[a];
+						if (!ach)
+							continue;
+						if (!first)
+							out += ',';
+						first = false;
+						out += "{\"id\":";
+						out += std::to_string(ach->id);
+						out += ",\"title\":";
+						append_json_string(out, ach->title);
+						out += ",\"description\":";
+						append_json_string(out, ach->description);
+						out += ",\"points\":";
+						out += std::to_string(ach->points);
+						out += ",\"unlocked\":";
+						out += (ach->state == RC_CLIENT_ACHIEVEMENT_STATE_UNLOCKED) ? "true" : "false";
+						out += ",\"bucket\":";
+						out += std::to_string(static_cast<int>(bucket.bucket_type));
+						out += ",\"rarity\":";
+						{
+							char buf[32];
+							std::snprintf(buf, sizeof(buf), "%.1f", ach->rarity);
+							out += buf;
+						}
+						out += ",\"measuredProgress\":";
+						append_json_string(out, ach->measured_progress);
+						out += ",\"measuredPercent\":";
+						{
+							char buf[32];
+							std::snprintf(buf, sizeof(buf), "%.1f", ach->measured_percent);
+							out += buf;
+						}
+						// Type lets the UI tag MISSABLE / PROGRESSION / WIN
+						// achievements (STANDARD = 0 → no tag). Unlocked is
+						// the SOFTCORE/HARDCORE bitmask — distinguishes how
+						// the user earned it for the HC indicator. unlockTime
+						// is unix-seconds (0 if locked) so the panel can
+						// render a relative timestamp.
+						out += ",\"type\":";
+						out += std::to_string(static_cast<int>(ach->type));
+						out += ",\"unlockedMask\":";
+						out += std::to_string(static_cast<int>(ach->unlocked));
+						out += ",\"unlockTime\":";
+						out += std::to_string(static_cast<long long>(ach->unlock_time));
+						// Badge image URL for the achievement's current state
+						// (unlocked variant vs `_lock` greyscale). Java side
+						// fetches via Coil into the persistent cover_cache —
+						// RA badge URLs are immutable per badge_name so they
+						// cache forever. Empty string on failure → panel
+						// falls back to the glyph placeholder.
+						{
+							char url_buf[256];
+							const int rc = rc_client_achievement_get_image_url(
+								ach, ach->state, url_buf, std::size(url_buf));
+							out += ",\"iconUrl\":";
+							append_json_string(out, rc == RC_OK ? url_buf : "");
+						}
+						out += '}';
+					}
+				}
+			}
+			rc_client_destroy_achievement_list(list);
+		}
+	}
+
+	out += "]}";
+	return out;
+}
+
 bool Achievements::HasLeaderboards()
 {
 	return s_has_leaderboards;
@@ -455,9 +646,9 @@ bool Achievements::Initialize()
 		SettingsInterface* secretsInterface = Host::Internal::GetSecretsSettingsLayer();
 		secretsInterface->SetStringValue("Achievements", "Token", oldToken.c_str());
 		secretsInterface->Save();
-		
+
 		oldToken.clear();
-		
+
 		auto baseLock = Host::GetSettingsLock();
 		SettingsInterface* baseInterface = Host::Internal::GetBaseSettingsLayer();
 		baseInterface->DeleteValue("Achievements", "Token");
@@ -528,10 +719,21 @@ bool Achievements::CreateClient(rc_client_t** client, std::unique_ptr<HTTPDownlo
 
 void Achievements::DestroyClient(rc_client_t** client, std::unique_ptr<HTTPDownloader>* http)
 {
-	(*http)->WaitForAllRequests();
+	// Be null-safe on both halves: Login's ScopedGuard fires
+	// DestroyClient unconditionally on early-return paths, including the
+	// CreateClient-failed case where `*http` is still a default-constructed
+	// (null) unique_ptr and `*client` is whatever CreateClient left it
+	// (typically null). Without these guards a failed login (e.g. no
+	// network on Android, curl_global_init refused) crashes in cleanup
+	// before the caller can read the error string.
+	if (*http)
+		(*http)->WaitForAllRequests();
 
-	rc_client_destroy(*client);
-	*client = nullptr;
+	if (*client)
+	{
+		rc_client_destroy(*client);
+		*client = nullptr;
+	}
 
 	http->reset();
 }
@@ -540,7 +742,7 @@ void Achievements::UpdateNotificationPosition()
 {
 	// Set notification position based on achievement settings
 	float horizontal_position, vertical_position, direction;
-	
+
 	// Determine horizontal alignment
 	switch (EmuConfig.Achievements.NotificationPosition)
 	{
@@ -549,13 +751,13 @@ void Achievements::UpdateNotificationPosition()
 		case OsdOverlayPos::BottomLeft:
 			horizontal_position = 0.0f; // Left
 			break;
-			
+
 		case OsdOverlayPos::TopCenter:
 		case OsdOverlayPos::Center:
 		case OsdOverlayPos::BottomCenter:
 			horizontal_position = 0.5f; // Center
 			break;
-			
+
 		case OsdOverlayPos::TopRight:
 		case OsdOverlayPos::CenterRight:
 		case OsdOverlayPos::BottomRight:
@@ -563,7 +765,7 @@ void Achievements::UpdateNotificationPosition()
 			horizontal_position = 1.0f; // Right
 			break;
 	}
-	
+
 	// Determine vertical alignment and stacking direction
 	switch (EmuConfig.Achievements.NotificationPosition)
 	{
@@ -573,14 +775,14 @@ void Achievements::UpdateNotificationPosition()
 			vertical_position = 0.15f; // Top area
 			direction = 1.0f; // Stack downward
 			break;
-			
+
 		case OsdOverlayPos::CenterLeft:
 		case OsdOverlayPos::Center:
 		case OsdOverlayPos::CenterRight:
 			vertical_position = 0.5f; // Center
 			direction = 1.0f; // Stack downward
 			break;
-			
+
 		case OsdOverlayPos::BottomLeft:
 		case OsdOverlayPos::BottomCenter:
 		case OsdOverlayPos::BottomRight:
@@ -589,7 +791,7 @@ void Achievements::UpdateNotificationPosition()
 			direction = -1.0f; // Stack upward
 			break;
 	}
-	
+
 	ImGuiFullscreen::SetNotificationPosition(horizontal_position, vertical_position, direction);
 }
 
@@ -741,11 +943,18 @@ void Achievements::ClientServerCall(
 {
 	HTTPDownloader::Request::Callback hd_callback = [callback, callback_data](s32 status_code, const std::string& content_type, HTTPDownloader::Request::Data data)
 	{
+		const bool is_error = (status_code <= 0);
+		const bool is_retryable =
+			is_error && (status_code == HTTPDownloader::HTTP_STATUS_TIMEOUT);
+
 		rc_api_server_response_t rr;
-		rr.http_status_code = (status_code <= 0) ? (status_code == HTTPDownloader::HTTP_STATUS_CANCELLED ?
-		                                                   RC_API_SERVER_RESPONSE_CLIENT_ERROR :
-		                                                   RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR)
-		                                         : status_code;
+		rr.http_status_code =
+			is_error
+			? (is_retryable
+				? RC_API_SERVER_RESPONSE_RETRYABLE_CLIENT_ERROR
+				: RC_API_SERVER_RESPONSE_CLIENT_ERROR)
+			: status_code;
+
 		rr.body_length = data.size();
 		rr.body = reinterpret_cast<const char*>(data.data());
 
@@ -1142,7 +1351,11 @@ void Achievements::DisplayAchievementSummary()
 	}
 
 	if (EmuConfig.Achievements.SoundEffects && EmuConfig.Achievements.InfoSound)
-		Common::PlaySoundAsync(EmuConfig.Achievements.InfoSoundName.c_str());
+		Common::PlaySoundAsync(
+			(EmuConfig.Achievements.InfoSoundName.empty()
+				? Path::Combine(EmuFolders::Resources, DEFAULT_INFO_SOUND_NAME)
+				: EmuConfig.Achievements.InfoSoundName).c_str()
+		);
 }
 
 void Achievements::DisplayHardcoreDeferredMessage()
@@ -1194,7 +1407,11 @@ void Achievements::HandleUnlockEvent(const rc_client_event_t* event)
 	}
 
 	if (EmuConfig.Achievements.SoundEffects && EmuConfig.Achievements.UnlockSound)
-		Common::PlaySoundAsync(EmuConfig.Achievements.UnlockSoundName.c_str());
+		Common::PlaySoundAsync(
+			(EmuConfig.Achievements.UnlockSoundName.empty()
+				? Path::Combine(EmuFolders::Resources, DEFAULT_UNLOCK_SOUND_NAME)
+				: EmuConfig.Achievements.UnlockSoundName).c_str()
+		);
 }
 
 void Achievements::HandleGameCompleteEvent(const rc_client_event_t* event)
@@ -1315,7 +1532,11 @@ void Achievements::HandleLeaderboardSubmittedEvent(const rc_client_event_t* even
 	}
 
 	if (EmuConfig.Achievements.SoundEffects && EmuConfig.Achievements.LBSubmitSound)
-		Common::PlaySoundAsync(EmuConfig.Achievements.LBSubmitSoundName.c_str());
+		Common::PlaySoundAsync(
+			(EmuConfig.Achievements.LBSubmitSoundName.empty()
+				? Path::Combine(EmuFolders::Resources, DEFAULT_LBSUBMIT_SOUND_NAME)
+				: EmuConfig.Achievements.LBSubmitSoundName).c_str()
+		);
 }
 
 void Achievements::HandleLeaderboardScoreboardEvent(const rc_client_event_t* event)
@@ -1524,6 +1745,11 @@ void Achievements::DisableHardcoreMode()
 		if (RA_HardcoreModeIsActive())
 			RA_DisableHardcore();
 
+		if (s_hardcore_mode && !RA_HardcoreModeIsActive())
+		{
+			s_hardcore_mode = false;
+			Host::OnAchievementsHardcoreModeChanged(false);
+		}
 		return;
 	}
 #endif
@@ -1536,6 +1762,18 @@ bool Achievements::ResetHardcoreMode(bool is_booting)
 {
 	if (!IsActive())
 		return false;
+
+#ifdef ENABLE_RAINTEGRATION
+	if (IsUsingRAIntegration())
+	{
+		const bool ra_hardcore = (RA_HardcoreModeIsActive() != 0);
+		if (ra_hardcore == s_hardcore_mode)
+			return false;
+		s_hardcore_mode = ra_hardcore;
+		Host::OnAchievementsHardcoreModeChanged(ra_hardcore);
+		return true;
+	}
+#endif
 
 	const auto lock = GetLock();
 
@@ -1833,7 +2071,7 @@ void Achievements::ClientLoginWithPasswordCallback(int result, const char* error
 	Host::SetBaseStringSettingValue("Achievements", "Username", params->username);
 	Host::SetBaseStringSettingValue("Achievements", "LoginTimestamp", fmt::format("{}", std::time(nullptr)).c_str());
 	Host::CommitBaseSettingChanges();
-	
+
 	SettingsInterface* secretsInterface = Host::Internal::GetSecretsSettingsLayer();
 	secretsInterface->SetStringValue("Achievements", "Token", user->token);
 	secretsInterface->Save();
@@ -2032,7 +2270,7 @@ static ImVec2 CalculateOverlayPosition(const ImGuiIO& io, float padding, Achieve
 static ImVec2 AdjustPositionForAlignment(const ImVec2& base_position, const ImVec2& element_size, AchievementOverlayPosition alignment)
 {
 	ImVec2 adjusted = base_position;
-	
+
 	// Adjust for horizontal alignment
 	switch (alignment)
 	{
@@ -2041,14 +2279,14 @@ static ImVec2 AdjustPositionForAlignment(const ImVec2& base_position, const ImVe
 		case AchievementOverlayPosition::BottomLeft:
 			// Left aligned no adjustment needed for x
 			break;
-			
+
 		case AchievementOverlayPosition::TopCenter:
 		case AchievementOverlayPosition::Center:
 		case AchievementOverlayPosition::BottomCenter:
 			// Center aligned offset by half element width
 			adjusted.x -= element_size.x * 0.5f;
 			break;
-			
+
 		case AchievementOverlayPosition::TopRight:
 		case AchievementOverlayPosition::CenterRight:
 		case AchievementOverlayPosition::BottomRight:
@@ -2057,7 +2295,7 @@ static ImVec2 AdjustPositionForAlignment(const ImVec2& base_position, const ImVe
 			adjusted.x -= element_size.x;
 			break;
 	}
-	
+
 	// Adjust for vertical alignment
 	switch (alignment)
 	{
@@ -2066,14 +2304,14 @@ static ImVec2 AdjustPositionForAlignment(const ImVec2& base_position, const ImVe
 		case AchievementOverlayPosition::TopRight:
 			// Top aligned no adjustment needed for y
 			break;
-			
+
 		case AchievementOverlayPosition::CenterLeft:
 		case AchievementOverlayPosition::Center:
 		case AchievementOverlayPosition::CenterRight:
 			// Center aligned offset by half element height
 			adjusted.y -= element_size.y * 0.5f;
 			break;
-			
+
 		case AchievementOverlayPosition::BottomLeft:
 		case AchievementOverlayPosition::BottomCenter:
 		case AchievementOverlayPosition::BottomRight:
@@ -2082,7 +2320,7 @@ static ImVec2 AdjustPositionForAlignment(const ImVec2& base_position, const ImVe
 			adjusted.y -= element_size.y;
 			break;
 	}
-	
+
 	return adjusted;
 }
 
@@ -2094,19 +2332,19 @@ static ImVec2 GetStackingDirection(AchievementOverlayPosition alignment)
 		case AchievementOverlayPosition::TopCenter:
 		case AchievementOverlayPosition::TopRight:
 			return ImVec2(0.0f, 1.0f); // Stack downward
-			
+
 		case AchievementOverlayPosition::BottomLeft:
 		case AchievementOverlayPosition::BottomCenter:
 		case AchievementOverlayPosition::BottomRight:
 		default:
 			return ImVec2(0.0f, -1.0f); // Stack upward
-			
+
 		case AchievementOverlayPosition::CenterLeft:
 			return ImVec2(1.0f, 0.0f); // Stack rightward
-			
+
 		case AchievementOverlayPosition::CenterRight:
 			return ImVec2(-1.0f, 0.0f); // Stack leftward
-			
+
 		case AchievementOverlayPosition::Center:
 			return ImVec2(0.0f, -1.0f); // Stack upward for center
 	}
@@ -2147,7 +2385,7 @@ void Achievements::DrawGameOverlays()
 			{
 				dl->AddImage(reinterpret_cast<ImTextureID>(badge->GetNativeHandle()),
 					current_position, current_position + image_size, ImVec2(0.0f, 0.0f), ImVec2(1.0f, 1.0f), col);
-				
+
 				// For horizontal layouts, go horizontally for vertical layouts, stay in the same row
 				if (std::abs(stack_direction.x) > 0.0f)
 				{
@@ -2198,7 +2436,7 @@ void Achievements::DrawGameOverlays()
 		const ImVec2 progress_box_size = ImVec2(image_size.x + text_size.x + spacing + padding * 2.0f, image_size.y + padding * 2.0f);
 		const ImVec2 stack_direction = GetStackingDirection(EmuConfig.Achievements.OverlayPosition);
 		const ImVec2 box_position = AdjustPositionForAlignment(position, progress_box_size, EmuConfig.Achievements.OverlayPosition);
-		
+
 		const ImVec2 box_min = box_position;
 		const ImVec2 box_max = box_position + progress_box_size;
 		const float box_rounding = LayoutScale(1.0f);
@@ -2232,7 +2470,7 @@ void Achievements::DrawGameOverlays()
 	if (!s_active_leaderboard_trackers.empty() && EmuConfig.Achievements.LBOverlays)
 	{
 		const ImVec2 stack_direction = GetStackingDirection(EmuConfig.Achievements.OverlayPosition);
-		
+
 		for (auto it = s_active_leaderboard_trackers.begin(); it != s_active_leaderboard_trackers.end();)
 		{
 			const LeaderboardTrackerIndicator& indicator = *it;
@@ -2247,7 +2485,7 @@ void Achievements::DrawGameOverlays()
 
 			const ImVec2 tracker_box_size = ImVec2(size.x + padding * 2.0f, size.y + padding * 2.0f);
 			const ImVec2 box_position = AdjustPositionForAlignment(position, tracker_box_size, EmuConfig.Achievements.OverlayPosition);
-			
+
 			const ImVec2 box_min = box_position;
 			const ImVec2 box_max = box_position + tracker_box_size;
 			const float box_rounding = LayoutScale(1.0f);
@@ -2468,7 +2706,8 @@ void Achievements::DrawAchievementsWindow()
 			top += GetLineHeight(g_large_font) + spacing;
 
 			ImGui::PushFont(g_large_font.first, g_large_font.second);
-			ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &title_bb);
+			ImGuiFullscreen::RenderTextClippedWithShadow(
+				title_bb.Min, title_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &title_bb);
 			ImGui::PopFont();
 
 			const ImRect summary_bb(ImVec2(left, top), ImVec2(right, top + GetLineHeight(g_medium_font)));
@@ -2599,7 +2838,8 @@ void Achievements::DrawAchievementsWindow()
 					const ImRect text_bb(ImVec2(text_x, bb.Min.y), ImVec2(bb.Max.x - padding, bb.Max.y));
 
 					ImGui::PushFont(g_medium_font.first, g_medium_font.second);
-					ImGui::RenderTextClipped(text_bb.Min, text_bb.Max, subset->title, nullptr, nullptr, ImVec2(0.0f, 0.5f), &text_bb);
+					ImGuiFullscreen::RenderTextClippedWithShadow(
+						text_bb.Min, text_bb.Max, subset->title, nullptr, nullptr, ImVec2(0.0f, 0.5f), &text_bb);
 					ImGui::PopFont();
 
 					if (ImGui::IsItemClicked() || ImGui::IsItemActivated())
@@ -2688,21 +2928,22 @@ void Achievements::DrawAchievementsWindow()
 		if (ImGuiFullscreen::IsGamepadInputSource())
 		{
 			const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+			const auto glyphs = ImGuiFullscreen::GetGamepadGlyphs();
 			if (s_sidebar_has_focus)
 			{
 				ImGuiFullscreen::SetFullscreenFooterText(std::array{
-					std::make_pair(ICON_PF_DPAD_UP_DOWN, TRANSLATE_SV("Achievements", "Navigate Subsets")),
-					std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, TRANSLATE_SV("Achievements", "Back to List")),
-					std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, TRANSLATE_SV("Achievements", "Select")),
-					std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, TRANSLATE_SV("Achievements", "Back")),
+					std::make_pair(glyphs.dpad_ud, TRANSLATE_SV("Achievements", "Navigate Subsets")),
+					std::make_pair(glyphs.dpad_lr, TRANSLATE_SV("Achievements", "Back to List")),
+					std::make_pair(glyphs.confirm(circleOK), TRANSLATE_SV("Achievements", "Select")),
+					std::make_pair(glyphs.cancel(circleOK), TRANSLATE_SV("Achievements", "Back")),
 				});
 			}
 			else
 			{
 				ImGuiFullscreen::SetFullscreenFooterText(std::array{
-					std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, TRANSLATE_SV("Achievements", "Navigate Subsets")),
-					std::make_pair(ICON_PF_DPAD_UP_DOWN, TRANSLATE_SV("Achievements", "Change Selection")),
-					std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, TRANSLATE_SV("Achievements", "Back")),
+					std::make_pair(glyphs.dpad_lr, TRANSLATE_SV("Achievements", "Navigate Subsets")),
+					std::make_pair(glyphs.dpad_ud, TRANSLATE_SV("Achievements", "Change Selection")),
+					std::make_pair(glyphs.cancel(circleOK), TRANSLATE_SV("Achievements", "Back")),
 				});
 			}
 		}
@@ -2878,8 +3119,9 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
 		ImVec2(points_template_start + ((points_template_size.x - right_icon_size.x) * 0.5f), bb.Min.y), ImVec2(bb.Max.x, midpoint));
 
 	ImGui::PushFont(g_large_font.first, g_large_font.second);
-	ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, cheevo->title, nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
-	ImGui::RenderTextClipped(lock_bb.Min, lock_bb.Max, right_icon_text, nullptr, &right_icon_size, ImVec2(0.0f, 0.0f), &lock_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(title_bb.Min, title_bb.Max, cheevo->title, nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(
+		lock_bb.Min, lock_bb.Max, right_icon_text, nullptr, &right_icon_size, ImVec2(0.0f, 0.0f), &lock_bb);
 	ImGui::PopFont();
 
 	if (badge_text && badge_icon)
@@ -2905,14 +3147,16 @@ void Achievements::DrawAchievement(const rc_client_achievement_t* cheevo)
 	{
 		ImGui::RenderTextWrapped(summary_bb.Min, cheevo->description, cheevo->description + summary_length, summary_wrap_width);
 	}
-	ImGui::RenderTextClipped(points_bb.Min, points_bb.Max, text.c_str(), text.end_ptr(), &points_size, ImVec2(0.0f, 0.0f), &points_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(
+		points_bb.Min, points_bb.Max, text.c_str(), text.end_ptr(), &points_size, ImVec2(0.0f, 0.0f), &points_bb);
 
 	if (is_unlocked)
 	{
 		text.format(TRANSLATE_FS("Achievements", "Unlocked: {}"), FullscreenUI::TimeToPrintableString(cheevo->unlock_time));
 
 		const ImRect unlock_bb(summary_bb.Min.x, summary_bb.Max.y + spacing, summary_bb.Max.x, bb.Max.y);
-		ImGui::RenderTextClipped(unlock_bb.Min, unlock_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &unlock_bb);
+		ImGuiFullscreen::RenderTextClippedWithShadow(
+			unlock_bb.Min, unlock_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &unlock_bb);
 	}
 	else if (is_measured)
 	{
@@ -3071,7 +3315,8 @@ void Achievements::DrawLeaderboardsWindow()
 			top += GetLineHeight(g_large_font) + spacing;
 
 			ImGui::PushFont(g_large_font.first, g_large_font.second);
-			ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &title_bb);
+			ImGuiFullscreen::RenderTextClippedWithShadow(
+				title_bb.Min, title_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &title_bb);
 			ImGui::PopFont();
 
 			if (is_leaderboard_open)
@@ -3082,7 +3327,7 @@ void Achievements::DrawLeaderboardsWindow()
 				top += GetLineHeight(g_large_font) + spacing_small;
 
 				ImGui::PushFont(g_large_font.first, g_large_font.second);
-				ImGui::RenderTextClipped(
+				ImGuiFullscreen::RenderTextClippedWithShadow(
 					subtitle_bb.Min, subtitle_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &subtitle_bb);
 				ImGui::PopFont();
 
@@ -3100,7 +3345,7 @@ void Achievements::DrawLeaderboardsWindow()
 			top += GetLineHeight(g_medium_font) + spacing_small;
 
 			ImGui::PushFont(g_medium_font.first, g_medium_font.second);
-			ImGui::RenderTextClipped(
+			ImGuiFullscreen::RenderTextClippedWithShadow(
 				summary_bb.Min, summary_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &summary_bb);
 
 			if (!is_leaderboard_open && !Achievements::IsHardcoreModeActive())
@@ -3108,9 +3353,9 @@ void Achievements::DrawLeaderboardsWindow()
 				const ImRect hardcore_warning_bb(ImVec2(left, top), ImVec2(right, top + GetLineHeight(g_medium_font)));
 				top += GetLineHeight(g_medium_font) + spacing_small;
 
-				ImGui::RenderTextClipped(hardcore_warning_bb.Min, hardcore_warning_bb.Max,
-					TRANSLATE("Achievements", "Submitting scores is disabled because hardcore mode is off. Leaderboards are read-only."),
-					nullptr, nullptr, ImVec2(0.0f, 0.0f), &hardcore_warning_bb);
+				ImGuiFullscreen::RenderTextClippedWithShadow(hardcore_warning_bb.Min, hardcore_warning_bb.Max,
+					TRANSLATE("Achievements", "Submitting scores is disabled because hardcore mode is off. Leaderboards are read-only."), nullptr,
+					nullptr, ImVec2(0.0f, 0.0f), &hardcore_warning_bb);
 			}
 
 			ImGui::PopFont();
@@ -3159,7 +3404,7 @@ void Achievements::DrawLeaderboardsWindow()
 
 				const auto render_centered_heading = [&](const char* text, float width) {
 					const ImRect rect(ImVec2(column_left, bb.Min.y), ImVec2(column_left + width, midpoint));
-					ImGui::RenderTextClipped(rect.Min, rect.Max, text, nullptr, nullptr, ImVec2(0.5f, 0.0f), &rect);
+					ImGuiFullscreen::RenderTextClippedWithShadow(rect.Min, rect.Max, text, nullptr, nullptr, ImVec2(0.5f, 0.0f), &rect);
 					column_left += width + column_spacing;
 				};
 
@@ -3168,7 +3413,7 @@ void Achievements::DrawLeaderboardsWindow()
 				const float name_column_total_width = icon_column_width + column_spacing + name_column_width;
 				const ImRect user_bb(ImVec2(column_left + icon_column_width + column_spacing, bb.Min.y),
 					ImVec2(column_left + name_column_total_width, midpoint));
-				ImGui::RenderTextClipped(
+				ImGuiFullscreen::RenderTextClippedWithShadow(
 					user_bb.Min, user_bb.Max, TRANSLATE("Achievements", "Name"), nullptr, nullptr, ImVec2(0.5f, 0.0f), &user_bb);
 				column_left += name_column_total_width + column_spacing;
 
@@ -3185,8 +3430,8 @@ void Achievements::DrawLeaderboardsWindow()
 
 				const float date_column_width = std::max(bb.Max.x - column_left, 0.0f);
 				const ImRect date_bb(ImVec2(column_left, bb.Min.y), ImVec2(column_left + date_column_width, midpoint));
-				ImGui::RenderTextClipped(date_bb.Min, date_bb.Max, TRANSLATE("Achievements", "Date Submitted"), nullptr, nullptr,
-					ImVec2(0.5f, 0.0f), &date_bb);
+				ImGuiFullscreen::RenderTextClippedWithShadow(
+					date_bb.Min, date_bb.Max, TRANSLATE("Achievements", "Date Submitted"), nullptr, nullptr, ImVec2(0.5f, 0.0f), &date_bb);
 				column_left += date_column_width;
 
 				ImGui::PopFont();
@@ -3303,10 +3548,11 @@ void Achievements::DrawLeaderboardsWindow()
 		if (ImGuiFullscreen::IsGamepadInputSource())
 		{
 			const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+			const auto glyphs = ImGuiFullscreen::GetGamepadGlyphs();
 			ImGuiFullscreen::SetFullscreenFooterText(std::array{
-				std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, TRANSLATE_SV("Achievements", "Switch Rankings")),
-				std::make_pair(ICON_PF_DPAD_UP_DOWN, TRANSLATE_SV("Achievements", "Change Selection")),
-				std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, TRANSLATE_SV("Achievements", "Back")),
+				std::make_pair(glyphs.dpad_lr, TRANSLATE_SV("Achievements", "Switch Rankings")),
+				std::make_pair(glyphs.dpad_ud, TRANSLATE_SV("Achievements", "Change Selection")),
+				std::make_pair(glyphs.cancel(circleOK), TRANSLATE_SV("Achievements", "Back")),
 			});
 		}
 		else
@@ -3353,7 +3599,8 @@ void Achievements::DrawLeaderboardEntry(const rc_client_leaderboard_entry_t& ent
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(255, 242, 0, 255));
 
 	const ImRect rank_bb(ImVec2(column_left, bb.Min.y), ImVec2(column_left + rank_column_width, midpoint));
-	ImGui::RenderTextClipped(rank_bb.Min, rank_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &rank_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(
+		rank_bb.Min, rank_bb.Max, text.c_str(), text.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &rank_bb);
 	column_left += rank_column_width + column_spacing;
 
 	const ImRect icon_bb(ImVec2(column_left, bb.Min.y), ImVec2(column_left + icon_column_width, bb.Min.y + icon_column_width));
@@ -3383,16 +3630,18 @@ void Achievements::DrawLeaderboardEntry(const rc_client_leaderboard_entry_t& ent
 	column_left += icon_column_width + column_spacing;
 
 	const ImRect user_bb(ImVec2(column_left, bb.Min.y), ImVec2(column_left + name_column_width, midpoint));
-	ImGui::RenderTextClipped(user_bb.Min, user_bb.Max, entry.user, nullptr, nullptr, ImVec2(0.0f, 0.0f), &user_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(user_bb.Min, user_bb.Max, entry.user, nullptr, nullptr, ImVec2(0.0f, 0.0f), &user_bb);
 	column_left += name_column_width + column_spacing;
 
 	const ImRect score_bb(ImVec2(column_left, bb.Min.y), ImVec2(column_left + time_column_width, midpoint));
-	ImGui::RenderTextClipped(score_bb.Min, score_bb.Max, entry.display, nullptr, nullptr, ImVec2(0.0f, 0.0f), &score_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(
+		score_bb.Min, score_bb.Max, entry.display, nullptr, nullptr, ImVec2(0.0f, 0.0f), &score_bb);
 	column_left += time_column_width + column_spacing;
 
 	const ImRect time_bb(ImVec2(column_left, bb.Min.y), ImVec2(bb.Max.x, midpoint));
 	const auto submit_time = FullscreenUI::TimeToPrintableString(entry.submitted);
-	ImGui::RenderTextClipped(time_bb.Min, time_bb.Max, submit_time.c_str(), submit_time.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &time_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(
+		time_bb.Min, time_bb.Max, submit_time.c_str(), submit_time.end_ptr(), nullptr, ImVec2(0.0f, 0.0f), &time_bb);
 
 	if (is_self)
 		ImGui::PopStyleColor();
@@ -3436,13 +3685,14 @@ void Achievements::DrawLeaderboardListEntry(const rc_client_leaderboard_t* lboar
 	const ImRect summary_bb(ImVec2(text_start_x, midpoint), bb.Max);
 
 	ImGui::PushFont(g_large_font.first, g_large_font.second);
-	ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, lboard->title, nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
+	ImGuiFullscreen::RenderTextClippedWithShadow(title_bb.Min, title_bb.Max, lboard->title, nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
 	ImGui::PopFont();
 
 	if (lboard->description && lboard->description[0] != '\0')
 	{
 		ImGui::PushFont(g_medium_font.first, g_medium_font.second);
-		ImGui::RenderTextClipped(summary_bb.Min, summary_bb.Max, lboard->description, nullptr, nullptr, ImVec2(0.0f, 0.0f), &summary_bb);
+		ImGuiFullscreen::RenderTextClippedWithShadow(
+			summary_bb.Min, summary_bb.Max, lboard->description, nullptr, nullptr, ImVec2(0.0f, 0.0f), &summary_bb);
 		ImGui::PopFont();
 	}
 
@@ -3693,7 +3943,13 @@ void Achievements::RAIntegration::RACallbackCausePause()
 
 void Achievements::RAIntegration::RACallbackRebuildMenu()
 {
-	// unused, we build the menu on demand
+	// Sync hardcore state in case the user changed it via the RA menu.
+	const bool ra_hardcore = (RA_HardcoreModeIsActive() != 0);
+	if (ra_hardcore != s_hardcore_mode)
+	{
+		s_hardcore_mode = ra_hardcore;
+		Host::OnAchievementsHardcoreModeChanged(ra_hardcore);
+	}
 }
 
 void Achievements::RAIntegration::RACallbackEstimateTitle(char* buf)

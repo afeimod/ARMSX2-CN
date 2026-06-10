@@ -148,6 +148,21 @@ bool ImGuiManager::Initialize()
 	io.BackendFlags |= ImGuiBackendFlags_RendererHasVtxOffset | ImGuiBackendFlags_RendererHasTextures | ImGuiBackendFlags_HasGamepad;
 	io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
 	io.KeyRepeatDelay = 0.5f;
+#ifdef __APPLE__
+	// For macOS we should use the standard macOS text editing shortcuts
+	io.ConfigMacOSXBehaviors = true;
+#endif
+
+	ImGuiPlatformIO& platform_io = ImGui::GetPlatformIO();
+	platform_io.Platform_GetClipboardTextFn = [](ImGuiContext* ctx) -> const char* {
+		static thread_local std::string s_clipboard_text;
+		s_clipboard_text = Host::GetTextFromClipboard();
+		return s_clipboard_text.c_str();
+	};
+	platform_io.Platform_SetClipboardTextFn = [](ImGuiContext* ctx, const char* text) {
+		if (text)
+			Host::CopyTextToClipboard(text);
+	};
 
 	g.ConfigNavWindowingKeyNext = ImGuiKey_None;
 	g.ConfigNavWindowingKeyPrev = ImGuiKey_None;
@@ -371,10 +386,18 @@ void ImGuiManager::SetStyle()
 	colors[ImGuiCol_PlotHistogramHovered] = ImVec4(1.00f, 0.60f, 0.00f, 1.00f);
 	colors[ImGuiCol_TextSelectedBg] = ImVec4(0.26f, 0.59f, 0.98f, 0.35f);
 	colors[ImGuiCol_DragDropTarget] = ImVec4(1.00f, 1.00f, 0.00f, 0.90f);
-	colors[ImGuiCol_NavCursor] = ImVec4(0.26f, 0.59f, 0.98f, 1.00f);
+	colors[ImGuiCol_NavCursor] = ImVec4(0.26f, 0.59f, 0.98f, 0.70f);
 	colors[ImGuiCol_NavWindowingHighlight] = ImVec4(1.00f, 1.00f, 1.00f, 0.70f);
 	colors[ImGuiCol_NavWindowingDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.20f);
 	colors[ImGuiCol_ModalWindowDimBg] = ImVec4(0.80f, 0.80f, 0.80f, 0.35f);
+
+	style.WindowRounding = 6.0f;
+	style.ChildRounding = 6.0f;
+	style.PopupRounding = 6.0f;
+	style.FrameRounding = 5.0f;
+	style.GrabRounding = 5.0f;
+	style.TabRounding = 5.0f;
+	style.ScrollbarRounding = 5.0f;
 
 	style.ScaleAllSizes(s_global_scale);
 }
@@ -391,10 +414,10 @@ void ImGuiManager::SetKeyMap()
 	static constexpr KeyMapping mapping[] = {{ImGuiKey_LeftArrow, "Left"}, {ImGuiKey_RightArrow, "Right"}, {ImGuiKey_UpArrow, "Up"},
 		{ImGuiKey_DownArrow, "Down"}, {ImGuiKey_PageUp, "PageUp"}, {ImGuiKey_PageDown, "PageDown"}, {ImGuiKey_Home, "Home"},
 		{ImGuiKey_End, "End"}, {ImGuiKey_Insert, "Insert"}, {ImGuiKey_Delete, "Delete"}, {ImGuiKey_Backspace, "Backspace"},
-		{ImGuiKey_Space, "Space"}, {ImGuiKey_Enter, "Return"}, {ImGuiKey_Escape, "Escape"}, {ImGuiKey_LeftCtrl, "LeftCtrl", "Ctrl"},
-		{ImGuiKey_LeftShift, "LeftShift", "Shift"}, {ImGuiKey_LeftAlt, "LeftAlt", "Alt"}, {ImGuiKey_LeftSuper, "LeftSuper", "Super"},
+		{ImGuiKey_Space, "Space"}, {ImGuiKey_Enter, "Return"}, {ImGuiKey_Escape, "Escape"}, {ImGuiKey_LeftCtrl, "LeftCtrl", "Control"},
+		{ImGuiKey_LeftShift, "LeftShift", "Shift"}, {ImGuiKey_LeftAlt, "LeftAlt", "Alt"}, {ImGuiKey_LeftSuper, "Meta", "Super_L"},
 		{ImGuiKey_RightCtrl, "RightCtrl"}, {ImGuiKey_RightShift, "RightShift"}, {ImGuiKey_RightAlt, "RightAlt"},
-		{ImGuiKey_RightSuper, "RightSuper"}, {ImGuiKey_Menu, "Menu"}, {ImGuiKey_0, "0"}, {ImGuiKey_1, "1"}, {ImGuiKey_2, "2"},
+		{ImGuiKey_RightSuper, "Super_R"}, {ImGuiKey_Menu, "Menu"}, {ImGuiKey_0, "0"}, {ImGuiKey_1, "1"}, {ImGuiKey_2, "2"},
 		{ImGuiKey_3, "3"}, {ImGuiKey_4, "4"}, {ImGuiKey_5, "5"}, {ImGuiKey_6, "6"}, {ImGuiKey_7, "7"}, {ImGuiKey_8, "8"}, {ImGuiKey_9, "9"},
 		{ImGuiKey_A, "A"}, {ImGuiKey_B, "B"}, {ImGuiKey_C, "C"}, {ImGuiKey_D, "D"}, {ImGuiKey_E, "E"}, {ImGuiKey_F, "F"}, {ImGuiKey_G, "G"},
 		{ImGuiKey_H, "H"}, {ImGuiKey_I, "I"}, {ImGuiKey_J, "J"}, {ImGuiKey_K, "K"}, {ImGuiKey_L, "L"}, {ImGuiKey_M, "M"}, {ImGuiKey_N, "N"},
@@ -566,7 +589,7 @@ ImFont* ImGuiManager::AddTextFont()
 {
 	// Exclude FA and PF ranges
 	// clang-format off
-	static constexpr ImWchar range_exclude_icons[] = { 0x2198,0x2199,0x219e,0x21a7,0x21b0,0x21b3,0x21ba,0x21c3,0x21ce,0x21d4,0x21dc,0x21e8,0x21f3,0x21f3,0x21f7,0x21fb,0x2206,0x2208,0x221a,0x221a,0x227a,0x227d,0x22bf,0x22c8,0x2349,0x2349,0x235a,0x2367,0x237a,0x237f,0x23b2,0x23b5,0x23cc,0x23cc,0x23f4,0x23f7,0x2427,0x2452,0x2460,0x246b,0x248f,0x248f,0x24f5,0x24ff,0x2605,0x2605,0x2699,0x2699,0x278a,0x278e,0x27f6,0x27f6,0xff21,0xff3a,0x0,0x0 };
+	static constexpr ImWchar range_exclude_icons[] = { 0x2198,0x21a7,0x21b0,0x21b3,0x21ba,0x21c3,0x21ce,0x21d4,0x21dc,0x21e8,0x21f3,0x21f3,0x21f7,0x2202,0x2206,0x2208,0x221a,0x221a,0x227a,0x227f,0x2284,0x2284,0x22bf,0x22c8,0x2349,0x2349,0x235a,0x2367,0x237a,0x237f,0x23b2,0x23b5,0x23cc,0x23cc,0x23f4,0x23f7,0x2427,0x2452,0x2460,0x246b,0x248f,0x248f,0x24f5,0x24ff,0x2605,0x2605,0x2699,0x2699,0x278a,0x278e,0x27f6,0x27f6,0xff21,0xff3a,0x0,0x0 };
 	// clang-format on
 
 	std::vector<ImWchar> exclude;
@@ -1135,14 +1158,45 @@ bool ImGuiManager::ProcessPointerAxisEvent(InputBindingKey key, float value)
 	return s_imgui_wants_mouse.load(std::memory_order_acquire);
 }
 
+static ImGuiKey GetModifierForKey(ImGuiKey key)
+{
+	static constexpr std::pair<ImGuiKey, ImGuiKey> modifier_map[] = {
+		{ImGuiKey_LeftCtrl, ImGuiMod_Ctrl},
+		{ImGuiKey_RightCtrl, ImGuiMod_Ctrl},
+		{ImGuiKey_LeftShift, ImGuiMod_Shift},
+		{ImGuiKey_RightShift, ImGuiMod_Shift},
+		{ImGuiKey_LeftAlt, ImGuiMod_Alt},
+		{ImGuiKey_RightAlt, ImGuiMod_Alt},
+		{ImGuiKey_LeftSuper, ImGuiMod_Super},
+		{ImGuiKey_RightSuper, ImGuiMod_Super},
+	};
+
+	for (const auto& [k, mod] : modifier_map)
+	{
+		if (key == k)
+			return mod;
+	}
+
+	return ImGuiKey_None;
+}
+
 bool ImGuiManager::ProcessHostKeyEvent(InputBindingKey key, float value)
 {
-	decltype(s_imgui_key_map)::iterator iter;
-	if (!ImGui::GetCurrentContext() || (iter = s_imgui_key_map.find(key.data)) == s_imgui_key_map.end())
+	if (!ImGui::GetCurrentContext())
+		return false;
+
+	const auto iter = s_imgui_key_map.find(key.data);
+	if (iter == s_imgui_key_map.end())
 		return false;
 
 	// still update state anyway
-	MTGS::RunOnGSThread([imkey = iter->second, down = (value != 0.0f)]() { ImGui::GetIO().AddKeyEvent(imkey, down); });
+	MTGS::RunOnGSThread([imkey = iter->second, down = (value != 0.0f)]() {
+		ImGuiIO& io = ImGui::GetIO();
+		io.AddKeyEvent(imkey, down);
+
+		if (const ImGuiKey mod = GetModifierForKey(imkey); mod != ImGuiKey_None)
+			io.AddKeyEvent(mod, down);
+	});
 
 	return s_imgui_wants_keyboard.load(std::memory_order_acquire);
 }

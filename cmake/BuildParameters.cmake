@@ -247,6 +247,9 @@ if (MSVC)
 else()
 	set(DEFAULT_WARNINGS -Wall -Wextra -Wno-unused-function -Wno-unused-parameter -Wno-missing-field-initializers)
 endif()
+if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+	list(APPEND DEFAULT_WARNINGS -Wno-attributes)
+endif()
 
 if (USE_PGO_GENERATE OR USE_PGO_OPTIMIZE)
 	add_compile_options("-fprofile-dir=${CMAKE_SOURCE_DIR}/profile")
@@ -297,8 +300,8 @@ else()
 	if(CMAKE_INTERPROCEDURAL_OPTIMIZATION)
 		message(WARNING
 			"The CMAKE_INTERPROCEDURAL_OPTIMIZATION option is enabled but the "
-			"CMAKE_POSITION_INDEPENDENT_CODE option is disabled. This has been "
-			"found to result in broken builds on certain platforms.")
+			"POSITION_INDEPENDENT_CODE option is disabled. This has been found "
+			"to result in broken builds on certain platforms.")
 	endif()
 
 	set(CMAKE_POSITION_INDEPENDENT_CODE OFF)

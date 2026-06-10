@@ -11,6 +11,10 @@
 
 #include "common/FastJmp.h"
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/TraceBlocks.h"
+#endif
+
 #include <float.h>
 
 using namespace R5900;		// for OPCODE and OpcodeImpl
@@ -213,7 +217,6 @@ static void execI()
 
 
 	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
-
 	opcode.interpret();
 }
 
@@ -287,6 +290,24 @@ void intDoBranch(u32 target)
 void intSetBranch()
 {
 	branch2 = /*cpuRegs.branch =*/ 1;
+}
+
+// Single-step entry used by the macOS-port arm64 recompiler when it hands an op
+// back to the interpreter. Mirrors execI without the fastjmp exit (rec drives
+// its own exits).
+void intExecuteOneInst()
+{
+	const u32 thispc = cpuRegs.pc;
+	cpuRegs.pc += 4;
+	cpuRegs.code = memRead32(thispc);
+
+	const OPCODE& opcode = GetCurrentInstruction();
+	cpuBlockCycles += opcode.cycles * (2 - ((cpuRegs.CP0.n.Config >> 18) & 0x1));
+
+	opcode.interpret();
+
+	if (!(opcode.flags & IS_BRANCH))
+		intUpdateCPUCycles();
 }
 
 ////////////////////////////////////////////////////////////////////
@@ -611,6 +632,9 @@ static void intExecute()
 
 			while (true)
 			{
+#ifdef TRACE_BLOCKS
+				eeTraceBlock(cpuRegs.pc);
+#endif
 				execI();
 
 				if (cpuRegs.pc == EELOAD_START)
@@ -658,7 +682,12 @@ static void intExecute()
 		else
 		{
 			while (true)
+			{
+#ifdef TRACE_BLOCKS
+				eeTraceBlock(cpuRegs.pc);
+#endif
 				execI();
+			}
 		}
 	}
 }

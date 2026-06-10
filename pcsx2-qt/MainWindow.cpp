@@ -399,8 +399,8 @@ void MainWindow::connectSignals()
 	m_ui.actionEnableVerboseLogging->setChecked(true);
 	m_ui.actionEnableVerboseLogging->setEnabled(false);
 #endif
-	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableEEConsoleLogging, "Logging", "EnableEEConsole", true);
-	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableIOPConsoleLogging, "Logging", "EnableIOPConsole", true);
+	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableEEConsoleLogging, "Logging", "EnableEEConsole", false);
+	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableIOPConsoleLogging, "Logging", "EnableIOPConsole", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableLogWindow, "Logging", "EnableLogWindow", false);
 	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableFileLogging, "Logging", "EnableFileLogging", true);
 	SettingWidgetBinder::BindWidgetToBoolSetting(nullptr, m_ui.actionEnableLogTimestamps, "Logging", "EnableTimestamps", true);
@@ -454,8 +454,6 @@ void MainWindow::connectVMThreadSignals(EmuThread* thread)
 	connect(thread, &EmuThread::onCaptureStopped, this, &MainWindow::onCaptureStopped);
 	connect(thread, &EmuThread::onAchievementsLoginRequested, this, &MainWindow::onAchievementsLoginRequested);
 	connect(thread, &EmuThread::onAchievementsHardcoreModeChanged, this, &MainWindow::onAchievementsHardcoreModeChanged);
-	connect(thread, &EmuThread::onCoverDownloaderOpenRequested, this, &MainWindow::onToolsCoverDownloaderTriggered);
-	connect(thread, &EmuThread::onCreateMemoryCardOpenRequested, this, &MainWindow::onCreateMemoryCardOpenRequested);
 
 	connect(m_ui.actionReset, &QAction::triggered, this, &MainWindow::requestReset);
 	connect(m_ui.actionPause, &QAction::toggled, thread, &EmuThread::setVMPaused);
@@ -873,6 +871,26 @@ void MainWindow::saveStateToConfig()
 		changed = true;
 	}
 
+	if (Host::ContainsBaseSettingValue("UI", "MainWindowMaximized"))
+	{
+		const bool maximized = Host::GetBaseBoolSettingValue("UI", "MainWindowMaximized");
+		if (maximized != isMaximized())
+		{
+			Host::SetBaseBoolSettingValue("UI", "MainWindowMaximized", isMaximized());
+			changed = true;
+		}
+	}
+
+	if (Host::ContainsBaseSettingValue("UI", "MainWindowFullscreen"))
+	{
+		const bool fullscreen = Host::GetBaseBoolSettingValue("UI", "MainWindowFullscreen");
+		if (fullscreen != isFullScreen())
+		{
+			Host::SetBaseBoolSettingValue("UI", "MainWindowFullscreen", isFullScreen());
+			changed = true;
+		}
+	}
+
 	if (changed)
 		Host::CommitBaseSettingChanges();
 }
@@ -899,6 +917,24 @@ void MainWindow::restoreStateFromConfig()
 		{
 			QSignalBlocker sb(m_ui.actionViewStatusBar);
 			m_ui.actionViewStatusBar->setChecked(!m_ui.statusBar->isHidden());
+		}
+	}
+
+	{
+		if (Host::ContainsBaseSettingValue("UI", "MainWindowMaximized"))
+		{
+			const bool maximized = Host::GetBaseBoolSettingValue("UI", "MainWindowMaximized");
+			if (maximized)
+				showMaximized();
+		}
+	}
+
+	{
+		if (Host::ContainsBaseSettingValue("UI", "MainWindowFullscreen"))
+		{
+			const bool fullscreen = Host::GetBaseBoolSettingValue("UI", "MainWindowFullscreen");
+			if (fullscreen)
+				showFullScreen();
 		}
 	}
 }
@@ -1114,7 +1150,7 @@ bool MainWindow::shouldHideMainWindow() const
 {
 	// NOTE: We can't use isRenderingToMain() here, because this happens post-fullscreen-switch.
 	return (Host::GetBoolSettingValue("UI", "HideMainWindowWhenRunning", false) && !g_emu_thread->shouldRenderToMain()) ||
-	       (g_emu_thread->shouldRenderToMain() && (isRenderingFullscreen() || m_is_temporarily_windowed)) ||
+	       (g_emu_thread->shouldRenderToMain() && (isRenderingFullscreen() || g_emu_thread->isExclusiveFullscreen() || m_is_temporarily_windowed)) ||
 	       Host::InNoGUIMode();
 }
 
@@ -1566,8 +1602,18 @@ void MainWindow::onGameListEntryContextMenuRequested(const QPoint& point)
 		if (!entry->serial.empty())
 			connect(menu.addAction(tr("Check Wiki Page")), &QAction::triggered, [this, entry]() { goToWikiPage(*entry); });
 
+		menu.addSeparator();
+		action = menu.addAction(tr("Open Memory Card Folder"));
+		connect(action, &QAction::triggered, [this, entry]() { openMemoryCardFolder(); });
+
 		action = menu.addAction(tr("Open Snapshots Folder"));
 		connect(action, &QAction::triggered, [this, entry]() { openSnapshotsFolderForGame(*entry); });
+
+		action = menu.addAction(tr("Open Texture Dump/Replacement Folder"));
+		connect(action, &QAction::triggered, [this, entry]() { openTextureFolderForGame(*entry); });
+
+		action = menu.addAction(tr("Open Video Capture Folder"));
+		connect(action, &QAction::triggered, [this, entry]() { openVideoCaptureFolder(*entry); });
 		menu.addSeparator();
 
 		if (!s_vm_valid)
@@ -1704,7 +1750,7 @@ void MainWindow::onStartFullscreenUITriggered()
 
 void MainWindow::onFullscreenUIStateChange(bool running)
 {
-	m_ui.actionStartFullscreenUI->setText(running ? tr("Stop Big Picture Mode") : tr("Start Big Picture Mode"));
+	m_ui.actionStartFullscreenUI->setText(running ? tr("Stop Big Picture Mode") : tr("Start Big Picture &Mode"));
 	m_ui.actionToolbarStartFullscreenUI->setText(running ? tr("Exit Big Picture", "In Toolbar") : tr("Big Picture", "In Toolbar"));
 }
 
@@ -2528,6 +2574,7 @@ std::optional<WindowInfo> MainWindow::acquireRenderWindow(bool recreate_window, 
 		return std::nullopt;
 	}
 
+	m_display_is_exclusive_fullscreen = g_emu_thread->isExclusiveFullscreen();
 	g_emu_thread->connectDisplaySignals(m_display_surface);
 
 	updateWindowTitle();
@@ -2572,7 +2619,7 @@ void MainWindow::createDisplayWidget(bool fullscreen, bool render_to_main)
 
 #ifdef DISPLAY_SURFACE_WINDOW
 		if (isVisible() && g_emu_thread->shouldRenderToMain())
-			m_display_surface->setPosition(screen()->availableGeometry().topLeft());
+			m_display_surface->setGeometry(screen()->geometry());
 		else
 			restoreDisplayWindowGeometryFromConfig();
 
@@ -2699,6 +2746,7 @@ void MainWindow::releaseRenderWindow()
 	// Now we can safely destroy the display window.
 	destroyDisplayWidget(true);
 	m_display_created = false;
+	m_display_is_exclusive_fullscreen = false;
 
 	m_ui.actionViewSystemDisplay->setEnabled(false);
 	m_ui.actionFullscreen->setEnabled(false);
@@ -2709,7 +2757,7 @@ void MainWindow::destroyDisplayWidget(bool show_game_list)
 	if (!m_display_surface)
 		return;
 
-	if (!m_display_surface->isFullScreen() && !isRenderingToMain())
+	if (!(m_display_surface->isFullScreen() || m_display_is_exclusive_fullscreen) && !isRenderingToMain())
 		saveDisplayWindowGeometryToConfig();
 
 	if (isRenderingToMain())
@@ -3095,7 +3143,8 @@ void MainWindow::openSnapshotsFolderForGame(const GameList::Entry& entry)
 	// Go to top-level snapshots directory if not organizing by game.
 	if (EmuConfig.GS.OrganizeSnapshotsByGame && !entry.title.empty())
 	{
-		std::string game_name = entry.title;
+		const bool prefer_english = Host::GetBaseBoolSettingValue("UI", "PreferEnglishGameList", false);
+		std::string game_name =  (prefer_english && !entry.title_en.empty()) ? entry.title_en : entry.title;
 		Path::SanitizeFileName(&game_name);
 
 		const std::string game_dir = Path::Combine(EmuFolders::Snapshots, game_name);
@@ -3112,6 +3161,64 @@ void MainWindow::openSnapshotsFolderForGame(const GameList::Entry& entry)
 	}
 
 	QtUtils::OpenURL(this, QUrl::fromLocalFile(QString::fromStdString(EmuFolders::Snapshots)));
+}
+
+void MainWindow::openTextureFolderForGame(const GameList::Entry& entry)
+{
+	const std::string serial = entry.serial;
+	const std::string game_texture_dir = Path::Combine(EmuFolders::Textures, serial);
+
+	// Make sure the per-game directory exists or that we can successfully create it.
+	if (FileSystem::DirectoryExists(game_texture_dir.c_str()) || FileSystem::CreateDirectoryPath(game_texture_dir.c_str(), false))
+	{
+		const QFileInfo fi(QString::fromStdString(game_texture_dir));
+		QtUtils::OpenURL(this, QUrl::fromLocalFile(fi.absoluteFilePath()));
+		return;
+	}
+
+	QMessageBox::critical(this, tr("Error"), tr("Failed to create game texture directory '%1'\n\nOpening default directory.").arg(QString::fromStdString(game_texture_dir)));
+
+	QtUtils::OpenURL(this, QUrl::fromLocalFile(QString::fromStdString(EmuFolders::Textures)));
+}
+
+void MainWindow::openMemoryCardFolder()
+{
+	const std::string memcard_dir = EmuFolders::MemoryCards;
+
+	// Make sure directory exists or that we can successfully create it.
+	if (FileSystem::DirectoryExists(memcard_dir.c_str()) || FileSystem::CreateDirectoryPath(memcard_dir.c_str(), false))
+	{
+		const QFileInfo fi(QString::fromStdString(memcard_dir));
+		QtUtils::OpenURL(this, QUrl::fromLocalFile(fi.absoluteFilePath()));
+		return;
+	}
+
+	QMessageBox::critical(this, tr("Error"), tr("Failed to open memory card directory."));
+}
+
+void MainWindow::openVideoCaptureFolder(const GameList::Entry& entry)
+{
+	// Go to top-level video directory if not organizing by game.
+	if (EmuConfig.GS.OrganizeVideoCaptureByGame && !entry.title.empty())
+	{
+		const bool prefer_english = Host::GetBaseBoolSettingValue("UI", "PreferEnglishGameList", false);
+		std::string game_name =  (prefer_english && !entry.title_en.empty()) ? entry.title_en : entry.title;
+		Path::SanitizeFileName(&game_name);
+
+		const std::string game_dir = Path::Combine(EmuFolders::Videos, game_name);
+
+		// Make sure the per-game directory exists or that we can successfully create it.
+		if (FileSystem::DirectoryExists(game_dir.c_str()) || FileSystem::CreateDirectoryPath(game_dir.c_str(), false))
+		{
+			const QFileInfo fi(QString::fromStdString(game_dir));
+			QtUtils::OpenURL(this, QUrl::fromLocalFile(fi.absoluteFilePath()));
+			return;
+		}
+
+		QMessageBox::critical(this, tr("Error"), tr("Failed to create game video capture directory '%1'\n\nOpening default directory.").arg(QString::fromStdString(game_dir)));
+	}
+
+	QtUtils::OpenURL(this, QUrl::fromLocalFile(QString::fromStdString(EmuFolders::Videos)));
 }
 
 std::optional<bool> MainWindow::promptForResumeState(const QString& save_state_path)

@@ -1,0 +1,617 @@
+package com.armsx2.ui
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import coil.compose.SubcomposeAsyncImage
+import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
+import kr.co.iefriends.pcsx2.NativeApp
+import org.json.JSONObject
+
+/**
+ * Achievements list shown in the right column of the in-game overlay.
+ *
+ * Snapshots [NativeApp.getAchievementsJSON] when the panel composes and
+ * polls every few seconds while open so freshly-unlocked entries surface
+ * without the user closing/reopening the overlay. Style mirrors the
+ * setup-wizard BIOS bubble — rounded card with an icon column and
+ * title/description stack — for visual consistency.
+ *
+ * Empty / no-game / not-logged-in states render a single status card
+ * instead of a hard hide, so the column doesn't visually disappear and
+ * confuse users who expect achievements to always show up.
+ */
+data class AchievementSnapshot(
+    val items: List<Achievement>,
+    val active: Boolean,
+    val loggedIn: Boolean,
+    val hardcore: Boolean,
+    val userName: String,
+)
+
+data class Achievement(
+    val id: Int,
+    val title: String,
+    val description: String,
+    val points: Int,
+    val unlocked: Boolean,
+    val bucket: Int,
+    /** % of players who own this achievement (0..100). Lower = rarer. Drives
+     *  the tier label + border tint via [rarityTier]. */
+    val rarity: Float,
+    val measuredProgress: String,
+    /** 0..100 numeric counterpart to [measuredProgress]; drives the progress
+     *  bar at the bottom of locked rows with active measurement. */
+    val measuredPercent: Float,
+    /** rcheevos type: 0=Standard, 1=Missable, 2=Progression, 3=Win. Shown as
+     *  a small chip beside the title — Standard renders nothing. */
+    val type: Int,
+    /** SOFTCORE/HARDCORE bitmask (RC_CLIENT_ACHIEVEMENT_UNLOCKED_*). Bit 1
+     *  set ⇒ earned in hardcore; we show an "HC" pill on the badge corner. */
+    val unlockedMask: Int,
+    /** Unix-seconds when the user unlocked the achievement; 0 if locked.
+     *  Rendered as a relative timestamp ("3d ago") under the title. */
+    val unlockTime: Long,
+    /** RA badge image URL for the achievement's current state — unlocked
+     *  variant or greyscale `_lock` variant. Stable per badge_name, so Coil's
+     *  disk cache holds it across sessions. Empty when the native side
+     *  couldn't build a URL (no badge configured); panel then falls back
+     *  to the glyph. */
+    val iconUrl: String,
+)
+
+/** Tier classification driven by `rarity` (% of players who own it). Lower
+ *  rarity = scarcer; we map to a five-tier scheme that aligns with the
+ *  Common/Uncommon/Rare/Epic/Legendary vernacular RA leaderboards use. The
+ *  colour ramps cool→warm as the tier rises so unlocked entries get a
+ *  noticeable "trophy" without overpowering the unlocked-blue tint. */
+private enum class RarityTier(val label: String, val color: Color) {
+    Legendary("Legendary", Color(0xFFFFD24A)),
+    Epic("Epic",          Color(0xFFC58CFF)),
+    Rare("Rare",          Color(0xFF6FA8FF)),
+    Uncommon("Uncommon",  Color(0xFF7CD68A)),
+    Common("Common",      Color(0xFF9A9A9A)),
+}
+
+private fun rarityTier(rarity: Float): RarityTier = when {
+    rarity <= 0f   -> RarityTier.Common      // rarity not reported yet
+    rarity < 2f    -> RarityTier.Legendary
+    rarity < 5f    -> RarityTier.Epic
+    rarity < 10f   -> RarityTier.Rare
+    rarity < 25f   -> RarityTier.Uncommon
+    else           -> RarityTier.Common
+}
+
+/** Short label + accent colour for the type chip beside the title. Returns
+ *  null for Standard (no chip rendered) so callers can guard with a null
+ *  check instead of inflating an empty Row. */
+private fun typeChip(type: Int): Pair<String, Color>? = when (type) {
+    1 -> "MISSABLE"    to Color(0xFFFFAA55) // amber — warns "can be permanently lost"
+    2 -> "PROGRESSION" to Color(0xFF7AB8FF) // soft blue — story beats
+    3 -> "WIN"         to Color(0xFFFFD24A) // gold — game complete
+    else -> null
+}
+
+/** Compact relative-time formatter: "just now" / "12m ago" / "3h ago" /
+ *  "5d ago" / "Mar 5" / "Mar 5 2024". Mirrors the granularity the RA
+ *  website uses on the achievement feed. */
+private fun formatRelativeUnlock(unlockTimeSec: Long): String {
+    if (unlockTimeSec <= 0) return ""
+    val nowSec = System.currentTimeMillis() / 1000
+    val delta = nowSec - unlockTimeSec
+    if (delta < 0) return "just now"
+    val minute = 60L
+    val hour = 60L * minute
+    val day = 24L * hour
+    return when {
+        delta < minute     -> "just now"
+        delta < hour       -> "${delta / minute}m ago"
+        delta < day        -> "${delta / hour}h ago"
+        delta < 7 * day    -> "${delta / day}d ago"
+        else -> {
+            val cal = java.util.Calendar.getInstance().apply { timeInMillis = unlockTimeSec * 1000 }
+            val sameYear = cal.get(java.util.Calendar.YEAR) ==
+                java.util.Calendar.getInstance().get(java.util.Calendar.YEAR)
+            val pattern = if (sameYear) "MMM d" else "MMM d yyyy"
+            java.text.SimpleDateFormat(pattern, java.util.Locale.US)
+                .format(java.util.Date(unlockTimeSec * 1000))
+        }
+    }
+}
+
+private const val UNLOCKED_HARDCORE_BIT = 1 shl 1
+
+/** Fades the top and bottom edges of a scrolling container so rows ease
+ *  in and out instead of being cut off by a hard rectangular boundary.
+ *  Uses an offscreen compositing strategy so the [BlendMode.DstIn] mask
+ *  applies to the layer as a whole rather than per-draw. */
+private fun Modifier.fadingEdges(fadeHeight: Dp): Modifier = this
+    .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+    .drawWithContent {
+        drawContent()
+        val fadePx = fadeHeight.toPx().coerceAtMost(size.height * 0.5f)
+        if (fadePx <= 0f) return@drawWithContent
+        val topStop = (fadePx / size.height).coerceIn(0f, 0.5f)
+        drawRect(
+            brush = Brush.verticalGradient(
+                colorStops = arrayOf(
+                    0f to Color.Transparent,
+                    topStop to Color.Black,
+                    1f - topStop to Color.Black,
+                    1f to Color.Transparent,
+                ),
+            ),
+            blendMode = BlendMode.DstIn,
+        )
+    }
+
+private fun parseSnapshot(json: String): AchievementSnapshot {
+    return try {
+        val root = JSONObject(json)
+        val arr = root.optJSONArray("items")
+        val rawItems = if (arr == null) emptyList() else List(arr.length()) { i ->
+            val o = arr.getJSONObject(i)
+            Achievement(
+                id = o.optInt("id", 0),
+                title = o.optString("title", ""),
+                description = o.optString("description", ""),
+                points = o.optInt("points", 0),
+                unlocked = o.optBoolean("unlocked", false),
+                bucket = o.optInt("bucket", -1),
+                rarity = o.optDouble("rarity", 0.0).toFloat(),
+                measuredProgress = o.optString("measuredProgress", ""),
+                measuredPercent = o.optDouble("measuredPercent", 0.0).toFloat(),
+                type = o.optInt("type", 0),
+                unlockedMask = o.optInt("unlockedMask", 0),
+                unlockTime = o.optLong("unlockTime", 0L),
+                iconUrl = o.optString("iconUrl", ""),
+            )
+        }
+        // Sort by unlock date, newest first. Locked entries all carry
+        // unlockTime=0, so the stable sort keeps the native bucket order
+        // (Active Challenge → Almost There → Locked → …) beneath the
+        // unlocked group without any extra tie-breaker logic.
+        val items = rawItems.sortedByDescending { it.unlockTime }
+        AchievementSnapshot(
+            items = items,
+            active = root.optBoolean("active", false),
+            loggedIn = root.optBoolean("loggedIn", false),
+            hardcore = root.optBoolean("hardcore", false),
+            userName = root.optString("userName", ""),
+        )
+    } catch (_: Exception) {
+        AchievementSnapshot(emptyList(), active = false, loggedIn = false,
+            hardcore = false, userName = "")
+    }
+}
+
+@Composable
+fun AchievementsPanel(
+    modifier: Modifier = Modifier,
+    onSignInClick: () -> Unit = {},
+    onHardcoreToggle: (() -> Unit)? = null,
+) {
+    var snapshot by remember {
+        mutableStateOf(AchievementSnapshot(emptyList(), false, false, false, ""))
+    }
+
+    // Poll on open + every 4s while the composable is alive (overlay
+    // open). Achievements::GetAchievementsAsJSON locks rcheevos +
+    // re-creates the bucket list each call, so cap the rate. JNI string
+    // marshalling on the Main thread can stutter the overlay if the list
+    // is large, so dispatch on IO and assign back via setState.
+    LaunchedEffect(Unit) {
+        while (true) {
+            val json = withContext(Dispatchers.IO) {
+                runCatching { NativeApp.getAchievementsJSON() }.getOrNull() ?: ""
+            }
+            val s = parseSnapshot(json)
+            snapshot = s
+            // Mirror the live hardcore flag to the overlay-level state
+            // that drives Save / Load State row dimming. Doing it here so
+            // we don't add a second polling loop.
+            InGameOverlay.hardcoreOn.value = s.hardcore
+            // Same idea for the renderer pill — keep the HW/SW label in
+            // sync with the actual GS state (emucore may swap independently,
+            // e.g. SoftwareRendererFMVHack during FMVs). Auto is sticky:
+            // once the user picks Auto, the pill stays "Auto" regardless of
+            // what GS resolved it to underneath.
+            if (InGameOverlay.rendererMode.value != InGameOverlay.RendererMode.Auto) {
+                runCatching {
+                    InGameOverlay.rendererMode.value =
+                        if (NativeApp.isHardwareRenderer())
+                            InGameOverlay.RendererMode.Hardware
+                        else InGameOverlay.RendererMode.Software
+                }
+            }
+            // Rich-presence read — written into the shared overlay state so
+            // GameInfoHeader (the disc-ID / star-rating row) can surface it
+            // as a one-line subtitle. Skip the JNI marshal when the client
+            // isn't active (no game / not logged in).
+            InGameOverlay.richPresence.value = if (s.active) {
+                runCatching {
+                    withContext(Dispatchers.IO) { NativeApp.getRichPresence() }
+                }.getOrNull() ?: ""
+            } else ""
+            delay(4000)
+        }
+    }
+
+    Column(modifier) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = "Achievements",
+                color = Color.White,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+            // Hardcore toggle button. Greyed when off, red when on. Tap
+            // routes to the host (overlay) which shows a fullscreen
+            // confirmation before flipping the flag — enabling hardcore
+            // resets the running VM, so we want a deliberate action.
+            @Suppress("KotlinConstantConditions")
+            if (false && onHardcoreToggle != null) {
+                val active = snapshot.hardcore
+                val bg = if (active) Color(0xFFB22222) else Color(0xFF333333)
+                val fg = if (active) Color.White else Color(0xFF888888)
+                val border = if (active) Color(0xFFFF6B6B) else Color(0xFF555555)
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(bg)
+                        .border(1.dp, border, RoundedCornerShape(6.dp))
+                        .clickable(onClick = onHardcoreToggle!!)
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "HARDCORE",
+                        color = fg,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
+
+        when {
+            !snapshot.loggedIn -> StatusCard(
+                title = "Not signed in",
+                body = "Tap to sign in to RetroAchievements and track unlocks for the games you play.",
+                onClick = onSignInClick,
+            )
+            !snapshot.active -> StatusCard(
+                title = "No achievements",
+                body = "This game has no RetroAchievements set, or the title isn't recognised.",
+            )
+            snapshot.items.isEmpty() -> StatusCard(
+                title = "Loading…",
+                body = "Fetching achievement list.",
+            )
+            else -> {
+                // Username + logout button on the same row when signed in.
+                // Logout calls Achievements::Logout via JNI which clears the
+                // SECRETS-layer Token; the next AchievementsPanel poll picks
+                // up loggedIn=false and the panel reverts to the "Not signed
+                // in" StatusCard automatically — no local state to reset.
+                if (snapshot.userName.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = snapshot.userName,
+                            color = Color(0xFFAACCFF),
+                            fontSize = 12.sp,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(
+                            text = "Logout",
+                            color = Color(0xFFFF8888),
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .clickable {
+                                    runCatching { NativeApp.logoutAchievements() }
+                                    // Snapshot will refresh on the next poll
+                                    // (≤ 4s); render immediate feedback now.
+                                    snapshot = AchievementSnapshot(
+                                        emptyList(), active = false,
+                                        loggedIn = false, hardcore = false,
+                                        userName = ""
+                                    )
+                                }
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+                val unlocked = snapshot.items.count { it.unlocked }
+                // Stack the "X / Y unlocked" header on top of the list so
+                // rows that scroll up dissolve under it via the fadingEdges
+                // mask — the header stays fully opaque (it's drawn AFTER
+                // the LazyColumn in the Box), giving a "frosted" header
+                // look without us having to paint a backdrop.
+                Box(modifier = Modifier.fillMaxWidth()) {
+                    LazyColumn(
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                        contentPadding = PaddingValues(top = 16.dp),
+                        modifier = Modifier
+                            .padding(top = 10.dp)
+                            .fadingEdges(18.dp),
+                    ) {
+                        items(snapshot.items, key = { it.id }) { ach ->
+                            AchievementRow(ach)
+                        }
+                    }
+                    Text(
+                        text = "$unlocked / ${snapshot.items.size} unlocked",
+                        color = Color(0xFFCCCCCC),
+                        fontSize = 11.sp,
+                        modifier = Modifier.align(Alignment.TopStart),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusCard(title: String, body: String, onClick: (() -> Unit)? = null) {
+    // Matches the Playing-Now bubble surface (0xFF1F2123 + 10%-white
+    // hairline border) so the right-column achievements panel reads as
+    // the same material as the left-column action grid.
+    val base = Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(8.dp))
+        .background(Color(0xFF1F2123))
+        .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
+    val withClick = if (onClick != null) base.clickable(onClick = onClick) else base
+    Column(modifier = withClick.padding(12.dp)) {
+        Text(title, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(4.dp))
+        Text(body, color = Color(0xFFCCCCCC), fontSize = 12.sp)
+    }
+}
+
+@Composable
+private fun AchievementRow(ach: Achievement) {
+    val tier = rarityTier(ach.rarity)
+    val tierColor = tier.color
+    // Locked rows match the Playing-Now bubble surface (0xFF1F2123) so the
+    // achievements column reads as the same material as the action grid.
+    // Unlocked rows keep the pasx2_blue trophy tint to signal "earned",
+    // and the locked border keeps its rarity tint so common→legendary
+    // still reads as a colour gradient.
+    val bg = if (ach.unlocked) Colors.pasx2_blue.copy(alpha = 0.30f) else Color(0xFF1F2123)
+    val border = when {
+        ach.unlocked -> Colors.pasx2_blue
+        else -> tierColor.copy(alpha = 0.45f)
+    }
+    val hardcoreUnlock = ach.unlocked && (ach.unlockedMask and UNLOCKED_HARDCORE_BIT) != 0
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(bg)
+            .border(2.dp, border, RoundedCornerShape(8.dp))
+            .padding(10.dp),
+    ) {
+        Row(verticalAlignment = Alignment.Top) {
+            // ── Badge column ─────────────────────────────────────────────
+            // Coil fetches the RA badge URL (unlocked vs greyscale `_lock`
+            // variant — chosen native-side per current state) and caches it
+            // on disk for life. Glyph fallback: ✓ unlocked / 🔒 locked /
+            // ⏳ measured in-progress so the column never collapses.
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                val glyph = when {
+                    ach.unlocked -> "✓"
+                    ach.measuredProgress.isNotEmpty() -> "⏳"
+                    else -> "🔒"
+                }
+                val glyphColor = if (ach.unlocked) Colors.pasx2_blue else Color(0xFFAAAAAA)
+                val context = LocalContext.current
+                val badgeSize = 44.dp
+                Box(
+                    modifier = Modifier.size(badgeSize),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (ach.iconUrl.isNotEmpty()) {
+                        SubcomposeAsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(ach.iconUrl)
+                                .crossfade(true)
+                                .build(),
+                            contentDescription = ach.title,
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .size(badgeSize)
+                                .clip(RoundedCornerShape(4.dp)),
+                            loading = { Text(glyph, fontSize = 18.sp, color = glyphColor) },
+                            error = { Text(glyph, fontSize = 18.sp, color = glyphColor) },
+                        )
+                    } else {
+                        Text(glyph, fontSize = 18.sp, color = glyphColor)
+                    }
+                    // Hardcore corner pill — only when the user earned the
+                    // achievement in hardcore. Offset half a step off-badge
+                    // so it reads as an applied seal rather than overlap.
+                    if (hardcoreUnlock) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .offset(x = 4.dp, y = (-4).dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color(0xFFB22222))
+                                .border(1.dp, Color(0xFFFF8080), RoundedCornerShape(4.dp))
+                                .padding(horizontal = 3.dp, vertical = 1.dp),
+                        ) {
+                            Text(
+                                "HC",
+                                color = Color.White,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+                if (ach.points > 0) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        "${ach.points}",
+                        color = Color(0xFFFFCC66),
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+
+            // ── Title + meta column ─────────────────────────────────────
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        ach.title,
+                        color = Color.White,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    typeChip(ach.type)?.let { (label, color) ->
+                        Spacer(Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(3.dp))
+                                .background(color.copy(alpha = 0.20f))
+                                .border(1.dp, color.copy(alpha = 0.55f), RoundedCornerShape(3.dp))
+                                .padding(horizontal = 4.dp, vertical = 1.dp),
+                        ) {
+                            Text(
+                                label,
+                                color = color,
+                                fontSize = 8.sp,
+                                fontWeight = FontWeight.Bold,
+                            )
+                        }
+                    }
+                }
+                if (ach.description.isNotEmpty()) {
+                    Text(
+                        ach.description,
+                        color = Color(0xFFCCCCCC),
+                        fontSize = 11.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
+                // Meta strip: tier label + rarity percentage on the left,
+                // unlock time or measured progress on the right. Tier name
+                // is shown only when rarity is reported (rarity > 0); the
+                // colour matches the card border so the cue is consistent.
+                Spacer(Modifier.height(3.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (ach.rarity > 0f) {
+                        Text(
+                            tier.label.uppercase() + " · " +
+                                String.format(java.util.Locale.US, "%.1f%%", ach.rarity),
+                            color = tierColor,
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                        )
+                    }
+                    Spacer(Modifier.weight(1f))
+                    val trailing = when {
+                        ach.unlocked && ach.unlockTime > 0L ->
+                            "Unlocked " + formatRelativeUnlock(ach.unlockTime)
+                        !ach.unlocked && ach.measuredProgress.isNotEmpty() ->
+                            ach.measuredProgress
+                        else -> ""
+                    }
+                    if (trailing.isNotEmpty()) {
+                        Text(
+                            trailing,
+                            color = if (ach.unlocked) Color(0xFFAACCFF) else Color(0xFFCCCCCC),
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Progress bar ─────────────────────────────────────────────────
+        // Only shown when the achievement is measured and not yet earned.
+        // Tracks the rarity tier colour so the eye associates "purple bar
+        // close to full" with "epic-tier almost there".
+        if (!ach.unlocked && ach.measuredPercent > 0f) {
+            Spacer(Modifier.height(6.dp))
+            val fraction = (ach.measuredPercent / 100f).coerceIn(0f, 1f)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(3.dp)
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Color.White.copy(alpha = 0.12f)),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fraction)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(tierColor),
+                )
+            }
+        }
+    }
+}

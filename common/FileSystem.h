@@ -122,6 +122,9 @@ namespace FileSystem
 	s64 FSize64(std::FILE* fp);
 
 	int OpenFDFile(const char* filename, int flags, int mode, Error* error = nullptr);
+#if defined(__ANDROID__)
+	int OpenFDFileContent(const char* filename);
+#endif
 
 	/// Sharing modes for OpenSharedCFile().
 	enum class FileShareMode

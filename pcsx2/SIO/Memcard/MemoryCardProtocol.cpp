@@ -325,9 +325,51 @@ u8 MemoryCardProtocol::PS1Read(u8 data)
 
 u8 MemoryCardProtocol::PS1State(u8 data)
 {
-	Console.Error("%s(%02X) I do not exist, please change that ASAP.", __FUNCTION__, data);
-	pxFail("Missing PS1State handler");
-	return 0x00;
+	// PSX "Get Memory Card ID" command (ASCII "S" = 0x53). Per psx-spx
+	// (controllersandmemorycards.md, "Get Memory Card ID Command"):
+	//   byte  0  81h     -> N/A     (device select, handled in Sio0::SetTxData)
+	//   byte  1  53h     -> FLAG    (handled in Sio0::SetTxData, returns flag)
+	//   byte  2  00h     -> 5Ah     (Memory Card ID1)
+	//   byte  3  00h     -> 5Dh     (Memory Card ID2)
+	//   byte  4  00h     -> 5Ch     (Command Acknowledge 1)
+	//   byte  5  00h     -> 5Dh     (Command Acknowledge 2)
+	//   byte  6  00h     -> 04h     (sector count high?)
+	//   byte  7  00h     -> 00h
+	//   byte  8  00h     -> 00h
+	//   byte  9  00h     -> 80h     (last byte, no ACK)
+	// PS1 games (Crash Bandicoot etc.) probe with this command to verify the
+	// memcard exists before any read; without a real handler, the previous
+	// pxFail crashed the emulator and the BIOS reported "no memcard."
+	MC_LOG.WriteLn("%s", __FUNCTION__);
+
+	if (!mcd->IsPresent())
+		return 0xff;
+
+	bool sendAck = true;
+	u8 ret = 0;
+
+	switch (ps1McState.currentByte)
+	{
+		case 2: ret = 0x5a; break;
+		case 3: ret = 0x5d; break;
+		case 4: ret = 0x5c; break;
+		case 5: ret = 0x5d; break;
+		case 6: ret = 0x04; break;
+		case 7: ret = 0x00; break;
+		case 8: ret = 0x00; break;
+		case 9:
+			ret = 0x80;
+			sendAck = false; // final byte, transfer ends
+			break;
+		default:
+			ret = 0xff;
+			sendAck = false;
+			break;
+	}
+
+	g_Sio0.SetAcknowledge(sendAck);
+	ps1McState.currentByte++;
+	return ret;
 }
 
 u8 MemoryCardProtocol::PS1Write(u8 data)

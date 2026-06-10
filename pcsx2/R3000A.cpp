@@ -12,6 +12,7 @@
 #include "IopBios.h"
 #include "IopHw.h"
 #include "IopDma.h"
+#include "Mdec.h"
 #include "CDVD/Ps1CD.h"
 #include "CDVD/CDVD.h"
 
@@ -124,11 +125,49 @@ __fi int psxRemainingCycles(IopEventId n)
 		return 0;
 }
 
+// =====================  PSX_INT PER-EVENT TUNING KNOBS  =====================
+// Scale factor (in 1/256ths) applied to each PSX_INT(n, ecycle) call, so we
+// can characterize which IOP-side interrupt's delay is too short and is
+// causing the PS1 "global speedup" by letting the IOP run more code per
+// real-second than it should. 256 = 1.0× (default upstream behavior).
+//
+// Crank an entry up — say 1024 (4×) or 4096 (16×) — and observe whether
+// PS1 game speed changes. If cranking IopEvt_X slows the game, that path
+// is dispatching too often / undercharging cycles in the upstream code.
+//
+// Sized to NUM_EVENTS (= IopEvt count). Order MUST match enum IopEventId.
+static constexpr u32 PSX_INT_SCALE_256[] = {
+		256, // IopEvt_SIF2
+		256, // IopEvt_Cdvd
+		256, // IopEvt_SIF0
+		256, // IopEvt_SIF1
+		256, // IopEvt_Dma11      (SIO2 in)
+		256, // IopEvt_Dma12      (SIO2 out)
+		256, // IopEvt_SIO
+		256, // IopEvt_Cdrom      (PS1 CDROM)
+		256, // IopEvt_CdromRead  (PS1 CDROM read)
+		256, // IopEvt_CdvdRead
+		256, // IopEvt_CdvdSectorReady
+		256, // IopEvt_DEV9
+		256, // IopEvt_USB
+		256, // IopEvt_DmaMDECin  (PS1 MDEC IN  DMA channel 0)
+		256, // IopEvt_DmaMDECout (PS1 MDEC OUT DMA channel 1)
+};
+static_assert(sizeof(PSX_INT_SCALE_256) / sizeof(PSX_INT_SCALE_256[0]) ==
+	(IopEvt_DmaMDECout + 1), "PSX_INT_SCALE_256 size must match IopEventId enum");
+
 __fi void PSX_INT( IopEventId n, s32 ecycle )
 {
 	// 19 is CDVD read int, it's supposed to be high.
 	//if (ecycle > 8192 && n != 19)
 	//	DevCon.Warning( "IOP cycles high: %d, n %d", ecycle, n );
+
+	// Apply the per-event tuning knob. ecycle is signed; scale in 64-bit
+	// to avoid 32-bit overflow when scale > 256, then clamp to s32.
+	const s64 scaled = (static_cast<s64>(ecycle) * static_cast<s64>(PSX_INT_SCALE_256[n])) >> 8;
+	if (scaled > 0x7FFFFFFFLL) ecycle = 0x7FFFFFFF;
+	else if (scaled < -0x7FFFFFFFLL) ecycle = -0x7FFFFFFF;
+	else ecycle = static_cast<s32>(scaled);
 
 	psxRegs.interrupt |= 1 << n;
 
@@ -136,13 +175,26 @@ __fi void PSX_INT( IopEventId n, s32 ecycle )
 	psxRegs.eCycle[n] = ecycle;
 
 	psxSetNextBranchDelta(ecycle);
-	const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
-	const s32 iopDelta = (psxRegs.iopNextEventCycle - psxRegs.cycle) * mutiplier;
+	// PS2 mode (PSXCLK=36864000) → ratio is exactly 8, shift instead of float
+	// div + cvt. PS1 mode (PSXCLK=33868800) keeps the precise path. See
+	// matching gate in R5900.cpp _cpuEventTest_Shared and the
+	// armsx2_ps1_mode_pacing_audit memo for PS1 mode pacing.
+	const s32 iopDeltaRaw = static_cast<s32>(psxRegs.iopNextEventCycle - psxRegs.cycle);
+	s32 iopDelta;
+	if (PSXCLK == 36864000) [[likely]]
+	{
+		iopDelta = iopDeltaRaw << 3;
+	}
+	else
+	{
+		const float mutiplier = static_cast<float>(PS2CLK) / static_cast<float>(PSXCLK);
+		iopDelta = static_cast<s32>(iopDeltaRaw * mutiplier);
+	}
 
 	if (psxRegs.iopCycleEE < iopDelta)
 	{
 		// The EE called this int, so inform it to branch as needed:
-		
+
 		cpuSetNextEventDelta(iopDelta - psxRegs.iopCycleEE);
 	}
 }
@@ -192,7 +244,8 @@ static __fi void _psxTestInterrupts()
 	// as follows helps speed up most games.
 
 	if( psxRegs.interrupt & ((1 << IopEvt_Cdvd) | (1 << IopEvt_Dma11) | (1 << IopEvt_Dma12)
-		| (1 << IopEvt_Cdrom) | (1 << IopEvt_CdromRead) | (1 << IopEvt_DEV9) | (1 << IopEvt_USB)))
+		| (1 << IopEvt_Cdrom) | (1 << IopEvt_CdromRead) | (1 << IopEvt_DEV9) | (1 << IopEvt_USB)
+		| (1 << IopEvt_DmaMDECin) | (1 << IopEvt_DmaMDECout)))
 	{
 		IopTestEvent(IopEvt_Cdvd,		cdvdActionInterrupt);
 		IopTestEvent(IopEvt_Dma11,		psxDMA11Interrupt);	// SIO2
@@ -201,6 +254,8 @@ static __fi void _psxTestInterrupts()
 		IopTestEvent(IopEvt_CdromRead,	cdrReadInterrupt);
 		IopTestEvent(IopEvt_DEV9,		dev9Interrupt);
 		IopTestEvent(IopEvt_USB,		usbInterrupt);
+		IopTestEvent(IopEvt_DmaMDECin,	psxDMAMDECinInterrupt);
+		IopTestEvent(IopEvt_DmaMDECout,	psxDMAMDECoutInterrupt);
 	}
 }
 

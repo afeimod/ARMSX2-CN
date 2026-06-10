@@ -14,6 +14,7 @@
 #include <unistd.h>
 #if defined(__linux__)
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/types.h>
 #include <sched.h>
 
@@ -178,6 +179,22 @@ bool Threading::ThreadHandle::SetAffinity(u64 processor_mask) const
 	}
 
 	return sched_setaffinity((pid_t)m_native_id, sizeof(set), &set) >= 0;
+#else
+	return false;
+#endif
+}
+
+bool Threading::ThreadHandle::SetNicePriority(int nice) const
+{
+#if defined(__linux__)
+	if (m_native_id == 0)
+		return false;
+	// PRIO_PROCESS + a tid sets the nice value of that specific thread on Linux.
+	// Silently tolerate EPERM — the process rlimit may forbid going negative.
+	errno = 0;
+	if (setpriority(PRIO_PROCESS, static_cast<id_t>(m_native_id), nice) == 0)
+		return true;
+	return errno == 0;
 #else
 	return false;
 #endif

@@ -13,14 +13,17 @@
 
 #include "fmt/format.h"
 
+#if !defined(__ANDROID__)
 #include <dbus/dbus.h>
+#include <X11/Xlib.h>
+#include <X11/extensions/XInput2.h>
+#endif
+#include <errno.h>
 #include <spawn.h>
 #include <sys/sysinfo.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
-#include <X11/Xlib.h>
-#include <X11/extensions/XInput2.h>
 
 #include <cstdlib>
 #include <cstring>
@@ -140,6 +143,7 @@ std::string GetOSVersionString()
 #endif
 }
 
+#if !defined(__ANDROID__)
 static bool SetScreensaverInhibitDBus(const bool inhibit_requested, const char* program_name, const char* reason)
 {
 	static dbus_uint32_t s_cookie;
@@ -329,9 +333,31 @@ void Common::DetachMousePositionCb()
 	}
 }
 
+#else // __ANDROID__
+
+bool Common::InhibitScreensaver(bool inhibit)
+{
+	return false;
+}
+
+void Common::SetMousePosition(int x, int y)
+{
+}
+
+bool Common::AttachMousePositionCb(std::function<void(int, int)> cb)
+{
+	return false;
+}
+
+void Common::DetachMousePositionCb()
+{
+}
+
+#endif // !__ANDROID__
+
 bool Common::PlaySoundAsync(const char* path)
 {
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ANDROID__)
 	// This is... pretty awful. But I can't think of a better way without linking to e.g. gstreamer.
 	const char* cmdname = "aplay";
 	const char* argv[] = {cmdname, path, nullptr};
@@ -376,5 +402,9 @@ void Threading::SleepUntil(u64 ticks)
 	struct timespec ts;
 	ts.tv_sec = static_cast<time_t>(ticks / 1000000000ULL);
 	ts.tv_nsec = static_cast<long>(ticks % 1000000000ULL);
-	clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr);
+	// Loop on EINTR so a stray signal (debugger attach, SIGPROF from samplers)
+	// can't return us early before the deadline. With TIMER_ABSTIME the abstime
+	// argument is unchanged across retries, so re-passing &ts is correct.
+	while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, nullptr) == EINTR)
+		;
 }

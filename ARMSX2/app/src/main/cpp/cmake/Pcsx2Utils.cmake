@@ -226,6 +226,12 @@ function(disable_compiler_warnings_for_target target)
 endfunction()
 
 function(detect_page_size)
+	# Allow cross-compile builds to skip the try_run by pre-setting HOST_PAGE_SIZE
+	# (e.g. -DHOST_PAGE_SIZE=0x1000 for typical 4 KiB ARM64).
+	if(DEFINED HOST_PAGE_SIZE)
+		message(STATUS "Host page size (preset): ${HOST_PAGE_SIZE}")
+		return()
+	endif()
 	message(STATUS "Determining host page size")
 	set(detect_page_size_file ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeTmp/src.c)
 	file(WRITE ${detect_page_size_file} "
@@ -252,6 +258,12 @@ int main() {
 endfunction()
 
 function(detect_cache_line_size)
+	# Allow cross-compile builds to skip the try_run by pre-setting
+	# HOST_CACHE_LINE_SIZE (e.g. -DHOST_CACHE_LINE_SIZE=64 for typical ARM64).
+	if(DEFINED HOST_CACHE_LINE_SIZE)
+		message(STATUS "Host cache line size (preset): ${HOST_CACHE_LINE_SIZE}")
+		return()
+	endif()
 	message(STATUS "Determining host cache line size")
 	set(detect_cache_line_size_file ${CMAKE_BINARY_DIR}${CMAKE_FILES_DIRECTORY}/CMakeTmp/src.c)
 	file(WRITE ${detect_cache_line_size_file} "

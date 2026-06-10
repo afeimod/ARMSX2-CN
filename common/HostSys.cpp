@@ -9,6 +9,10 @@
 #include "cpuinfo.h"
 #endif
 
+#if defined(__ANDROID__)
+#include <sys/system_properties.h>
+#endif
+
 static u32 PAUSE_TIME = 0;
 
 static void MultiPause()
@@ -104,10 +108,17 @@ static u32 GetSpinTime()
 	{
 		return 1000 * atoi(req);
 	}
-	else
-	{
-		return 50 * 1000; // 50µs
-	}
+#if defined(__ANDROID__)
+	// Mobile producer arrival is bimodal: either sub-µs (EE→MTGS handoff with
+	// work already queued) or many-ms (waiting for a frame boundary). A
+	// 50µs spin window is wrong for both cases — longer than the sub-µs hit
+	// rewards and uselessly short for the many-ms wait. Cut to 2µs to keep
+	// the fast path but stop bleeding CPU on the slow path; the simpleperf
+	// trace showed ~30% of total CPU in ShortSpin at the 50µs default.
+	return 2 * 1000;
+#else
+	return 50 * 1000; // 50µs
+#endif
 }
 
 const u32 SPIN_TIME_NS = GetSpinTime();
@@ -146,6 +157,18 @@ static CPUInfo CalcCPUInfo()
 {
 	CPUInfo out;
 	out.name = cpuinfo_get_package(0)->name;
+#if defined(__ANDROID__)
+	if (out.name.empty() || out.name == "Unknown")
+	{
+		char value[PROP_VALUE_MAX] = {};
+		if (__system_property_get("ro.soc.model", value) > 0 && value[0] != '\0')
+			out.name = value;
+		else if (__system_property_get("ro.hardware", value) > 0 && value[0] != '\0')
+			out.name = value;
+		else if (__system_property_get("ro.board.platform", value) > 0 && value[0] != '\0')
+			out.name = value;
+	}
+#endif
 	out.num_threads = cpuinfo_get_processors_count();
 	out.num_clusters = cpuinfo_get_clusters_count();
 	out.num_big_cores = 0;

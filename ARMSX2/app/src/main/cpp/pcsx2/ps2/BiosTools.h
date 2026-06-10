@@ -115,6 +115,11 @@ extern std::vector<u8> BiosRom;
 extern void ReadOSDConfigParames();
 
 extern bool IsBIOS(const char* filename, u32& version, std::string& description, u32& region, std::string& zone);
+// Same as IsBIOS but takes an already-open POSIX file descriptor (e.g. one
+// passed in from the Android side via SAF / ParcelFileDescriptor). The fd
+// is consumed: ownership transfers to the wrapping FILE* and is closed on
+// return. Pass dup(fd) if the caller still needs the original.
+extern bool IsBIOSFromFd(int fd, u32& version, std::string& description, u32& region, std::string& zone);
 extern bool IsBIOSAvailable(const std::string& full_path);
 
 extern bool LoadBIOS();

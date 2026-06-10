@@ -522,14 +522,23 @@ void LB()
 	u32 addr = cpuRegs.GPR.r[_Rs_].UL[0] + _Imm_;
 	s8 temp = memRead8(addr);
 
-	if (!_Rt_) return;
+	if (!_Rt_) goto maybe_event;
 	cpuRegs.GPR.r[_Rt_].SD[0] = temp;
 
+maybe_event:
 	// Force event test on EE counter read to improve read + interrupt syncing. Namely ESPN Games.
 	if ((addr & 0xFFFFE000) == 0x10000000)
 	{
 		intUpdateCPUCycles();
+		const u32 pc_before = cpuRegs.pc;
 		intEventTest();
+		// intEventTest → _cpuEventTest_Shared may call cpuException(), which
+		// mutates cpuRegs.pc to the exception handler vector and returns
+		// normally. If that happened, abort the current op so the caller
+		// (JIT block or interp for-loop) picks up the new PC at next dispatch
+		// instead of continuing with the wrong PC. Same pattern as trap().
+		if (cpuRegs.pc != pc_before)
+			Cpu->CancelInstruction();
 	}
 }
 
@@ -538,14 +547,19 @@ void LBU()
 	u32 addr = cpuRegs.GPR.r[_Rs_].UL[0] + _Imm_;
 	u8 temp = memRead8(addr);
 
-	if (!_Rt_) return;
+	if (!_Rt_) goto maybe_event;
 	cpuRegs.GPR.r[_Rt_].UD[0] = temp;
 
+maybe_event:
 	// Force event test on EE counter read to improve read + interrupt syncing. Namely ESPN Games.
 	if ((addr & 0xFFFFE000) == 0x10000000)
 	{
 		intUpdateCPUCycles();
+		const u32 pc_before = cpuRegs.pc;
 		intEventTest();
+		// See LB for rationale — cpuException may have mutated cpuRegs.pc.
+		if (cpuRegs.pc != pc_before)
+			Cpu->CancelInstruction();
 	}
 }
 
@@ -558,14 +572,19 @@ void LH()
 
 	s16 temp = memRead16(addr);
 
-	if (!_Rt_) return;
+	if (!_Rt_) goto maybe_event;
 	cpuRegs.GPR.r[_Rt_].SD[0] = temp;
 
+maybe_event:
 	// Force event test on EE counter read to improve read + interrupt syncing. Namely ESPN Games.
 	if ((addr & 0xFFFFE000) == 0x10000000)
 	{
 		intUpdateCPUCycles();
+		const u32 pc_before = cpuRegs.pc;
 		intEventTest();
+		// See LB for rationale — cpuException may have mutated cpuRegs.pc.
+		if (cpuRegs.pc != pc_before)
+			Cpu->CancelInstruction();
 	}
 }
 
@@ -578,14 +597,19 @@ void LHU()
 
 	u16 temp = memRead16(addr);
 
-	if (!_Rt_) return;
+	if (!_Rt_) goto maybe_event;
 	cpuRegs.GPR.r[_Rt_].UD[0] = temp;
 
+maybe_event:
 	// Force event test on EE counter read to improve read + interrupt syncing. Namely ESPN Games.
 	if ((addr & 0xFFFFE000) == 0x10000000)
 	{
 		intUpdateCPUCycles();
+		const u32 pc_before = cpuRegs.pc;
 		intEventTest();
+		// See LB for rationale — cpuException may have mutated cpuRegs.pc.
+		if (cpuRegs.pc != pc_before)
+			Cpu->CancelInstruction();
 	}
 }
 
@@ -598,14 +622,19 @@ void LW()
 
 	u32 temp = memRead32(addr);
 
-	if (!_Rt_) return;
+	if (!_Rt_) goto maybe_event;
 	cpuRegs.GPR.r[_Rt_].SD[0] = (s32)temp;
 
+maybe_event:
 	// Force event test on EE counter read to improve read + interrupt syncing. Namely ESPN Games.
 	if ((addr & 0xFFFFE000) == 0x10000000)
 	{
 		intUpdateCPUCycles();
+		const u32 pc_before = cpuRegs.pc;
 		intEventTest();
+		// See LB for rationale — cpuException may have mutated cpuRegs.pc.
+		if (cpuRegs.pc != pc_before)
+			Cpu->CancelInstruction();
 	}
 }
 
@@ -1239,6 +1268,11 @@ static void trap(u16 code=0)
 	cpuRegs.pc -= 4;
 	Console.Warning("Trap exception at 0x%08x", cpuRegs.pc);
 	cpuException(0x34, cpuRegs.branch);
+	// cpuException changed cpuRegs.pc to the exception handler vector.
+	// We must abort the current instruction so the JIT doesn't continue
+	// executing the rest of the block with the wrong PC.
+	// For the interpreter, this longjmps back to the for(;;) loop.
+	Cpu->CancelInstruction();
 }
 
 /*********************************************************

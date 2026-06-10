@@ -1060,6 +1060,13 @@ int FileSystem::OpenFDFile(const char* filename, int flags, int mode, Error* err
 
 	return -1;
 #else
+#if defined(__ANDROID__)
+	// content:// URIs from Android's Storage Access Framework can't be
+	// open()'d directly — defer to the JNI ContentResolver bridge that
+	// returns an fd from a ParcelFileDescriptor.
+	if (std::string_view(filename).substr(0, 10) == "content://")
+		return FileSystem::OpenFDFileContent(filename);
+#endif
 	const int fd = open(filename, flags, mode);
 	if (fd < 0)
 		Error::SetErrno(error, errno);
@@ -1110,7 +1117,18 @@ std::FILE* FileSystem::OpenSharedCFile(const char* filename, const char* mode, F
 	Error::SetErrno(error, errno);
 	return nullptr;
 #else
-	std::FILE* fp = std::fopen(filename, mode);
+	std::FILE* fp;
+#if defined(__ANDROID__)
+	// content:// URIs from Android's Storage Access Framework need to
+	// route through the JNI ContentResolver bridge — std::fopen can't
+	// open them. The share_mode flags are POSIX-irrelevant; the SAF
+	// fd is always read-only ("r" passed to ContentResolver).
+	std::string_view sv(filename);
+	if (sv.substr(0, 10) == "content://")
+		fp = fdopen(FileSystem::OpenFDFileContent(filename), "rb");
+	else
+#endif
+		fp = std::fopen(filename, mode);
 	if (!fp)
 		Error::SetErrno(error, errno);
 	return fp;
@@ -2311,6 +2329,19 @@ bool FileSystem::FindFiles(const char* path, const char* pattern, u32 flags, Fin
 
 bool FileSystem::StatFile(const char* path, struct stat* st)
 {
+#if defined(__ANDROID__)
+	// content:// URIs from SAF can't be stat'd by path — open via the
+	// JNI bridge and fstat the fd.
+	if (std::string_view(path).substr(0, 10) == "content://")
+	{
+		const int fd = FileSystem::OpenFDFileContent(path);
+		if (fd < 0)
+			return false;
+		const bool ok = (fstat(fd, st) == 0);
+		close(fd);
+		return ok;
+	}
+#endif
 	return stat(path, st) == 0;
 }
 
@@ -2331,6 +2362,23 @@ bool FileSystem::StatFile(const char* path, FILESYSTEM_STAT_DATA* sd)
 
 	// stat file
 	struct stat sysStatData;
+#if defined(__ANDROID__)
+	// content:// URIs from SAF can't be stat'd by path — open via the
+	// JNI bridge and fstat the fd. This is what unblocks
+	// GetPathFileSize / GetFileTimestamp / IsBIOSAvailable etc. for
+	// SAF-supplied paths.
+	if (std::string_view(path).substr(0, 10) == "content://")
+	{
+		const int fd = FileSystem::OpenFDFileContent(path);
+		if (fd < 0)
+			return false;
+		const bool ok = (fstat(fd, &sysStatData) == 0);
+		close(fd);
+		if (!ok)
+			return false;
+	}
+	else
+#endif
 	if (stat(path, &sysStatData) < 0)
 		return false;
 

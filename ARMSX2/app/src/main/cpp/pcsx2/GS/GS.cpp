@@ -152,11 +152,45 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 		Console.Error("Failed to create GS device");
 	}
 
+#if defined(ENABLE_VULKAN) && defined(ENABLE_OPENGL)
+	// Some devices (particularly Android) advertise Vulkan but fail to actually create a
+	// usable device. The SW renderer only uses the graphics API as a display backend, so if
+	// Vulkan fell over we can retry with OpenGL/GLES and keep the user in SW instead of
+	// crashing out.
+	if (!okay && new_api == RenderAPI::Vulkan && renderer == GSRendererType::SW)
+	{
+		Console.Warning("Vulkan device creation failed for SW renderer; falling back to OpenGL.");
+		ImGuiManager::Shutdown(clear_state_on_fail);
+		if (g_gs_device)
+		{
+			g_gs_device->Destroy();
+			g_gs_device.reset();
+		}
+		Host::ReleaseRenderWindow();
+
+		g_gs_device = std::make_unique<GSDeviceOGL>();
+		okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
+		if (okay)
+		{
+			okay = ImGuiManager::Initialize();
+			if (!okay)
+				Console.Error("Failed to initialize ImGuiManager after OpenGL fallback");
+		}
+		else
+		{
+			Console.Error("OpenGL fallback also failed to create a GS device");
+		}
+	}
+#endif
+
 	if (!okay)
 	{
 		ImGuiManager::Shutdown(clear_state_on_fail);
-		g_gs_device->Destroy();
-		g_gs_device.reset();
+		if (g_gs_device)
+		{
+			g_gs_device->Destroy();
+			g_gs_device.reset();
+		}
 		Host::ReleaseRenderWindow();
 		return false;
 	}
@@ -701,16 +735,36 @@ void GSgetStats(SmallStringBase& info)
 	}
 	else
 	{
-		info.format("{} HW | {} PRIM | {} DRW | {} DRWC | {} BAR | {} RP | {} RB | {} TC | {} TU",
-			api_name,
-			(int)pm.Get(GSPerfMon::Prim),
-			(int)pm.Get(GSPerfMon::Draw),
-			(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
-			(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
-			(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
-			(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
-			(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
-			(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		if (!GSConfig.HWROV)
+		{
+			info.format("{} HW | {} PRIM | {} DRW | {} DRWC | {} BAR | {} RP | {} RB | {} TC | {} TU",
+				api_name,
+				(int)pm.Get(GSPerfMon::Prim),
+				(int)pm.Get(GSPerfMon::Draw),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
+				(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
+				(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
+				(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		}
+		else
+		{
+			// Add ROV stats along standard stats.
+			info.format("{} HW | {} PRIM | {} DRW | {}/{} DRWC | {}/{} BAR | {} RP | {} RB | {}/{} TC | {} TU",
+				api_name,
+				(int)pm.Get(GSPerfMon::Prim),
+				(int)pm.Get(GSPerfMon::Draw),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCalls)),
+				(int)std::ceil(pm.Get(GSPerfMon::DrawCallsROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::Barriers)),
+				(int)std::ceil(pm.Get(GSPerfMon::BarriersROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::RenderPasses)),
+				(int)std::ceil(pm.Get(GSPerfMon::Readbacks)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureCopies)),
+				(int)std::ceil(pm.Get(GSPerfMon::DepthCopiesROV)),
+				(int)std::ceil(pm.Get(GSPerfMon::TextureUploads)));
+		}
 	}
 }
 
@@ -900,6 +954,7 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 {
 	pxAssertRel(!s_fh, "Has no file mapping");
 
+	const char* file_name = "/GS.mem";
 	s_fh = CreateFileMapping(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, size, nullptr);
 	if (s_fh == NULL)
 	{
@@ -967,6 +1022,7 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 #include <unistd.h>
 #if defined(__ANDROID__)
 #include <sys/syscall.h>
+#include <android/sharedmem.h>
 #endif
 
 static int s_shm_fd = -1;
@@ -975,6 +1031,7 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 {
 	pxAssert(s_shm_fd == -1);
 
+	const char* file_name = "/GS.mem";
 #if defined(__ANDROID__)
 	s_shm_fd = static_cast<int>(syscall(__NR_memfd_create, "GS.mem", 0));
 	if (s_shm_fd == -1)
@@ -983,7 +1040,6 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 		return nullptr;
 	}
 #else
-	const char* file_name = "/GS.mem";
 	s_shm_fd = shm_open(file_name, O_RDWR | O_CREAT | O_EXCL, 0600);
 	if (s_shm_fd != -1)
 	{
@@ -995,12 +1051,11 @@ void* GSAllocateWrappedMemory(size_t size, size_t repeat)
 		return nullptr;
 	}
 #endif
-
 	if (ftruncate(s_shm_fd, repeat * size) < 0)
 		fprintf(stderr, "Failed to reserve memory due to %s\n", strerror(errno));
 
 	void* fifo = mmap(nullptr, size * repeat, PROT_READ | PROT_WRITE, MAP_SHARED, s_shm_fd, 0);
-
+#endif
 	for (size_t i = 1; i < repeat; i++)
 	{
 		void* base = (u8*)fifo + size * i;
@@ -1024,8 +1079,6 @@ void GSFreeWrappedMemory(void* ptr, size_t size, size_t repeat)
 	close(s_shm_fd);
 	s_shm_fd = -1;
 }
-
-#endif
 
 std::pair<u8, u8> GSGetRGBA8AlphaMinMax(const void* data, u32 width, u32 height, u32 stride)
 {
@@ -1317,12 +1370,12 @@ BEGIN_HOTKEY_LIST(g_gs_hotkeys){"Screenshot", TRANSLATE_NOOP("Hotkeys", "Graphic
 					return;
 
 				static constexpr std::array<const char*, static_cast<u8>(AccBlendLevel::MaxCount)> s_blending_option_names = {{
-					TRANSLATE_NOOP("Hotkeys", "Minimum"),
-					TRANSLATE_NOOP("Hotkeys", "Basic"),
-					TRANSLATE_NOOP("Hotkeys", "Medium"),
-					TRANSLATE_NOOP("Hotkeys", "High"),
-					TRANSLATE_NOOP("Hotkeys", "Full"),
-					TRANSLATE_NOOP("Hotkeys", "Maximum"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Minimum"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Basic"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Medium"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "High"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Full"),
+					TRANSLATE_NOOP("Hotkeys_BlendAcc", "Maximum"),
 				}};
 
 				const AccBlendLevel new_blend_mode = static_cast<AccBlendLevel>(

@@ -2,6 +2,9 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Achievements.h"
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
 #include "BuildVersion.h"
 #include "CDVD/CDVD.h"
 #include "CDVD/IsoReader.h"
@@ -41,6 +44,12 @@
 #include "USB/USB.h"
 #include "Vif_Dynarec.h"
 #include "VMManager.h"
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/arm64Emitter.h"
+#include "arm64/aVU0.h"
+#include "arm64/aVU.h"
+#include "arm64/mac/MacBackend.h"
+#endif
 #include "ps2/BiosTools.h"
 
 #include "common/Console.h"
@@ -53,7 +62,6 @@
 #include "common/StringUtil.h"
 #include "common/Threading.h"
 #include "common/Timer.h"
-#include "common/emitter/x86emitter.h"
 
 #include "IconsFontAwesome.h"
 #include "IconsPromptFont.h"
@@ -199,6 +207,9 @@ static bool s_screensaver_inhibited = false;
 
 static bool s_discord_presence_active = false;
 static time_t s_discord_presence_time_epoch;
+static const char* s_discord_presence_app_id = "1458595419499139094";
+static const char* s_discord_presence_large_image_key = "4k-pcsx2";
+static const char* s_discord_presence_large_image_text = "PCSX2 PS2 Emulator";
 
 // Making GSDumpReplayer.h dependent on R5900.h is a no-no, since the GS uses it.
 extern R5900cpu GSDumpReplayerCpu;
@@ -302,8 +313,10 @@ void VMManager::SetState(VMState state)
 	}
 	else if (state == VMState::Stopping && old_state == VMState::Running)
 	{
-		// If stopping, break execution as soon as possible.
-		Cpu->ExitExecution();
+		// Don't call ExitExecution() here — SetState(Stopping) may be called from a non-CPU
+		// thread (e.g. Android JNI shutdown). ExitExecution does fastjmp_jmp, which is UB from
+		// the wrong thread. The CPU thread will detect IsExecutionInterrupted() at the next
+		// vsync (Counters.cpp) and call ExitExecution itself.
 	}
 }
 
@@ -713,8 +726,8 @@ void VMManager::WarnAboutUnconfiguredController()
 	if (!si || HasAnyBindingsForPad(*si, 0))
 		return;
 
-	Host::AddIconOSDMessage("ControllerNotConfigured", ICON_FA_GAMEPAD,
-		TRANSLATE_STR("VMManager", "Controller 1 has no input bindings configured."), Host::OSD_WARNING_DURATION);
+/*	Host::AddIconOSDMessage("ControllerNotConfigured", ICON_FA_GAMEPAD,
+		TRANSLATE_STR("VMManager", "Controller 1 has no input bindings configured."), Host::OSD_WARNING_DURATION);*/
 }
 
 void VMManager::ApplyGameFixes()
@@ -1039,6 +1052,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		const u32 old_crc = s_disc_crc;
 		bool serial_is_valid = false;
 		std::string title;
+		CDVDDiscType disc_type = CDVDDiscType::Other;
 
 		if (GSDumpReplayer::IsReplayingDump())
 		{
@@ -1050,7 +1064,7 @@ void VMManager::UpdateDiscDetails(bool booting)
 		}
 		else if (CDVDsys_GetSourceType() != CDVD_SourceType::NoDisc)
 		{
-			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, nullptr);
+			cdvdGetDiscInfo(&s_disc_serial, &s_disc_elf, &s_disc_version, &s_disc_crc, &disc_type);
 			serial_is_valid = !s_disc_serial.empty();
 		}
 		else if (!s_elf_override.empty())
@@ -1066,6 +1080,12 @@ void VMManager::UpdateDiscDetails(bool booting)
 			s_disc_crc = 0;
 			title = fmt::format(TRANSLATE_FS("VMManager", "PS2 BIOS ({})"), BiosZone);
 		}
+
+		// Swap memcard set based on disc type. PS1 disc → .mcr (128KB)
+		// sidecar files; everything else → standard .ps2 (8MB) cards. The
+		// FileMcd_Reopen call below picks up the new flag on its
+		// internal close+open cycle.
+		FileMcd_SetPS1Mode(disc_type == CDVDDiscType::PS1Disc);
 
 		// If we're booting an ELF, use its CRC, not the disc (if any).
 		if (!s_elf_override.empty())
@@ -1265,12 +1285,16 @@ bool VMManager::AutoDetectSource(const std::string& filename, Error* error)
 			s_elf_override = filename;
 			return true;
 		}
-		else
+		else if (IsDiscFileName(filename))
 		{
-			// TODO: Maybe we should check if it's a valid iso here...
 			CDVDsys_SetFile(CDVD_SourceType::Iso, filename);
 			CDVDsys_ChangeSource(CDVD_SourceType::Iso);
 			return true;
+		}
+		else
+		{
+			Error::SetStringFmt(error, TRANSLATE_FS("VMManager", "Unrecognized file type: '{}'"), Path::GetFileName(filename));
+			return false;
 		}
 	}
 	else
@@ -1656,6 +1680,16 @@ void VMManager::Shutdown(bool save_resume_state)
 		vu1Thread.WaitVU();
 	MTGS::WaitGS();
 
+	// VU1_PROFILE_BLOCKS: per-game shutdown is the right surface for the
+	// hot-block dump — overlay Exit lands here, full app exit picks it up
+	// later via ShutdownCPUProviders. No-op when the macro is undefined.
+	// VU1 is drained above, so s_variants is stable.
+#if defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_VU1
+	CpuArmVU1.DumpProfile();
+#endif
+#endif
+
 	if (!GSDumpReplayer::IsReplayingDump() && save_resume_state)
 	{
 		std::string resume_file_name(GetCurrentSaveStateFileName(-1));
@@ -1738,6 +1772,22 @@ void VMManager::Shutdown(bool save_resume_state)
 
 	// clear out any potentially-incorrect settings from the last game
 	LoadSettings();
+}
+
+bool VMManager::RequestReset()
+{
+	if (MemcardBusy::IsBusy())
+	{
+		Host::AddIconOSDMessage("RequestReset", ICON_FA_TRIANGLE_EXCLAMATION,
+			TRANSLATE_STR("VMManager",
+				"The memory card is busy, so the reset operation has been cancelled to prevent data loss."),
+			Host::OSD_WARNING_DURATION);
+		return false;
+	}
+
+	VMManager::Reset();
+
+	return true;
 }
 
 void VMManager::Reset()
@@ -1834,7 +1884,9 @@ std::string VMManager::GetSaveStateFileName(const char* game_serial, u32 game_cr
 	std::string filename;
 	if (std::strlen(game_serial) > 0)
 	{
-		if (slot < 0)
+		if (slot == SAVESTATE_SLOT_AUTOSAVE)
+			filename = fmt::format("{} ({:08X}).autosave.p2s", game_serial, game_crc);
+		else if (slot < 0)
 			filename = fmt::format("{} ({:08X}).resume.p2s", game_serial, game_crc);
 		else if (backup)
 			filename = fmt::format("{} ({:08X}).{:02d}.p2s.backup", game_serial, game_crc, slot);
@@ -2266,22 +2318,12 @@ void VMManager::Internal::Throttle()
 		return;
 	}
 
-	// Conversion of delta from CPU ticks (microseconds) to milliseconds
-	const s32 msec = static_cast<s32>((sDeltaTime * -1000) / static_cast<s64>(GetTickFrequency()));
-
-	// If any integer value of milliseconds exists, sleep it off.
-	// Prior comments suggested that 1-2 ms sleeps were inaccurate on some OSes;
-	// further testing suggests instead that this was utter bullshit.
-	if (msec > 1)
-	{
-		Threading::Sleep(msec - 1);
-	}
-
-	// Conversion to milliseconds loses some precision; after sleeping off whole milliseconds,
-	// spin the thread without sleeping until we finally reach our expected end time.
-	while (GetCPUTicks() < uExpectedEnd)
-	{
-	}
+	// Sleep until the expected frame end. On Android/Linux this is clock_nanosleep
+	// with TIMER_ABSTIME against CLOCK_MONOTONIC; HRTIMER wakeup is within ~50-200us
+	// of the deadline, vs the prior msec-sleep + GetCPUTicks busy-spin which burned
+	// ~10% of EE thread CPU calling clock_gettime in a tight loop while waiting out
+	// the sub-millisecond tail.
+	Threading::SleepUntil(uExpectedEnd);
 
 	// Finally, set our next frame start to when this one ends
 	s_limiter_frame_start = uExpectedEnd;
@@ -2649,16 +2691,35 @@ void VMManager::LogCPUCapabilities()
 
 void VMManager::InitializeCPUProviders()
 {
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#ifdef _M_X86
 	recCpu.Reserve();
 	psxRec.Reserve();
 
 	CpuMicroVU0.Reserve();
 	CpuMicroVU1.Reserve();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_EE
+	recCpu.Reserve();
+#endif
+#ifndef INTERP_IOP
+	psxRec.Reserve();
+#endif
+#ifndef INTERP_VU0
+	CpuArmVU0.Reserve();
+#endif
+#ifndef INTERP_VU1
+	CpuArmVU1.Reserve();
+#endif
+	// Reserve the macOS-port backends too; UpdateCPUImplementations picks per-CPU.
+	pcsx2_macrec::recCpu.Reserve();
+	pcsx2_macrec::psxRec.Reserve();
+	pcsx2_macrec::CpuMicroVU0.Reserve();
+	pcsx2_macrec::CpuMicroVU1.Reserve();
+	// Despite not having MTVU on ARM64, we still need the thread alive.
+	// Otherwise the read and write positions of the ring buffer wont match,
+	// and various systems in the emulator end up deadlocked.
+	vu1Thread.Open();
 #else
-	// Despite not having any VU recompilers on ARM64, therefore no MTVU,
-	// we still need the thread alive. Otherwise the read and write positions
-	// of the ring buffer wont match, and various systems in the emulator end up deadlocked.
 	vu1Thread.Open();
 #endif
 
@@ -2673,15 +2734,26 @@ void VMManager::ShutdownCPUProviders()
 		dVifRelease(0);
 	}
 
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#ifdef _M_X86
 	CpuMicroVU1.Shutdown();
 	CpuMicroVU0.Shutdown();
 
 	psxRec.Shutdown();
 	recCpu.Shutdown();
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifndef INTERP_VU1
+	CpuArmVU1.Shutdown();
+#endif
+#ifndef INTERP_EE
+	recCpu.Shutdown();
+#endif
+	pcsx2_macrec::CpuMicroVU1.Shutdown();
+	pcsx2_macrec::CpuMicroVU0.Shutdown();
+	pcsx2_macrec::psxRec.Shutdown();
+	pcsx2_macrec::recCpu.Shutdown();
+	if (vu1Thread.IsOpen())
+		vu1Thread.WaitVU();
 #else
-	// See the comment in the InitializeCPUProviders for an explaination why we
-	// still need to manage the MTVU thread.
 	if (vu1Thread.IsOpen())
 		vu1Thread.WaitVU();
 #endif
@@ -2694,16 +2766,53 @@ void VMManager::UpdateCPUImplementations()
 		Cpu = &GSDumpReplayerCpu;
 		psxCpu = &psxInt;
 		CpuVU0 = &CpuIntVU0;
+#ifdef INTERP_VU1
 		CpuVU1 = &CpuIntVU1;
+#else
+		CpuVU1 = &CpuArmVU1;
+#endif
 		return;
 	}
 
-#ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
+#if defined(_M_X86)
 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#elif defined(__aarch64__) || defined(_M_ARM64)
+	// Per-CPU A/B between the original arm64 backend and the macOS-port backend
+	// (namespaced as pcsx2_macrec). UseMac* flags live in EmuConfig.Cpu.Recompiler.
+#ifdef INTERP_EE
+	Cpu = &intCpu;
+#else
+	R5900cpu* eeRec = EmuConfig.Cpu.Recompiler.UseMacEE ? &pcsx2_macrec::recCpu : &recCpu;
+	Cpu = CHECK_EEREC ? eeRec : &intCpu;
+#endif
+#ifdef INTERP_VU0
+	CpuVU0 = static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#else
+	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0
+		? (EmuConfig.Cpu.Recompiler.UseMacVU0
+			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU0)
+			: static_cast<BaseVUmicroCPU*>(&CpuArmVU0))
+		: static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
+#endif
+#ifdef INTERP_VU1
+	CpuVU1 = static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#else
+	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1
+		? (EmuConfig.Cpu.Recompiler.UseMacVU1
+			? static_cast<BaseVUmicroCPU*>(&pcsx2_macrec::CpuMicroVU1)
+			: static_cast<BaseVUmicroCPU*>(&CpuArmVU1))
+		: static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+#endif
+#ifdef INTERP_IOP
+	psxCpu = &psxInt;
+#else
+	R3000Acpu* iopRec = EmuConfig.Cpu.Recompiler.UseMacIOP ? &pcsx2_macrec::psxRec : &psxRec;
+	psxCpu = CHECK_IOPREC ? iopRec : &psxInt;
+#endif
 #else
 	Cpu = &intCpu;
 	psxCpu = &psxInt;
@@ -2715,8 +2824,18 @@ void VMManager::UpdateCPUImplementations()
 
 void VMManager::Internal::ClearCPUExecutionCaches()
 {
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: Cpu=%p psxCpu=%p CpuVU0=%p CpuVU1=%p",
+		(void*)Cpu, (void*)psxCpu, (void*)CpuVU0, (void*)CpuVU1);
+#endif
 	Cpu->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: Cpu->Reset() done");
+#endif
 	psxCpu->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: psxCpu->Reset() done");
+#endif
 
 #ifdef _M_X86 // TODO(Stenzek): Remove me once EE/VU/IOP recs are added.
 	// mVU's VU0 needs to be properly initialized for macro mode even if it's not used for micro mode!
@@ -2725,7 +2844,13 @@ void VMManager::Internal::ClearCPUExecutionCaches()
 #endif
 
 	CpuVU0->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: CpuVU0->Reset() done");
+#endif
 	CpuVU1->Reset();
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_ERROR, "PASX2-REC", "ClearCPUExecutionCaches: all done");
+#endif
 
 	if constexpr (newVifDynaRec)
 	{
@@ -3233,7 +3358,7 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_PAINTBRUSH,
 				TRANSLATE_SV("VMManager", "Blending Accuracy is below Basic, this may break effects in some games."));
 		}
-		if (EmuConfig.GS.HWDownloadMode != GSHardwareDownloadMode::Enabled)
+		if (EmuConfig.GS.HWDownloadMode > GSHardwareDownloadMode::EnabledForceFull)
 		{
 			append(ICON_FA_DOWNLOAD,
 				TRANSLATE_SV("VMManager", "Hardware Download Mode is not set to Accurate, this may break rendering in some games."));
@@ -3253,6 +3378,11 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_CIRCLE_EXCLAMATION,
 				TRANSLATE_SV("VMManager", "Estimate texture region is enabled, this may reduce performance."));
 		}
+		if (EmuConfig.GS.UserHacks_DrawBuffering)
+		{
+			append(ICON_FA_CIRCLE_EXCLAMATION,
+				TRANSLATE_SV("VMManager", "Draw Buffering is enabled, this may result in graphical errors."));
+		}
 		if (EmuConfig.GS.DumpReplaceableTextures)
 		{
 			append(ICON_FA_CIRCLE_EXCLAMATION,
@@ -3267,6 +3397,11 @@ void VMManager::WarnAboutUnsafeSettings()
 		{
 			append(ICON_FA_IMAGES,
 				TRANSLATE_SV("VMManager", "Accurate Alpha Test is enabled, this may reduce performance."));
+		}
+		if (EmuConfig.GS.HWAA1)
+		{
+			append(ICON_FA_CIRCLE_EXCLAMATION,
+				TRANSLATE_SV("VMManager", "AA1 is enabled, this may severely degrade performance."));
 		}
 		if (EmuConfig.GS.DepthFeedbackMode != GSDepthFeedbackMode::Auto)
 		{
@@ -3293,15 +3428,9 @@ void VMManager::WarnAboutUnsafeSettings()
 			append(ICON_FA_TV,
 				TRANSLATE_SV("VMManager", "Integer scaling is enabled. This may shrink the image."));
 		}
-		static bool render_change_warn = false;
-		if (EmuConfig.GS.Renderer != GSRendererType::Auto && EmuConfig.GS.Renderer != GSRendererType::SW && !render_change_warn)
-		{
-			// show messagesbox
-			render_change_warn = true;
-
-			append(ICON_FA_CIRCLE_EXCLAMATION,
-				TRANSLATE_SV("VMManager", "Graphics API is not set to Automatic. This may cause performance problems and graphical issues."));
-		}
+		// The "Graphics API is not set to Automatic" OSD warning was removed:
+		// the setup wizard forces an explicit GL/VK pick by design, so this
+		// banner would fire on every boot regardless of correctness.
 	}
 	if (EmuConfig.GS.DumpGSData)
 	{
@@ -3518,6 +3647,38 @@ static u32 GetProcessorIdForProcessor(const cpuinfo_processor* proc)
 #endif
 }
 
+// Look up the cpuinfo processor struct for a given OS processor id.
+static const cpuinfo_processor* FindCpuinfoProcessorForOSId(u32 os_id)
+{
+	const u32 count = cpuinfo_get_processors_count();
+	for (u32 i = 0; i < count; i++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(i);
+		if (p && GetProcessorIdForProcessor(p) == os_id)
+			return p;
+	}
+	return nullptr;
+}
+
+// Build an affinity bitmask covering every processor in the cluster that
+// contains `os_id`. Returns 0 if the cluster isn't resolvable (caller should
+// fall back to single-core pinning).
+static u64 ClusterAffinityMaskForOSId(u32 os_id)
+{
+	const cpuinfo_processor* proc = FindCpuinfoProcessorForOSId(os_id);
+	if (!proc || !proc->cluster)
+		return 0;
+	const cpuinfo_cluster* cluster = proc->cluster;
+	u64 mask = 0;
+	for (u32 j = 0; j < cluster->processor_count; j++)
+	{
+		const cpuinfo_processor* p = cpuinfo_get_processor(cluster->processor_start + j);
+		if (p)
+			mask |= static_cast<u64>(1) << GetProcessorIdForProcessor(p);
+	}
+	return mask;
+}
+
 static void InitializeProcessorList()
 {
 	if (!cpuinfo_initialize())
@@ -3557,6 +3718,7 @@ static void InitializeProcessorList()
 		s_processor_list.push_back(proc_id);
 	}
 	Console.WriteLn(str.view());
+
 }
 
 void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
@@ -3583,7 +3745,14 @@ void VMManager::SetHardwareDependentDefaultSettings(SettingsInterface& si)
 		si.SetBoolValue("EmuCore/Speedhacks", "vuThread", false);
 	}
 
-	const int extra_threads = (core_count > 3) ? 3 : 2;
+	// SW worker count. Empirical on Oryon/SD8E-class SoCs: 4 workers gives
+	// the highest sustained throughput (75-80% per-thread CPU is "saturated"
+	// for the SW rasterizer's job-batched workload — going lower drops the
+	// emulation rate below 100%). On 8-core phones EE/MTVU/MTGS take 3
+	// cores, leaving 5 for SW workers; 4 fits comfortably with headroom.
+	// Pre-Oryon big.LITTLE devices typically have 4-6 big cores, so 3
+	// workers there.
+	const int extra_threads = (core_count >= 8) ? 4 : 3;
 	Console.WriteLn(fmt::format("  Setting Extra Software Rendering Threads to {}.", extra_threads));
 	si.SetIntValue("EmuCore/GS", "extrathreads", extra_threads);
 }
@@ -3651,7 +3820,16 @@ void VMManager::SetEmuThreadAffinities()
 	if (s_thread_affinities_set == new_pin_enable)
 		return;
 
-	s_thread_affinities_set = EmuConfig.EnableThreadPinning;
+	// Track whether pinning is *currently effective*, not just whether the
+	// user enabled it in config. Previously this stored EmuConfig.EnableThreadPinning
+	// regardless of new_pin_enable, which on a shutdown call (state=Shutdown,
+	// new_pin_enable=false but EnableThreadPinning=true) left this flag as
+	// `true` while the actual pinning + SW renderer proc list got cleared
+	// below. The next VM start then early-returned at the guard above (`true
+	// == true`), never re-populating s_software_renderer_processor_list. SW
+	// workers ended up unpinned with an empty proc pool — the symptom users
+	// see as "Not pinning SW threads, we need 3 processors, but only have 0".
+	s_thread_affinities_set = new_pin_enable;
 
 	EnsureCPUInfoInitialized();
 
@@ -3702,12 +3880,15 @@ void VMManager::SetEmuThreadAffinities()
 	// Try to find some threads for the software renderer.
 	// They should be in the same cluster as the main GS thread. If they're not, for example,
 	// we had 4 P cores and 6 E cores, let the OS schedule them instead.
+	s_software_renderer_processor_list.clear();
 	s_software_renderer_processor_list.reserve(s_processor_list.size() - (mtvu ? 3 : 2));
-	const u32 gs_cluster_id = cpuinfo_get_processor(gs_index)->cluster->cluster_id;
+	const cpuinfo_processor* gs_proc = FindCpuinfoProcessorForOSId(gs_index);
+	const u32 gs_cluster_id = (gs_proc && gs_proc->cluster) ? gs_proc->cluster->cluster_id : 0;
 	for (size_t i = mtvu ? 3 : 2; i < s_processor_list.size(); i++)
 	{
 		const u32 proc_index = s_processor_list[i];
-		const u32 proc_cluster_id = cpuinfo_get_processor(proc_index)->cluster->cluster_id;
+		const cpuinfo_processor* p = FindCpuinfoProcessorForOSId(proc_index);
+		const u32 proc_cluster_id = (p && p->cluster) ? p->cluster->cluster_id : 0;
 		if (proc_cluster_id != gs_cluster_id)
 		{
 			WARNING_LOG("  Only using {} SW threads, processor {} is in cluster {}, but the GS thread is in cluster {}",
@@ -3723,6 +3904,35 @@ const std::vector<u32>& VMManager::Internal::GetSoftwareRendererProcessorList()
 {
 	EnsureCPUInfoInitialized();
 	return s_software_renderer_processor_list;
+}
+
+u64 VMManager::Internal::GetPerformanceClusterAffinityMask()
+{
+	// Union the clusters that contain the EE/VU/GS target processors so
+	// callers (Oboe audio data callback) can pin onto the same big cluster
+	// without competing with EE for L1/L2. EE/VU/GS themselves use single-
+	// core pinning to keep caches warm; this mask is a coarser-grained hint
+	// for adjacent threads that just need to live in the perf cluster.
+	// Returns 0 when pinning is currently off or cluster info isn't resolvable —
+	// caller leaves the thread on the kernel's default affinity in that case.
+	if (!s_thread_affinities_set)
+		return 0;
+	EnsureCPUInfoInitialized();
+	if (s_processor_list.empty())
+		return 0;
+
+	const bool mtvu = EmuConfig.Speedhacks.vuThread;
+	if (s_processor_list.size() < (mtvu ? 3u : 2u))
+		return 0;
+
+	const u32 ee_index = s_processor_list[0];
+	const u32 vu_index = s_processor_list[1];
+	const u32 gs_index = s_processor_list[mtvu ? 2 : 1];
+	const u64 perf_mask =
+		ClusterAffinityMaskForOSId(ee_index) |
+		ClusterAffinityMaskForOSId(vu_index) |
+		ClusterAffinityMaskForOSId(gs_index);
+	return perf_mask;
 }
 
 void VMManager::ReloadPINE()
@@ -3744,7 +3954,7 @@ void VMManager::InitializeDiscordPresence()
 		return;
 
 	DiscordEventHandlers handlers = {};
-	Discord_Initialize("1025789002055430154", &handlers, 0, nullptr);
+	Discord_Initialize(s_discord_presence_app_id, &handlers, 0, nullptr);
 	s_discord_presence_active = true;
 
 	UpdateDiscordPresence(true);
@@ -3776,8 +3986,8 @@ void VMManager::UpdateDiscordPresence(bool update_session_time)
 
 	// https://discord.com/developers/docs/rich-presence/how-to#updating-presence-update-presence-payload-fields
 	DiscordRichPresence rp = {};
-	rp.largeImageKey = "4k-pcsx2";
-	rp.largeImageText = "PCSX2 PS2 Emulator";
+	rp.largeImageKey = s_discord_presence_large_image_key;
+	rp.largeImageText = s_discord_presence_large_image_text;
 	rp.startTimestamp = s_discord_presence_time_epoch;
 
 	if (rp_title.empty())

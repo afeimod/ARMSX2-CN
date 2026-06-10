@@ -8,6 +8,10 @@
 #include "common/Pcsx2Defs.h"
 #include "common/FPControl.h"
 
+#if defined(__aarch64__) || defined(_M_ARM64)
+#include "arm64/InterpFlags.h"
+#endif
+
 #include <array>
 #include <string>
 #include <optional>
@@ -384,9 +388,8 @@ enum class GSDumpCompressionMethod : u8
 enum class SavestateCompressionMethod : u8
 {
 	Uncompressed = 0,
-	Deflate64 = 1,
-	Zstandard = 2,
-	LZMA2 = 3
+	Deflate = 1,
+	Zstandard = 2
 };
 
 enum class SavestateCompressionLevel : u8
@@ -400,6 +403,7 @@ enum class SavestateCompressionLevel : u8
 enum class GSHardwareDownloadMode : u8
 {
 	Enabled,
+	EnabledForceFull,
 	NoReadbacks,
 	Unsynchronized,
 	Disabled
@@ -656,6 +660,61 @@ struct Pcsx2Config
 			EnableFastmem : 1;
 		bool
 			PauseOnTLBMiss : 1;
+		// ARMSX2 A/B: per-CPU toggle between the original Android arm64 backend
+		// (default) and the macOS-port arm64 backend (lives in arm64/mac/,
+		// namespaced as pcsx2_macrec). Use these to bisect mac regressions
+		// against the slower-but-more-accurate native backend.
+		bool
+			UseMacEE : 1,
+			UseMacIOP : 1,
+			UseMacVU0 : 1,
+			UseMacVU1 : 1;
+		// microVU-style compile-time pipeline-stall folding (Phase 2 inline FMAC
+		// stall, re-attempt). When ON, per-pair FMAC stall-check BLs
+		// (vu1_TestFMACStallReg / vu1_TestFMACStallReg2 — formerly 17-32% of
+		// total CPU per simpleperf) are replaced by a compile-time inline
+		// `Add VU1_CYCLE_REG, #fmac_stall`, gated by the same fmac_carry_safe
+		// guard (ct_cycle > 3) that proves cross-block carry-in slots have
+		// retired at runtime. Mirrors mac's compile-time mVUincCycles + mVUstall
+		// fold. Default OFF — was reverted 2026-04 due to GoW glitches; needs
+		// shadow-verify pass before enabling.
+		bool
+			Vu1InlineFmacStall : 1;
+		// microVU-style cross-block pipeline-state propagation. When ON, each
+		// VU1 block records its exit-time microRegInfo (per-VF/VI lane
+		// countdowns + Q/P/xgkick state). When a predecessor links to a
+		// successor via direct-B forward link, the predecessor's exitState is
+		// used at the successor's tryForwardLink time to match a specialised
+		// variant whose entryState matches — letting CompileBlock shrink the
+		// CARRY_IN_GATE_* bounds (FMAC=3, IALU=3, FDIV=12, EFU=54 cycle
+		// thresholds for cross-block carry-in safety). With entryState known
+		// for-sure clean, per-pair stall checks can elide from cycle 0 of the
+		// block. Default OFF — variant cache multiplies per-slot; needs
+		// measurement on real workloads.
+		bool
+			Vu1CrossBlockPState : 1;
+		// Inline FMAC-drain instead of BL into vu1_TestPipes_VU1 at pairs
+		// where the pre-walk proves the non-FMAC pipes (FDIV/EFU/IALU) are
+		// empty and carry-safe (skip_info[i].fmacOnlyTestPipes). The runtime
+		// helper would only walk the FMAC ring; we emit that walk inline at
+		// the JIT site instead, saving the BL + viCacheInvalidateAll + ret
+		// per call. Mac doesn't need this because it has no runtime FMAC
+		// ring — flag instances are routed at compile time via the
+		// regalloc. Default OFF until A/B-tested in San Andreas + GoW2.
+		bool
+			Vu1InlineDrainTestPipes : 1;
+		// Mac-style flag-instance routing. When ON, VU->fmac[0..3].{mac,
+		// status,clip}flag are reinterpreted as 4 mac-style instance slots
+		// (the ring metadata — sCycle/Cycle/flagreg/regupper/etc. — is no
+		// longer written). emitFMACAddPair stores the pair's new flags into
+		// slot[mo.{m,s,c}Flag.write]; at each pair's top, slot[mo.{m,s,c}
+		// Flag.read] is committed to VI[REG_MAC/STATUS/CLIP]. FMAC stall BLs
+		// are force-skipped (they read sCycle which we don't write) and
+		// fmaccount stays 0 so vu1_TestPipes_VU1's FMAC drain loop early-
+		// exits. Default OFF — first-cut port of microVU's flag-instance
+		// scheme; subsequent sessions add cross-block instance plumbing.
+		bool
+			Vu1FmacInstanceRouting : 1;
 		BITFIELD_END
 
 		RecompilerOptions();
@@ -715,7 +774,7 @@ struct Pcsx2Config
 		static constexpr float DEFAULT_FRAME_RATE_PAL = 50.00f;
 
 #if defined(__ANDROID__)
-		static constexpr GSRendererType DEFAULT_HW_RENDERER = GSRendererType::SW;
+		static constexpr GSRendererType DEFAULT_HW_RENDERER = GSRendererType::Auto;
 #else
 		static constexpr GSRendererType DEFAULT_HW_RENDERER = GSRendererType::Auto;
 #endif
@@ -727,11 +786,11 @@ struct Pcsx2Config
 		static constexpr GSCASMode DEFAULT_CAS_MODE = GSCASMode::Disabled;
 
 		static constexpr float DEFAULT_UPSCALE_MULTIPLIER = 1.0f;
-		static constexpr AccBlendLevel DEFAULT_BLENDING_ACCURACY = AccBlendLevel::Basic;
+		static constexpr AccBlendLevel DEFAULT_BLENDING_ACCURACY = AccBlendLevel::Full;
 		static constexpr BiFiltering DEFAULT_TEXTURE_FILTERING_MODE = BiFiltering::PS2;
 		static constexpr TriFiltering DEFAULT_TRILINEAR_FILTERING_MODE = TriFiltering::Automatic;
 
-		static constexpr float DEFAULT_OSD_SCALE = 100.0f;
+		static constexpr float DEFAULT_OSD_SCALE = 60.0f;
 		static constexpr float DEFAULT_OSD_MARGIN = 10.0f;
 		static constexpr OsdOverlayPos DEFAULT_OSD_MESSAGE_POS = OsdOverlayPos::TopLeft;
 		static constexpr OsdOverlayPos DEFAULT_OSD_PERFORMANCE_POS = OsdOverlayPos::TopRight;
@@ -764,6 +823,7 @@ struct Pcsx2Config
 					PCRTCOverscan : 1,
 					IntegerScaling : 1,
 					UseDebugDevice : 1,
+					UseDebugBlend : 1,
 					UseBlitSwapChain : 1,
 					DisableShaderCache : 1,
 					DisableFramebufferFetch : 1,
@@ -795,7 +855,11 @@ struct Pcsx2Config
 					PreloadFrameWithGSData : 1,
 					Mipmap : 1,
 					HWMipmap : 1,
-					HWAccurateAlphaTest: 1,
+					HWAccurateAlphaTest : 1,
+					HWAA1 : 1,
+					HWROV : 1,
+					HWROVLogging : 1,
+					HWROVBarriersVK : 1,
 					ManualUserHacks : 1,
 					UserHacks_AlignSpriteX : 1,
 					UserHacks_CPUFBConversion : 1,
@@ -808,6 +872,7 @@ struct Pcsx2Config
 					UserHacks_ForceEvenSpritePosition : 1,
 					UserHacks_NativePaletteDraw : 1,
 					UserHacks_EstimateTextureRegion : 1,
+					UserHacks_DrawBuffering : 1,
 					FXAA : 1,
 					ShadeBoost : 1,
 					DumpGSData : 1,
@@ -834,7 +899,8 @@ struct Pcsx2Config
 					VideoCaptureAutoResolution : 1,
 					EnableAudioCapture : 1,
 					EnableAudioCaptureParameters : 1,
-					OrganizeSnapshotsByGame : 1;
+					OrganizeSnapshotsByGame : 1,
+					OrganizeVideoCaptureByGame : 1;
 			};
 		};
 
@@ -899,7 +965,16 @@ struct Pcsx2Config
 		u8 ShadeBoost_Gamma = DEFAULT_SHADEBOOST_GAMMA;
 		u8 PNGCompressionLevel = 1;
 
-		u16 SWExtraThreads = 2;
+		// SW worker threads. Empirical: 75-80% per-thread CPU is "fully
+		// saturated" for the job-batched SW rasterizer (it's not the same
+		// utilization curve as EE/VU which show 100% when busy). On 8-core
+		// ARM phones (SD8 Elite, etc.) 4 workers gives the highest GoW2
+		// title-screen throughput — going lower drops below 100% emulation
+		// speed. SetHardwareDependentDefaultSettings tunes this at fresh-
+		// install per core count; this Config.h value is the cold default.
+		u16 SWExtraThreads = 4;
+		// compute_best_thread_height comment: ideal = log2(64 / threads).
+		// For 4 SW threads → 4 (16-row tiles).
 		u16 SWExtraThreadsHeight = 4;
 
 		int SaveDrawStart = 0;
@@ -926,6 +1001,7 @@ struct Pcsx2Config
 		int AudioCaptureBitrate = DEFAULT_AUDIO_CAPTURE_BITRATE;
 
 		std::string Adapter;
+		std::string AndroidGpuProfileOverride = "auto";
 		std::string HWDumpDirectory;
 		std::string SWDumpDirectory;
 
@@ -966,7 +1042,19 @@ struct Pcsx2Config
 		};
 
 		static constexpr s32 MAX_VOLUME = 200;
+#ifdef __ANDROID__
+		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Oboe;
+#else
 		static constexpr AudioBackend DEFAULT_BACKEND = AudioBackend::Cubeb;
+#endif
+		// Default SyncMode = TimeStretch on all platforms. An earlier Android
+		// override defaulted this to Disabled to skip the SoundTouch scalar
+		// path (`calcCrossCorrAccumulate` was 11% of CPU at BIOS idle), but
+		// that made audio sound bad under load — without time-stretching,
+		// frame-time variation produces audible pitch/clock drift. Reverted
+		// to upstream TimeStretch; the SoundTouch cost is the price of
+		// stable-pitch audio. NEON-porting the inner correlation loop is
+		// the right next play if the cost shows up in profiles again.
 		static constexpr SPU2SyncMode DEFAULT_SYNC_MODE = SPU2SyncMode::TimeStretch;
 
 		static std::optional<SPU2SyncMode> ParseSyncMode(const char* str);
@@ -1131,7 +1219,22 @@ struct Pcsx2Config
 			WaitLoop : 1, // enables constant loop detection and fast-forwarding
 			vuFlagHack : 1, // microVU specific flag hack
 			vuThread : 1, // Enable Threaded VU1
-			vu1Instant : 1; // Enable Instant VU1 (Without MTVU only)
+			vu1Instant : 1, // Enable Instant VU1 (Without MTVU only)
+			vuNeonFusions : 1, // ARMSX2: gate the arm64 VU1 NEON peephole fusions
+			                   // (MAC cluster MULAx+MADDAy+MADDAz+MADDw, OPMULA+OPMSUB
+			                   // cross-product). Toggle off to confirm whether a game
+			                   // regression is caused by our JIT fusion peepholes.
+			vuDeferredWrites : 1, // ARMSX2 (EXPERIMENTAL): defer per-pair VF stores via
+			                      // the NEON cache instead of writing through. Big perf
+			                      // win when it works (saves 1 Str per FMAC pair on
+			                      // hot transform code). Known to break SH2 graphics
+			                      // and similar games with cross-pair coherence
+			                      // assumptions. Default OFF.
+			vuSkipStallSim : 1; // ARMSX2 (AGGRESSIVE): skip the vu1_TestPipes_VU1 BL
+			                    // in the JIT. Memory profiling showed 19-32% of CPU in
+			                    // this helper on Futurama / GoW2 / etc. Skipping breaks
+			                    // any game that relies on accurate FMAC/FDIV/EFU/IALU
+			                    // pipeline-stall timing. Default OFF.
 		BITFIELD_END
 
 		s8 EECycleRate; // EE cycle rate selector (1.0, 1.5, 2.0)
@@ -1288,9 +1391,6 @@ struct Pcsx2Config
 		static constexpr u32 MAXIMUM_NOTIFICATION_DURATION = 30;
 		static constexpr u32 DEFAULT_NOTIFICATION_DURATION = 5;
 		static constexpr u32 DEFAULT_LEADERBOARD_DURATION = 10;
-		static constexpr const char* DEFAULT_INFO_SOUND_NAME = "sounds/achievements/message.wav";
-		static constexpr const char* DEFAULT_UNLOCK_SOUND_NAME = "sounds/achievements/unlock.wav";
-		static constexpr const char* DEFAULT_LBSUBMIT_SOUND_NAME = "sounds/achievements/lbsubmit.wav";
 
 		static const char* OverlayPositionNames[(size_t)AchievementOverlayPosition::MaxCount + 1];
 
@@ -1407,6 +1507,7 @@ struct Pcsx2Config
 	std::string CurrentBlockdump;
 	std::string CurrentIRX;
 	std::string CurrentGameArgs;
+	std::string CustomDataPath;
 	AspectRatioType CurrentAspectRatio = AspectRatioType::RAuto4_3_3_2;
 	// Fall back aspect ratio for games that have patches (when AspectRatioType::RAuto4_3_3_2) is active.
 	float CurrentCustomAspectRatio = 0.f;
@@ -1487,9 +1588,17 @@ namespace EmuFolders
 
 // ------------ CPU / Recompiler Options ---------------
 
-#ifdef _M_X86 // TODO: Remove me once EE/VU/IOP recs are added.
+#if defined(_M_X86)
 #define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
 #define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#elif defined(__aarch64__) || defined(_M_ARM64)
+#ifdef INTERP_VU1
+#define THREAD_VU1 false
+#define REC_VU1 false
+#else
+#define REC_VU1 (EmuConfig.Cpu.Recompiler.EnableVU1)
+#define THREAD_VU1 (REC_VU1 && EmuConfig.Speedhacks.vuThread)
+#endif
 #else
 #define THREAD_VU1 false
 #define REC_VU1 false
@@ -1516,9 +1625,9 @@ namespace EmuFolders
 #define CHECK_VUOVERFLOWHACK (EmuConfig.Gamefixes.VUOverflowHack) // Special Fix for Superman Returns, they check for overflows on PS2 floats which we can't do without soft floats.
 #define CHECK_FULLVU0SYNCHACK (EmuConfig.Gamefixes.FullVU0SyncHack)
 
-//------------ Advanced Options!!! ---------------
+//------------ Advanced Options! ---------------
 #define CHECK_VU_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Overflow : EmuConfig.Cpu.Recompiler.vu1Overflow)
-#define CHECK_VU_EXTRA_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExtraOverflow : EmuConfig.Cpu.Recompiler.vu1ExtraOverflow) // If enabled, Operands are clamped before being used in the VU recs
+#define CHECK_VU_EXTRA_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0ExtraOverflow : EmuConfig.Cpu.Recompiler.vu1ExtraOverflow)
 #define CHECK_VU_SIGN_OVERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0SignOverflow : EmuConfig.Cpu.Recompiler.vu1SignOverflow)
 #define CHECK_VU_UNDERFLOW(vunum) (((vunum) == 0) ? EmuConfig.Cpu.Recompiler.vu0Underflow : EmuConfig.Cpu.Recompiler.vu1Underflow)
 

@@ -1510,6 +1510,7 @@ typedef ImBitArray<ImGuiKey_NamedKey_COUNT, -ImGuiKey_NamedKey_BEGIN>    ImBitAr
 #define ImGuiKey_NavGamepadCancel       (g.IO.ConfigNavSwapGamepadButtons ? ImGuiKey_GamepadFaceDown : ImGuiKey_GamepadFaceRight)
 #define ImGuiKey_NavGamepadMenu         ImGuiKey_GamepadFaceLeft
 #define ImGuiKey_NavGamepadInput        ImGuiKey_GamepadFaceUp
+#define ImGuiKey_NavGamepadContextMenu  ImGuiKey_GamepadFaceUp      // Open context menu (same as Shift+F10)
 
 enum ImGuiInputEventType
 {

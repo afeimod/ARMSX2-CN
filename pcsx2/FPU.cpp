@@ -125,6 +125,19 @@ bool checkDivideByZero(u32& xReg, u32 yDivisorReg, u32 zDividendReg, u32 cFlagsT
 	_ContVal_ &= ~( cFlags ) ;  \
 }
 
+// PS2 FPU comparison key: convert float bits to ordered integer
+// - Denormals/zero flush to 0
+// - Preserves float ordering via sign-magnitude to two's complement conversion
+static inline s32 fpuCmpKey(u32 f)
+{
+	if ((f & 0x7f800000) == 0)
+		return 0;  // denormal/zero → 0
+	// Convert sign-magnitude float to ordered integer:
+	// positive floats map to positive integers, negative to negative,
+	// preserving magnitude ordering within each sign
+	return (f & 0x80000000) ? (s32)(0x80000000u - f) : (s32)f;
+}
+
 #ifdef comparePrecision
 // This compare discards the least-significant bit(s) in order to solve some rounding issues.
 	#define C_cond_S(cond) {  \
@@ -136,9 +149,9 @@ bool checkDivideByZero(u32& xReg, u32 yDivisorReg, u32 zDividendReg, u32 cFlagsT
 					( _ContVal_ & ~FPUflagC );  \
 	}
 #else
-// Used for Comparing; This compares if the floats are exactly the same.
+// PS2 FPU comparison: flush denormals, compare via integer ordering
 	#define C_cond_S(cond) {  \
-	   _ContVal_ = ( fpuDouble(_FsValUl_) cond fpuDouble(_FtValUl_) ) ?  \
+	   _ContVal_ = ( fpuCmpKey(_FsValUl_) cond fpuCmpKey(_FtValUl_) ) ?  \
 				   ( _ContVal_ | FPUflagC ) :  \
 				   ( _ContVal_ & ~FPUflagC );  \
 	}
@@ -277,7 +290,16 @@ void MADD_S() {
 }
 
 void MADDA_S() {
-	_FAValf_ += fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	// `acc += a * b` is the canonical FMA pattern — Clang under
+	// pcsx2 CMake's `-ffp-contract=fast` will fuse it into a single-
+	// rounding FMADD. The PS2 EE FPU has no fused MAC (separate mul +
+	// add with one guard bit each); the arm64 + x86 JITs both emit
+	// explicit Fmul + Fadd. `volatile` on the intermediate forces two
+	// roundings and keeps the interp bit-consistent with the JITs.
+	// Sibling fix: VUops.cpp `_vuOpMADD` (the VU equivalent that
+	// previously surfaced as MGS2/Killzone divergence).
+	volatile float prod = fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	_FAValf_ += prod;
 	if (checkOverflow( _FAValUl_, FPUflagO | FPUflagSO)) return;
 	checkUnderflow( _FAValUl_, FPUflagU | FPUflagSU);
 }
@@ -310,7 +332,10 @@ void MSUB_S() {
 }
 
 void MSUBA_S() {
-	_FAValf_ -= fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	// See MADDA_S above — `acc -= a * b` fuses to FMSUB; volatile
+	// intermediate forces two-rounding to match JIT semantics.
+	volatile float prod = fpuDouble( _FsValUl_ ) * fpuDouble( _FtValUl_ );
+	_FAValf_ -= prod;
 	if (checkOverflow( _FAValUl_, FPUflagO | FPUflagSO)) return;
 	checkUnderflow( _FAValUl_, FPUflagU | FPUflagSU);
 }
@@ -360,7 +385,7 @@ void SQRT_S() {
 	clearFPUFlags(FPUflagI | FPUflagD);
 
 	if ( ( _FtValUl_ & 0x7F800000 ) == 0 ) // If Ft = +/-0
-		_FdValUl_ = _FtValUl_ & 0x80000000;// result is 0
+		_FdValUl_ = 0; // result is always +0
 	else if ( _FtValUl_ & 0x80000000 ) { // If Ft is Negative
 		_ContVal_ |= FPUflagI | FPUflagSI;
 		_FdValf_ = sqrt( fabs( fpuDouble( _FtValUl_ ) ) );

@@ -18,6 +18,10 @@
 #include <signal.h>
 #endif
 
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+
 static std::mutex s_assertion_failed_mutex;
 
 static inline void FreezeThreads(void** handle)
@@ -110,6 +114,9 @@ void pxOnAssertFail(const char* file, int line, const char* func, const char* ms
 		TerminateProcess(GetCurrentProcess(), 0xBAADC0DE);
 	}
 #else
+#ifdef __ANDROID__
+	__android_log_print(ANDROID_LOG_FATAL, "PASX2-ASSERT", "%s", full_msg);
+#endif
 	fputs(full_msg, stderr);
 	fputs("\nAborting application.\n", stderr);
 	fflush(stderr);

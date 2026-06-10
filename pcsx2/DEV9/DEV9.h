@@ -19,6 +19,7 @@
 
 #else
 
+#undef __inline
 #define __inline inline
 
 #endif

@@ -285,6 +285,7 @@ extern bool eeEventTestIsActive;
 void intUpdateCPUCycles();
 void intEventTest();
 void intSetBranch();
+void intExecuteOneInst();
 
 // This is a special form of the interpreter's doBranch that is run from various
 // parts of the Recs (namely COP0's branch codes and stuff).

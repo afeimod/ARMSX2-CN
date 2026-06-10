@@ -294,11 +294,6 @@ void GameListWidget::initialize()
 	if (Host::ContainsBaseSettingValue("GameListTableView", "HeaderState"))
 	{
 		loadTableHeaderState();
-		// Enforce at least one column is visible immediately after loading.
-		// This handles cases where a config (perhaps from an older version) has 0 columns and
-		// no games are visible to be changed (such as per-game config) or played as you can't click on any.
-		// Will automatically repair a broken header state from config (PCSX2.ini) file.
-		ensureMinimumOneColumnVisible();
 	}
 	else
 	{
@@ -659,6 +654,9 @@ void GameListWidget::refreshGridCovers()
 
 void GameListWidget::showGameList()
 {
+	Host::SetBaseBoolSettingValue("UI", "GameListGridView", false);
+	Host::CommitBaseSettingChanges();
+
 	if (m_ui.stack->currentIndex() == 0 || m_model->rowCount() == 0)
 	{
 		// We can click the toolbar multiple times, so keep it correct.
@@ -666,8 +664,6 @@ void GameListWidget::showGameList()
 		return;
 	}
 
-	Host::SetBaseBoolSettingValue("UI", "GameListGridView", false);
-	Host::CommitBaseSettingChanges();
 	m_ui.stack->setCurrentIndex(0);
 	setFocusProxy(m_ui.stack->currentWidget());
 	resizeTableViewColumnsToFit();
@@ -677,6 +673,9 @@ void GameListWidget::showGameList()
 
 void GameListWidget::showGameGrid()
 {
+	Host::SetBaseBoolSettingValue("UI", "GameListGridView", true);
+	Host::CommitBaseSettingChanges();
+
 	if (m_ui.stack->currentIndex() == 1 || m_model->rowCount() == 0)
 	{
 		// We can click the toolbar multiple times, so keep it correct.
@@ -684,8 +683,6 @@ void GameListWidget::showGameGrid()
 		return;
 	}
 
-	Host::SetBaseBoolSettingValue("UI", "GameListGridView", true);
-	Host::CommitBaseSettingChanges();
 	m_ui.stack->setCurrentIndex(1);
 	setFocusProxy(m_ui.stack->currentWidget());
 	updateToolbar();
@@ -708,7 +705,7 @@ void GameListWidget::setShowCoverTitles(bool enabled)
 
 void GameListWidget::updateToolbar()
 {
-	const bool grid_view = isShowingGameGrid();
+	const bool grid_view = Host::GetBaseBoolSettingValue("UI", "GameListGridView", false);
 	{
 		QSignalBlocker sb(m_ui.viewGameGrid);
 		m_ui.viewGameGrid->setChecked(grid_view);
@@ -811,6 +808,14 @@ void GameListWidget::loadTableHeaderState()
 
 	QSignalBlocker blocker(header);
 	header->restoreState(QByteArray::fromBase64(QByteArray::fromStdString(state_setting)));
+
+	header->setSectionHidden(GameListModel::Column_Cover, true);
+
+	// Enforce at least one column is visible immediately after loading.
+	// This handles cases where a config (perhaps from an older version) has 0 columns and
+	// no games are visible to be changed (such as per-game config) or played as you can't click on any.
+	// Will automatically repair a broken header state from config (PCSX2.ini) file.
+	ensureMinimumOneColumnVisible();
 }
 
 void GameListWidget::ensureMinimumOneColumnVisible()

@@ -68,12 +68,13 @@ void FullscreenUI::GetStandardSelectionFooterText(SmallStringBase& dest, bool ba
 	if (IsGamepadInputSource())
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+		const auto glyphs = GetGamepadGlyphs();
 		ImGuiFullscreen::CreateFooterTextString(
 			dest,
 			std::array{
-				std::make_pair(ICON_PF_DPAD_UP_DOWN, FSUI_VSTR("Change Selection")),
-				std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-				std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, back_instead_of_cancel ? FSUI_VSTR("Back") : FSUI_VSTR("Cancel")),
+				std::make_pair(glyphs.dpad_ud, FSUI_VSTR("Change Selection")),
+				std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+				std::make_pair(glyphs.cancel(circleOK), back_instead_of_cancel ? FSUI_VSTR("Back") : FSUI_VSTR("Cancel")),
 			});
 	}
 	else
@@ -105,12 +106,13 @@ void ImGuiFullscreen::GetFileSelectorHelpText(SmallStringBase& dest)
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
 		const bool swapNorthWest = ImGuiManager::IsGamepadNorthWestSwapped();
+		const auto glyphs = GetGamepadGlyphs();
 		ImGuiFullscreen::CreateFooterTextString(
 			dest, std::array{
-					  std::make_pair(ICON_PF_DPAD_UP_DOWN, FSUI_VSTR("Change Selection")),
-					  std::make_pair(swapNorthWest ? ICON_PF_BUTTON_SQUARE : ICON_PF_BUTTON_TRIANGLE, FSUI_VSTR("Parent Directory")),
-					  std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-					  std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Cancel")),
+					  std::make_pair(glyphs.dpad_ud, FSUI_VSTR("Change Selection")),
+					  std::make_pair(swapNorthWest ? glyphs.west : glyphs.north, FSUI_VSTR("Parent Directory")),
+					  std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+					  std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Cancel")),
 				  });
 	}
 	else
@@ -131,10 +133,11 @@ void ImGuiFullscreen::GetInputDialogHelpText(SmallStringBase& dest)
 	if (IsGamepadInputSource())
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+		const auto glyphs = GetGamepadGlyphs();
 		CreateFooterTextString(dest, std::array{
 										 std::make_pair(ICON_PF_KEYBOARD, FSUI_VSTR("Enter Value")),
-										 std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-										 std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Cancel")),
+										 std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+										 std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Cancel")),
 									 });
 	}
 	else
@@ -157,6 +160,34 @@ void FullscreenUI::ApplyLayoutSettings(const SettingsInterface* bsi)
 
 	// Check Nintendo Setting
 	SmallString sdl2_nintendo_mode = GET_SETTINGS_VALUE(SmallString, "UI", "SDL2NintendoLayout", "false");
+	// Check glyph preference
+	SmallString glyph_mode = GET_SETTINGS_VALUE(SmallString, "UI", "FullscreenUIGlyphStyle", "auto");
+
+	const auto parse_glyph_layout = [](const SmallString& mode) -> InputLayout {
+		if (mode == "xbox")
+			return InputLayout::Xbox;
+		if (mode == "playstation")
+			return InputLayout::Playstation;
+		if (mode == "nintendo")
+			return InputLayout::Nintendo;
+		return InputLayout::Unknown;
+	};
+
+	switch (parse_glyph_layout(glyph_mode))
+	{
+		case InputLayout::Xbox:
+			InputManager::SetGamepadIconPreference(InputLayout::Xbox);
+			break;
+		case InputLayout::Playstation:
+			InputManager::SetGamepadIconPreference(InputLayout::Playstation);
+			break;
+		case InputLayout::Nintendo:
+			InputManager::SetGamepadIconPreference(InputLayout::Nintendo);
+			break;
+		default:
+			InputManager::SetGamepadIconPreference(InputLayout::Unknown);
+			break;
+	}
 
 	const InputLayout layout = ImGuiFullscreen::GetGamepadLayout();
 
@@ -348,7 +379,7 @@ bool FullscreenUI::HasActiveWindow()
 
 bool FullscreenUI::AreAnyDialogsOpen()
 {
-	return (s_save_state_selector_open || s_about_window_open ||
+	return (s_save_state_selector_open || s_about_window_open || s_cover_downloader_open ||
 			s_input_binding_type != InputBindingInfo::Type::Unknown || ImGuiFullscreen::IsChoiceDialogOpen() ||
 			ImGuiFullscreen::IsFileSelectorOpen());
 }
@@ -501,6 +532,7 @@ void FullscreenUI::Shutdown(bool clear_state)
 	{
 		CancelAllHddOperations();
 		CloseSaveStateSelector();
+		CloseCoverDownloaderWindow();
 		s_cover_image_map.clear();
 		s_game_list_sorted_entries = {};
 		s_game_list_directories_cache = {};
@@ -618,7 +650,10 @@ void FullscreenUI::Render()
 	if (s_about_window_open)
 		DrawAboutWindow();
 
-	if (s_achievements_login_open)
+	if (s_cover_downloader_open)
+		DrawCoverDownloaderWindow();
+
+	if (s_achievements_login_open || ImGui::IsPopupOpen("RetroAchievements"))
 		DrawAchievementsLoginWindow();
 
 	if (s_input_binding_type != InputBindingInfo::Type::Unknown)
@@ -1246,9 +1281,8 @@ void FullscreenUI::DrawLandingTemplate(ImVec2* menu_pos, ImVec2* menu_size)
 			const ImVec2 logo_size = LayoutScale(LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY, LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY);
 			dl->AddImage(reinterpret_cast<ImTextureID>(GetCachedTexture("icons/AppIconLarge.png")->GetNativeHandle()),
 				logo_pos, logo_pos + logo_size);
-			dl->AddText(heading_font.first, heading_font.second,
-				ImVec2(logo_pos.x + logo_size.x + LayoutScale(LAYOUT_MENU_BUTTON_X_PADDING), logo_pos.y),
-				ImGui::GetColorU32(ImGuiCol_Text), "PCSX2");
+			const ImVec2 branding_pos(logo_pos.x + logo_size.x + LayoutScale(LAYOUT_MENU_BUTTON_X_PADDING), logo_pos.y);
+			ImGuiFullscreen::AddTextWithShadow(dl, heading_font, branding_pos, ImGui::GetColorU32(ImGuiCol_Text), "PCSX2");
 		}
 
 		// draw time
@@ -1269,6 +1303,8 @@ void FullscreenUI::DrawLandingTemplate(ImVec2* menu_pos, ImVec2* menu_size)
 			const ImVec2 time_size = heading_font.first->CalcTextSizeA(heading_font.second, FLT_MAX, 0.0f, "00:00");
 			time_pos = ImVec2(heading_size.x - LayoutScale(LAYOUT_MENU_BUTTON_X_PADDING) - time_size.x,
 				LayoutScale(LAYOUT_MENU_BUTTON_Y_PADDING));
+			ImGuiFullscreen::AddTextWithShadow(
+				dl, heading_font, time_pos, ImGui::GetColorU32(ImGuiCol_Text), heading_str.c_str(), heading_str.end_ptr());
 			ImGui::RenderTextClipped(time_pos, time_pos + time_size, heading_str.c_str(), heading_str.end_ptr(), &time_size);
 		}
 
@@ -1282,6 +1318,7 @@ void FullscreenUI::DrawLandingTemplate(ImVec2* menu_pos, ImVec2* menu_size)
 				const ImVec2 name_size = heading_font.first->CalcTextSizeA(heading_font.second, FLT_MAX, 0.0f, username);
 				const ImVec2 name_pos =
 					ImVec2(time_pos.x - name_size.x - LayoutScale(LAYOUT_MENU_BUTTON_X_PADDING), time_pos.y);
+				ImGuiFullscreen::AddTextWithShadow(dl, heading_font, name_pos, ImGui::GetColorU32(ImGuiCol_Text), username, nullptr);
 				ImGui::RenderTextClipped(name_pos, name_pos + name_size, username, nullptr, &name_size);
 
 				// TODO: should we cache this? heap allocations bad...
@@ -1347,7 +1384,7 @@ void FullscreenUI::DrawLandingWindow()
 
 	if (ImGui::Shortcut(ImGuiKey_GamepadBack) || ImGui::Shortcut(ImGuiKey_F1))
 		OpenAboutWindow();
-	if (ImGui::Shortcut(ImGuiKey_NavGamepadInput) || ImGui::Shortcut(ImGuiKey_Space))
+	if (ImGui::Shortcut(ImGuiKey_NavGamepadContextMenu) || ImGui::Shortcut(ImGuiKey_Space))
 		SwitchToGameList();
 	else if (ImGui::Shortcut(ImGuiKey_NavGamepadMenu) || ImGui::Shortcut(ImGuiKey_F11))
 		DoToggleFullscreen();
@@ -1358,13 +1395,14 @@ void FullscreenUI::DrawLandingWindow()
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
 		const bool swapNorthWest = ImGuiManager::IsGamepadNorthWestSwapped();
+		const auto glyphs = GetGamepadGlyphs();
 		SetFullscreenFooterText(std::array{
-			std::make_pair(ICON_PF_SELECT_SHARE, FSUI_VSTR("About")),
-			std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, FSUI_VSTR("Navigate")),
-			std::make_pair(swapNorthWest ? ICON_PF_BUTTON_SQUARE : ICON_PF_BUTTON_TRIANGLE, FSUI_VSTR("Game List")),
-			std::make_pair(swapNorthWest ? ICON_PF_BUTTON_TRIANGLE : ICON_PF_BUTTON_SQUARE, FSUI_VSTR("Toggle Fullscreen")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Exit")),
+			std::make_pair(glyphs.select, FSUI_VSTR("About")),
+			std::make_pair(glyphs.dpad_lr, FSUI_VSTR("Navigate")),
+			std::make_pair(swapNorthWest ? glyphs.west : glyphs.north, FSUI_VSTR("Game List")),
+			std::make_pair(swapNorthWest ? glyphs.north : glyphs.west, FSUI_VSTR("Toggle Fullscreen")),
+			std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+			std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Exit")),
 		});
 	}
 	else
@@ -1429,11 +1467,12 @@ void FullscreenUI::DrawStartGameWindow()
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
 		const bool swapNorthWest = ImGuiManager::IsGamepadNorthWestSwapped();
+		const auto glyphs = GetGamepadGlyphs();
 		SetFullscreenFooterText(std::array{
-			std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, FSUI_VSTR("Navigate")),
-			std::make_pair(swapNorthWest ? ICON_PF_BUTTON_TRIANGLE : ICON_PF_BUTTON_SQUARE, FSUI_VSTR("Load Global State")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Back")),
+			std::make_pair(glyphs.dpad_lr, FSUI_VSTR("Navigate")),
+			std::make_pair(swapNorthWest ? glyphs.north : glyphs.west, FSUI_VSTR("Load Global State")),
+			std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+			std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Back")),
 		});
 	}
 	else
@@ -1488,10 +1527,11 @@ void FullscreenUI::DrawExitWindow()
 	if (IsGamepadInputSource())
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+		const auto glyphs = GetGamepadGlyphs();
 		SetFullscreenFooterText(std::array{
-			std::make_pair(ICON_PF_DPAD_LEFT_RIGHT, FSUI_VSTR("Navigate")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Back")),
+			std::make_pair(glyphs.dpad_lr, FSUI_VSTR("Navigate")),
+			std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+			std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Back")),
 		});
 	}
 	else
@@ -1507,8 +1547,7 @@ void FullscreenUI::DrawExitWindow()
 static void DrawShadowedText(
 	ImDrawList* dl, std::pair<ImFont*, float> font, const ImVec2& pos, u32 col, const char* text, const char* text_end = nullptr, float wrap_width = 0.0f)
 {
-	dl->AddText(font.first, font.second, pos + LayoutScale(1.0f, 1.0f), IM_COL32(0, 0, 0, 100), text, text_end, wrap_width);
-	dl->AddText(font.first, font.second, pos, col, text, text_end, wrap_width);
+	ImGuiFullscreen::AddTextWithShadow(dl, font, pos, col, text, text_end, wrap_width);
 }
 
 void FullscreenUI::DrawPauseMenu(MainWindowType type)
@@ -1812,10 +1851,11 @@ void FullscreenUI::DrawPauseMenu(MainWindowType type)
 	if (IsGamepadInputSource())
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
+		const auto glyphs = GetGamepadGlyphs();
 		SetFullscreenFooterText(std::array{
-			std::make_pair(ICON_PF_DPAD_UP_DOWN, FSUI_VSTR("Change Selection")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Select")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Return To Game")),
+			std::make_pair(glyphs.dpad_ud, FSUI_VSTR("Change Selection")),
+			std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Select")),
+			std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Return To Game")),
 		});
 	}
 	else
@@ -2179,7 +2219,7 @@ void FullscreenUI::DrawSaveStateSelector(bool is_loading)
 				bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, 0);
 				if (hovered)
 				{
-					const ImU32 col = ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered, 1.0f);
+					const ImU32 col = ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered, 0.7f);
 
 					const float t = std::min<float>(std::abs(std::sin(ImGui::GetTime() * 0.75) * 1.1), 1.0f);
 					ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetColorU32(ImGuiCol_Border, t));
@@ -2202,7 +2242,8 @@ void FullscreenUI::DrawSaveStateSelector(bool is_loading)
 				const ImVec2 title_pos(bb.Min.x, bb.Min.y + image_height + title_spacing);
 				const ImRect title_bb(title_pos, ImVec2(bb.Max.x, title_pos.y + g_large_font.second));
 				ImGui::PushFont(g_large_font.first, g_large_font.second);
-				ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, entry.title.c_str(), nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
+				ImGuiFullscreen::RenderTextClippedWithShadow(
+					title_bb.Min, title_bb.Max, entry.title.c_str(), nullptr, nullptr, ImVec2(0.0f, 0.0f), &title_bb);
 				ImGui::PopFont();
 
 				if (!entry.summary.empty())
@@ -2210,7 +2251,7 @@ void FullscreenUI::DrawSaveStateSelector(bool is_loading)
 					const ImVec2 summary_pos(bb.Min.x, title_pos.y + g_large_font.second + summary_spacing);
 					const ImRect summary_bb(summary_pos, ImVec2(bb.Max.x, summary_pos.y + g_medium_font.second));
 					ImGui::PushFont(g_medium_font.first, g_medium_font.second);
-					ImGui::RenderTextClipped(
+					ImGuiFullscreen::RenderTextClippedWithShadow(
 						summary_bb.Min, summary_bb.Max, entry.summary.c_str(), nullptr, nullptr, ImVec2(0.0f, 0.0f), &summary_bb);
 					ImGui::PopFont();
 				}
@@ -2257,11 +2298,12 @@ void FullscreenUI::DrawSaveStateSelector(bool is_loading)
 		{
 			const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
 			const bool swapNorthWest = ImGuiManager::IsGamepadNorthWestSwapped();
+			const auto glyphs = GetGamepadGlyphs();
 			SetFullscreenFooterText(std::array{
-				std::make_pair(ICON_PF_DPAD, FSUI_VSTR("Select State")),
-				std::make_pair(swapNorthWest ? ICON_PF_BUTTON_TRIANGLE : ICON_PF_BUTTON_SQUARE, FSUI_VSTR("Options")),
-				std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Load/Save State")),
-				std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Cancel")),
+				std::make_pair(glyphs.dpad, FSUI_VSTR("Select State")),
+				std::make_pair(swapNorthWest ? glyphs.north : glyphs.west, FSUI_VSTR("Options")),
+				std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Load/Save State")),
+				std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Cancel")),
 			});
 		}
 		else
@@ -2564,7 +2606,7 @@ void FullscreenUI::DrawGameListWindow()
 
 	EndFullscreenWindow();
 
-	if (ImGui::IsKeyPressed(ImGuiKey_NavGamepadInput, false) || ImGui::IsKeyPressed(ImGuiKey_F1, false))
+	if (ImGui::IsKeyPressed(ImGuiKey_NavGamepadContextMenu, false) || ImGui::IsKeyPressed(ImGuiKey_F1, false))
 	{
 		s_game_list_view = (s_game_list_view == GameListView::Grid) ? GameListView::List : GameListView::Grid;
 	}
@@ -2572,6 +2614,10 @@ void FullscreenUI::DrawGameListWindow()
 	{
 		s_current_main_window = MainWindowType::GameListSettings;
 		QueueResetFocus(FocusResetType::WindowChanged);
+	}
+	else if (ImGui::IsKeyPressed(ImGuiKey_GamepadBack, false) || ImGui::IsKeyPressed(ImGuiKey_F4, false))
+	{
+		OpenCoverDownloaderWindow();
 	}
 
 	switch (s_game_list_view)
@@ -2602,13 +2648,15 @@ void FullscreenUI::DrawGameListWindow()
 	{
 		const bool circleOK = ImGui::GetIO().ConfigNavSwapGamepadButtons;
 		const bool swapNorthWest = ImGuiManager::IsGamepadNorthWestSwapped();
+		const auto glyphs = GetGamepadGlyphs();
 		SetFullscreenFooterText(std::array{
-			std::make_pair(ICON_PF_DPAD, FSUI_VSTR("Select Game")),
-			std::make_pair(ICON_PF_START, FSUI_VSTR("Settings")),
-			std::make_pair(swapNorthWest ? ICON_PF_BUTTON_SQUARE : ICON_PF_BUTTON_TRIANGLE, FSUI_VSTR("Change View")),
-			std::make_pair(swapNorthWest ? ICON_PF_BUTTON_TRIANGLE : ICON_PF_BUTTON_SQUARE, FSUI_VSTR("Launch Options")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CIRCLE : ICON_PF_BUTTON_CROSS, FSUI_VSTR("Start Game")),
-			std::make_pair(circleOK ? ICON_PF_BUTTON_CROSS : ICON_PF_BUTTON_CIRCLE, FSUI_VSTR("Back")),
+			std::make_pair(glyphs.dpad, FSUI_VSTR("Select Game")),
+			std::make_pair(glyphs.select, FSUI_VSTR("Cover Downloader")),
+			std::make_pair(glyphs.start, FSUI_VSTR("Settings")),
+			std::make_pair(swapNorthWest ? glyphs.west : glyphs.north, FSUI_VSTR("Change View")),
+			std::make_pair(swapNorthWest ? glyphs.north : glyphs.west, FSUI_VSTR("Launch Options")),
+			std::make_pair(glyphs.confirm(circleOK), FSUI_VSTR("Start Game")),
+			std::make_pair(glyphs.cancel(circleOK), FSUI_VSTR("Back")),
 		});
 	}
 	else
@@ -2618,6 +2666,7 @@ void FullscreenUI::DrawGameListWindow()
 			std::make_pair(ICON_PF_F1, FSUI_VSTR("Change View")),
 			std::make_pair(ICON_PF_F2, FSUI_VSTR("Settings")),
 			std::make_pair(ICON_PF_F3, FSUI_VSTR("Launch Options")),
+			std::make_pair(ICON_PF_F4, FSUI_VSTR("Cover Downloader")),
 			std::make_pair(ICON_PF_ENTER, FSUI_VSTR("Start Game")),
 			std::make_pair(ICON_PF_ESC, FSUI_VSTR("Back")),
 		});
@@ -2910,12 +2959,12 @@ void FullscreenUI::DrawGameGrid(const ImVec2& heading_size)
 			bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held, 0);
 			if (hovered)
 			{
-				const ImU32 col = ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered, 1.0f);
+				const ImU32 col = ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered, 0.7f);
 
 				const float t = std::min<float>(std::abs(std::sin(ImGui::GetTime() * 0.75) * 1.1), 1.0f);
 				ImGui::PushStyleColor(ImGuiCol_Border, ImGui::GetColorU32(ImGuiCol_Border, t));
 
-				ImGuiFullscreen::DrawMenuButtonFrame(bb.Min, bb.Max, col, true, 0.0f);
+				ImGuiFullscreen::DrawMenuButtonFrame(bb.Min, bb.Max, col, true, LayoutScale(ImGuiFullscreen::LAYOUT_FRAME_ROUNDING));
 
 				ImGui::PopStyleColor();
 			}
@@ -2935,8 +2984,8 @@ void FullscreenUI::DrawGameGrid(const ImVec2& heading_size)
 				draw_title.clear();
 				fmt::format_to(std::back_inserter(draw_title), "{}{}", title, (title.length() == full_title.length()) ? "" : g_ellipsis);
 				ImGui::PushFont(g_medium_font.first, g_medium_font.second);
-				ImGui::RenderTextClipped(title_bb.Min, title_bb.Max, draw_title.c_str(), draw_title.c_str() + draw_title.length(), nullptr,
-					ImVec2(0.5f, 0.0f), &title_bb);
+				ImGuiFullscreen::RenderTextClippedWithShadow(
+					title_bb.Min, title_bb.Max, draw_title.c_str(), draw_title.c_str() + draw_title.length(), nullptr, ImVec2(0.5f, 0.0f), &title_bb);
 				ImGui::PopFont();
 			}
 
@@ -3189,16 +3238,6 @@ void FullscreenUI::DrawGameListSettingsWindow()
 			"FullscreenUIShowGameGridTitles", true);
 	}
 
-	MenuHeading(FSUI_CSTR("Cover Settings"));
-	{
-		DrawFolderSetting(bsi, FSUI_ICONSTR(ICON_FA_FOLDER, "Covers Directory"), "Folders", "Covers", EmuFolders::Covers);
-		if (MenuButton(
-				FSUI_ICONSTR(ICON_FA_DOWNLOAD, "Download Covers"), FSUI_CSTR("Downloads covers from a user-specified URL template.")))
-		{
-			Host::OnCoverDownloaderOpenRequested();
-		}
-	}
-
 	MenuHeading(FSUI_CSTR("Operations"));
 	{
 		if (MenuButton(
@@ -3379,7 +3418,7 @@ void FullscreenUI::DrawAboutWindow()
 	ImGui::OpenPopup(FSUI_CSTR("About PCSX2"));
 
 	ImGui::PushFont(g_large_font.first, g_large_font.second);
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, LayoutScale(10.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, LayoutScale(ImGuiFullscreen::LAYOUT_WINDOW_ROUNDING));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, LayoutScale(30.0f, 30.0f));
 
 	if (ImGui::BeginPopupModal(FSUI_CSTR("About PCSX2"), &s_about_window_open, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize))
@@ -3387,10 +3426,18 @@ void FullscreenUI::DrawAboutWindow()
 		const ImVec2 image_size = LayoutScale(500.0f, 76.0f);
 		const ImRect image_bb(ImGui::GetCursorScreenPos(), ImGui::GetCursorScreenPos() + ImVec2(ImGui::GetCurrentWindow()->WorkRect.GetWidth(), image_size.y));
 		const ImRect image_rect(CenterImage(image_bb, image_size));
+		const float start_y = ImGui::GetCursorPosY();
 
 		DrawListSvgTexture(ImGui::GetWindowDrawList(), s_banner_texture.get(), image_rect.Min, image_rect.Max);
 
-		const float indent = image_size.y + LayoutScale(12.0f);
+		ImGui::SetCursorPosY(start_y + image_size.y + LayoutScale(2.0f));
+		static const std::string version_text = fmt::format(FSUI_FSTR("Version: {}"), BuildVersion::GitRev);
+		const float version_center_x =
+			ImGui::GetCursorPosX() + ((ImGui::GetCurrentWindow()->WorkRect.GetWidth() - ImGui::CalcTextSize(version_text.c_str()).x) * 0.5f);
+		ImGui::SetCursorPosX(version_center_x);
+		ImGui::TextUnformatted(version_text.c_str());
+
+		const float indent = LayoutScale(12.0f);
 		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + indent);
 		ImGui::TextWrapped("%s", FSUI_CSTR(
 									 "PCSX2 is a free and open-source PlayStation 2 (PS2) emulator. Its purpose is to emulate the PS2's hardware, using a "
@@ -3428,15 +3475,378 @@ void FullscreenUI::DrawAboutWindow()
 
 		EndMenuButtons();
 
-		const float alignment = image_size.x + image_size.y;
-		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + alignment);
-		ImGui::TextWrapped(FSUI_CSTR("Version: %s"), BuildVersion::GitRev);
-
 		ImGui::EndPopup();
 	}
 
 	ImGui::PopStyleVar(2);
 	ImGui::PopFont();
+}
+
+void FullscreenUI::OpenCoverDownloaderWindow()
+{
+	s_cover_downloader_open = true;
+	s_cover_downloader_urls_buffer.fill('\0');
+	{
+		std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+		s_cover_downloader_use_title_filenames = false;
+		s_cover_downloader_downloading = false;
+		s_cover_downloader_has_error = false;
+	}
+	QueueResetFocus(FocusResetType::PopupOpened);
+}
+
+void FullscreenUI::CloseCoverDownloaderWindow()
+{
+	if (s_cover_downloader_thread)
+	{
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_downloading = false;
+		}
+		if (s_cover_downloader_thread->joinable())
+		{
+			s_cover_downloader_thread->join();
+		}
+		s_cover_downloader_thread.reset();
+	}
+
+	s_cover_downloader_open = false;
+	s_cover_downloader_urls_buffer.fill('\0');
+	{
+		std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+		s_cover_downloader_use_title_filenames = false;
+		s_cover_downloader_has_error = false;
+	}
+}
+
+void FullscreenUI::CoverDownloaderThreadFunc(const std::vector<std::string>& urls)
+{
+	class CoverDownloaderProgressCallback : public ProgressCallback
+	{
+	public:
+		CoverDownloaderProgressCallback() = default;
+		~CoverDownloaderProgressCallback() = default;
+
+		void PushState() override {}
+		void PopState() override {}
+
+		bool IsCancelled() const override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			return !s_cover_downloader_downloading;
+		}
+
+		bool IsCancellable() const override
+		{
+			return true;
+		}
+
+		void SetCancellable(bool cancellable) override
+		{
+		}
+
+		void SetTitle(const char* title) override
+		{
+		}
+
+		void SetStatusText(const char* text) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_status = text;
+		}
+
+		void SetProgressRange(u32 range) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_progress_max = range;
+			s_cover_downloader_progress_value = 0;
+		}
+
+		void SetProgressValue(u32 value) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_progress_value = value;
+		}
+
+		void IncrementProgressValue() override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_progress_value++;
+		}
+
+		void SetProgressState(ProgressState state) override
+		{
+		}
+
+		void DisplayError(const char* message) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_status = fmt::format(FSUI_FSTR("Error: {}"), message);
+			s_cover_downloader_has_error = true;
+		}
+
+		void DisplayWarning(const char* message) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_status = fmt::format(FSUI_FSTR("Warning: {}"), message);
+			s_cover_downloader_has_error = false;
+		}
+
+		void DisplayInformation(const char* message) override
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			s_cover_downloader_status = message;
+			s_cover_downloader_has_error = false;
+		}
+
+		void DisplayDebugMessage(const char* message) override
+		{
+		}
+
+		void ModalError(const char* message) override
+		{
+			DisplayError(message);
+		}
+
+		bool ModalConfirmation(const char* message) override
+		{
+			return false;
+		}
+
+		void ModalInformation(const char* message) override
+		{
+			DisplayInformation(message);
+		}
+	};
+
+	CoverDownloaderProgressCallback callback;
+	bool use_title_filenames;
+	{
+		std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+		use_title_filenames = s_cover_downloader_use_title_filenames;
+	}
+	GameList::DownloadCovers(urls, !use_title_filenames, &callback);
+
+	{
+		std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+		if (s_cover_downloader_has_error && !s_cover_downloader_status.empty())
+		{
+			std::string error_message = s_cover_downloader_status;
+			MTGS::RunOnGSThread([error_message]() {
+				ShowToast(FSUI_STR("Download Failed"), error_message, 5.0f);
+			});
+		}
+		// We clear the cover image cache so the newly downloaded covers are picked up
+		MTGS::RunOnGSThread([]() {
+			s_cover_image_map.clear();
+		});
+		s_cover_downloader_downloading = false;
+	}
+}
+
+void FullscreenUI::DrawCoverDownloaderWindow()
+{
+	if (!s_cover_downloader_open)
+		return;
+
+	ImGui::SetNextWindowSize(LayoutScale(700.0f, 0.0f));
+	ImGui::SetNextWindowPos(
+		(ImGui::GetIO().DisplaySize - LayoutScale(0.0f, ImGuiFullscreen::LAYOUT_FOOTER_HEIGHT)) * 0.5f,
+		ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	ImGui::OpenPopup(FSUI_ICONSTR(ICON_FA_DOWNLOAD, "Cover Downloader"));
+
+	ImGui::PushFont(g_large_font.first, g_large_font.second);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, LayoutScale(20.0f, 20.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, LayoutScale(10.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
+		LayoutScale(ImGuiFullscreen::LAYOUT_MENU_BUTTON_X_PADDING, ImGuiFullscreen::LAYOUT_MENU_BUTTON_Y_PADDING));
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+	ImGui::PushStyleColor(ImGuiCol_Text, UIPrimaryTextColor);
+	ImGui::PushStyleColor(ImGuiCol_TitleBg, UIPrimaryDarkColor);
+	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, UIPrimaryColor);
+	ImGui::PushStyleColor(ImGuiCol_PopupBg, UIPopupBackgroundColor);
+
+	bool is_open = !WantsToCloseMenu();
+	const u32 flags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar;
+
+	if (ImGui::BeginPopupModal(FSUI_ICONSTR(ICON_FA_DOWNLOAD, "Cover Downloader"), &is_open, flags))
+	{
+		ImGui::PushStyleColor(ImGuiCol_Text, UIBackgroundTextColor);
+		BeginMenuButtons();
+		ResetFocusHere();
+
+		ImGui::TextWrapped("%s", FSUI_CSTR("PCSX2 can automatically download covers for games which do not currently have a cover set. We do not host any cover images, the user must provide their own source for images."));
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(8.0f));
+		ImGui::TextWrapped("%s", FSUI_CSTR("Enter one or more cover image URL templates below. Variables such as ${serial} and ${title} are supported. See the Qt Cover Downloader for more information."));
+
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(10.0f));
+
+
+		// URLs input section
+		bool is_downloading;
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			is_downloading = s_cover_downloader_downloading;
+		}
+
+		{
+			ImGui::TextUnformatted(FSUI_CSTR("URLs:"));
+			ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(4.0f));
+
+			const float text_box_height = LayoutScale(55.0f);
+			ImGui::SetNextItemWidth(-1.0f);
+
+			ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, LayoutScale(8.0f));
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, LayoutScale(12.0f, 10.0f));
+			ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, LayoutScale(1.0f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
+
+			if (is_downloading)
+				ImGui::BeginDisabled();
+			ImGui::InputTextMultiline("##urls", s_cover_downloader_urls_buffer.data(), s_cover_downloader_urls_buffer.size(),
+				ImVec2(-1.0f, text_box_height), ImGuiInputTextFlags_AllowTabInput);
+			if (is_downloading)
+				ImGui::EndDisabled();
+
+			ImGui::PopStyleColor(5);
+			ImGui::PopStyleVar(3);
+		}
+
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(10.0f));
+
+		// Use Title File Names toggle
+		{
+			bool use_title;
+			{
+				std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+				use_title = s_cover_downloader_use_title_filenames;
+			}
+
+			if (ToggleButton(FSUI_ICONSTR(ICON_FA_FILE_SIGNATURE, "Use Title File Names"),
+					FSUI_CSTR("Saves covers using the game's title instead of serial number."),
+					&use_title, !is_downloading))
+			{
+				std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+				s_cover_downloader_use_title_filenames = use_title;
+			}
+		}
+
+		// Progress display
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+
+			if (s_cover_downloader_downloading)
+			{
+				ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(10.0f));
+
+				if (!s_cover_downloader_status.empty())
+					ImGui::TextUnformatted(s_cover_downloader_status.c_str());
+				else
+					ImGui::TextUnformatted(FSUI_CSTR("Downloading covers..."));
+
+				if (s_cover_downloader_progress_max > 0)
+				{
+					const float progress = static_cast<float>(s_cover_downloader_progress_value) /
+					                       static_cast<float>(s_cover_downloader_progress_max);
+					const int percent = static_cast<int>(std::round(progress * 100.0f));
+					ImGui::ProgressBar(progress, ImVec2(-1.0f, LayoutScale(30.0f)), fmt::format("{}%", percent).c_str());
+				}
+				else
+				{
+					const float fraction = std::fmod(ImGui::GetTime(), 2.0f) * 0.5f;
+					ImGui::ProgressBar(fraction, ImVec2(-1.0f, LayoutScale(30.0f)));
+				}
+			}
+		}
+
+		ImGui::SetCursorPosY(ImGui::GetCursorPosY() + LayoutScale(20.0f));
+
+		const bool has_urls = (s_cover_downloader_urls_buffer[0] != '\0');
+		bool start_enabled;
+		{
+			std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+			start_enabled = !s_cover_downloader_downloading && has_urls;
+		}
+
+		if (is_downloading)
+		{
+			if (ActiveButton(FSUI_ICONSTR(ICON_FA_STOP, "Stop"), false))
+			{
+				{
+					std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+					s_cover_downloader_downloading = false;
+				}
+				if (s_cover_downloader_thread && s_cover_downloader_thread->joinable())
+					s_cover_downloader_thread->join();
+				s_cover_downloader_thread.reset();
+			}
+		}
+		else
+		{
+			if (ActiveButton(FSUI_ICONSTR(ICON_FA_PLAY, "Start"), false, start_enabled))
+			{
+				std::vector<std::string> urls;
+				std::string urls_text(s_cover_downloader_urls_buffer.data());
+				for (const auto& line : StringUtil::SplitString(urls_text, '\n', true))
+				{
+					if (!line.empty())
+						urls.push_back(std::string(line));
+				}
+
+				if (s_cover_downloader_thread && s_cover_downloader_thread->joinable())
+				{
+					s_cover_downloader_thread->join();
+					s_cover_downloader_thread.reset();
+				}
+
+				bool should_start_download = false;
+				{
+					std::lock_guard<std::mutex> lock(s_cover_downloader_mutex);
+					if (!s_cover_downloader_downloading)
+					{
+						s_cover_downloader_progress_max = 0;
+						s_cover_downloader_progress_value = 0;
+						s_cover_downloader_status.clear();
+						s_cover_downloader_has_error = false;
+						s_cover_downloader_downloading = true;
+						should_start_download = true;
+					}
+				}
+
+				if (should_start_download)
+					s_cover_downloader_thread = std::make_unique<std::thread>(CoverDownloaderThreadFunc, urls);
+			}
+		}
+
+		if (ActiveButton(FSUI_ICONSTR(ICON_FA_XMARK, "Close"), false))
+		{
+			is_open = false;
+		}
+
+		EndMenuButtons();
+		ImGui::PopStyleColor(1);
+
+		ImGui::EndPopup();
+	}
+	else
+	{
+		is_open = false;
+	}
+
+	ImGui::PopStyleColor(4);
+	ImGui::PopStyleVar(4);
+	ImGui::PopFont();
+
+	if (!is_open)
+	{
+		ImGui::CloseCurrentPopup();
+		s_cover_downloader_open = false;
+		CloseCoverDownloaderWindow();
+	}
 }
 
 bool FullscreenUI::OpenAchievementsWindow()
@@ -3456,14 +3866,18 @@ bool FullscreenUI::OpenAchievementsWindow()
 
 void FullscreenUI::DrawAchievementsLoginWindow()
 {
-	ImGui::SetNextWindowSize(LayoutScale(400.0f, 330.0f));
+	if (s_achievements_login_open && !ImGui::IsPopupOpen("RetroAchievements"))
+		ImGui::OpenPopup("RetroAchievements");
+
+	const float dialog_width = std::clamp(LayoutScale(420.0f), 300.0f, ImGui::GetIO().DisplaySize.x);
+	ImGui::SetNextWindowSizeConstraints(ImVec2(dialog_width, 0.0f), ImVec2(dialog_width, ImGui::GetIO().DisplaySize.y));
 	ImGui::SetNextWindowPos(ImGui::GetIO().DisplaySize * 0.5f, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
 
-	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, LayoutScale(12.0f));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, LayoutScale(ImGuiFullscreen::LAYOUT_WINDOW_ROUNDING));
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, LayoutScale(24.0f, 24.0f));
 	ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0.13f, 0.13f, 0.13f, 0.95f));
 
-	if (ImGui::BeginPopupModal("RetroAchievements", &s_achievements_login_open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar))
+	if (ImGui::BeginPopupModal("RetroAchievements", &s_achievements_login_open, ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_AlwaysAutoResize))
 	{
 		const float content_width = ImGui::GetContentRegionAvail().x;
 
@@ -3501,7 +3915,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 		ImGui::Spacing();
 		ImGui::Spacing();
 
-		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, LayoutScale(8.0f));
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, LayoutScale(ImGuiFullscreen::LAYOUT_FRAME_ROUNDING));
 		ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, LayoutScale(12.0f, 10.0f));
 		ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, LayoutScale(1.0f));
 		ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
@@ -3510,7 +3924,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 		ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
 
-		if (s_achievements_login_logging_in)
+		if (s_achievements_login_logging_in || s_achievements_login_show_dismiss)
 			ImGui::BeginDisabled();
 
 		ImGui::SetNextItemWidth(content_width);
@@ -3524,7 +3938,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 		ImGui::PopStyleColor(5);
 		ImGui::PopStyleVar(3);
 
-		if (s_achievements_login_logging_in)
+		if (s_achievements_login_logging_in || s_achievements_login_show_dismiss)
 			ImGui::EndDisabled();
 
 		ImGui::Spacing();
@@ -3539,20 +3953,67 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 			ImGui::PopStyleColor();
 			ImGui::Spacing();
 		}
+		else if (s_achievements_login_show_dismiss)
+		{
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.35f, 0.9f, 0.35f, 1.0f));
+			const TinyString username = Host::GetBaseTinyStringSettingValue("Achievements", "Username", "");
+			const SmallString success_text = SmallString::from_format(
+				FSUI_FSTR("Successfully logged in as {}."), username.empty() ? "Unknown" : username.view());
+			const float status_width = ImGui::CalcTextSize(success_text.c_str()).x;
+			ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (content_width - status_width) * 0.5f);
+			ImGui::TextUnformatted(success_text.c_str());
+			ImGui::PopStyleColor();
+			ImGui::Spacing();
+		}
 
-		const float button_height = LayoutScale(36.0f);
-		const float button_width = LayoutScale(100.0f);
+		const float button_height = std::max(LayoutScale(36.0f), 28.0f);
 		const float button_spacing = LayoutScale(12.0f);
-		const float total_width = (button_width * 2) + button_spacing;
-		const float start_x = (content_width - total_width) * 0.5f;
+		const float button_width = (content_width - button_spacing) * 0.5f;
 
-		ImGui::SetCursorPosX(ImGui::GetCursorPosX() + start_x);
+		auto CloseLoginPopup = []() {
+			ImGui::CloseCurrentPopup();
+			s_achievements_login_open = false;
+			s_achievements_login_logging_in = false;
+			s_achievements_login_show_dismiss = false;
 
-		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, LayoutScale(8.0f));
+			s_achievements_login_username[0] = '\0';
+			s_achievements_login_password[0] = '\0';
+		};
 
-		const bool can_login = !s_achievements_login_logging_in &&
-							   strlen(s_achievements_login_username) > 0 &&
-							   strlen(s_achievements_login_password) > 0;
+		ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, LayoutScale(ImGuiFullscreen::LAYOUT_FRAME_ROUNDING));
+
+		const bool can_login = !s_achievements_login_show_dismiss && !s_achievements_login_logging_in &&
+		                       strlen(s_achievements_login_username) > 0 &&
+		                       strlen(s_achievements_login_password) > 0;
+
+		if (s_achievements_login_show_dismiss)
+		{
+			// keep dialog open and let user explicitly dismiss.
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.9f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.1f, 0.4f, 0.8f, 1.0f));
+
+			if (ImGui::Button(FSUI_CSTR("Dismiss"), ImVec2(button_width, button_height)) && !s_achievements_login_logging_in)
+				CloseLoginPopup();
+
+			ImGui::PopStyleColor(3);
+
+			ImGui::SameLine(0, button_spacing);
+
+			ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.3f, 0.3f, 0.3f, 1.0f));
+			ImGui::BeginDisabled();
+			ImGui::Button(FSUI_CSTR("Login"), ImVec2(button_width, button_height));
+			ImGui::EndDisabled();
+			ImGui::PopStyleColor(3);
+
+			ImGui::PopStyleVar();
+			ImGui::EndPopup();
+			ImGui::PopStyleColor();
+			ImGui::PopStyleVar(2);
+			return;
+		}
 
 		if (can_login)
 		{
@@ -3570,6 +4031,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 		if (ImGui::Button(FSUI_CSTR("Login"), ImVec2(button_width, button_height)) && can_login)
 		{
 			s_achievements_login_logging_in = true;
+			s_achievements_login_show_dismiss = false;
 
 			Host::RunOnCPUThread([username = std::string(s_achievements_login_username),
 									 password = std::string(s_achievements_login_password)]() {
@@ -3581,14 +4043,10 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 				if (!result)
 				{
 					ShowToast(std::string(), fmt::format(FSUI_FSTR("Login failed.\nError: {}\n\nPlease check your username and password, and try again."),
-									 error.GetDescription()));
+												 error.GetDescription()));
 					return;
 				}
 
-				ImGui::CloseCurrentPopup();
-				s_achievements_login_open = false;
-
-				s_achievements_login_username[0] = '\0';
 				s_achievements_login_password[0] = '\0';
 
 				if (s_achievements_login_reason == Achievements::LoginRequestReason::UserInitiated)
@@ -3640,11 +4098,12 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 							});
 					}
 				}
+
+				s_achievements_login_show_dismiss = true;
 			});
 		}
 
 		ImGui::PopStyleColor(3);
-
 		ImGui::SameLine(0, button_spacing);
 
 		ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.4f, 0.4f, 0.4f, 1.0f));
@@ -3659,12 +4118,7 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 					Achievements::DisableHardcoreMode();
 			}
 
-			ImGui::CloseCurrentPopup();
-			s_achievements_login_open = false;
-			s_achievements_login_logging_in = false;
-
-			s_achievements_login_username[0] = '\0';
-			s_achievements_login_password[0] = '\0';
+			CloseLoginPopup();
 		}
 
 		ImGui::PopStyleColor(3);
@@ -3675,9 +4129,6 @@ void FullscreenUI::DrawAchievementsLoginWindow()
 
 	ImGui::PopStyleColor();
 	ImGui::PopStyleVar(2);
-
-	if (!ImGui::IsPopupOpen("RetroAchievements"))
-		ImGui::OpenPopup("RetroAchievements");
 }
 
 bool FullscreenUI::IsAchievementsWindowOpen()
@@ -3856,51 +4307,75 @@ void FullscreenUI::DrawAchievementsSettingsPage(std::unique_lock<std::mutex>& se
 	if (!IsEditingGameSettings(bsi))
 	{
 		MenuHeading(FSUI_CSTR("Sound Effects"));
-		if (MenuButton(FSUI_ICONSTR(ICON_FA_MUSIC, "Notification Sound"), bsi->GetTinyStringValue("Achievements", "InfoSoundName")))
-		{
-			auto callback = [bsi](const std::string& path) {
-				if (!path.empty())
-				{
-					bsi->SetStringValue("Achievements", "InfoSoundName", path.c_str());
-					SetSettingsChanged(bsi);
-				}
-				CloseFileSelector();
-			};
-			OpenFileSelector(FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Notification Sound"), false, std::move(callback), GetAudioFileFilters());
-		}
+		const auto draw_sound_setting = [bsi](const char* title, const char* key, const char* default_filename, const char* selector_title) {
+			const std::string default_path = Path::Combine(EmuFolders::Resources, default_filename);
+			const std::optional<SmallString> custom_path = bsi->GetOptionalSmallStringValue("Achievements", key, std::nullopt);
+			const char* value = custom_path.has_value() ? custom_path->c_str() : default_path.c_str();
+			if (!MenuButton(title, value))
+				return;
 
-		if (MenuButton(FSUI_ICONSTR(ICON_FA_MUSIC, "Unlock Sound"), bsi->GetTinyStringValue("Achievements", "UnlockSoundName")))
-		{
-			auto callback = [bsi](const std::string& path) {
-				if (!path.empty())
-				{
-					bsi->SetStringValue("Achievements", "UnlockSoundName", path.c_str());
-					SetSettingsChanged(bsi);
-				}
-				CloseFileSelector();
-			};
-			OpenFileSelector(FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Unlock Sound"), false, std::move(callback), GetAudioFileFilters());
-		}
+			ImGuiFullscreen::ChoiceDialogOptions options;
+			options.emplace_back(FSUI_ICONSTR(ICON_FA_FILE, "Select File"), false);
+			options.emplace_back(FSUI_ICONSTR(ICON_FA_VOLUME_HIGH, "Preview"), false);
+			options.emplace_back(FSUI_ICONSTR(ICON_FA_ROTATE_RIGHT, "Reset to Default"), false);
+			OpenChoiceDialog(title, false, std::move(options),
+				[bsi, key = std::string(key), selector_title = std::string(selector_title), default_path = std::move(default_path)](
+					s32 index, const std::string&, bool) {
+					if (index == 0)
+					{
+						auto callback = [bsi, key = key](const std::string& path) {
+							if (!path.empty())
+							{
+								bsi->SetStringValue("Achievements", key.c_str(), path.c_str());
+								SetSettingsChanged(bsi);
+							}
+							CloseFileSelector();
+						};
+						OpenFileSelector(selector_title.c_str(), false, std::move(callback), GetAudioFileFilters());
+					}
+					else if (index == 1)
+					{
+						const TinyString preview_path = bsi->GetTinyStringValue("Achievements", key.c_str(), default_path.c_str());
+						if (!Common::PlaySoundAsync(preview_path.c_str()))
+						{
+							ShowToast(std::string(),
+								fmt::format(FSUI_FSTR("Failed to preview sound:\n{}"),
+									preview_path.empty() ? FSUI_STR("No file selected.") : preview_path.c_str()));
+						}
+					}
+					else if (index == 2)
+					{
+						if (bsi->ContainsValue("Achievements", key.c_str()))
+						{
+							bsi->DeleteValue("Achievements", key.c_str());
+							SetSettingsChanged(bsi);
+							ShowToast(std::string(), FSUI_STR("Sound reset to default."));
+						}
+						else
+						{
+							ShowToast(std::string(), FSUI_STR("Sound is already using default."));
+						}
+					}
+					CloseChoiceDialog();
+				});
+		};
 
-		if (MenuButton(FSUI_ICONSTR(ICON_FA_MUSIC, "Leaderboard Submit Sound"), bsi->GetTinyStringValue("Achievements", "LBSubmitSoundName")))
-		{
-			auto callback = [bsi](const std::string& path) {
-				if (!path.empty())
-				{
-					bsi->SetStringValue("Achievements", "LBSubmitSoundName", path.c_str());
-					SetSettingsChanged(bsi);
-				}
-				CloseFileSelector();
-			};
-			OpenFileSelector(FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Leaderboard Submit Sound"), false, std::move(callback), GetAudioFileFilters());
-		}
+		draw_sound_setting(FSUI_ICONSTR(ICON_FA_MUSIC, "Notification Sound"), "InfoSoundName", "sounds/achievements/message.wav",
+			FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Notification Sound"));
+		draw_sound_setting(FSUI_ICONSTR(ICON_FA_MUSIC, "Unlock Sound"), "UnlockSoundName", "sounds/achievements/unlock.wav",
+			FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Unlock Sound"));
+		draw_sound_setting(FSUI_ICONSTR(ICON_FA_MUSIC, "Leaderboard Submit Sound"), "LBSubmitSoundName",
+			"sounds/achievements/lbsubmit.wav", FSUI_ICONSTR(ICON_FA_FOLDER_OPEN, "Select Leaderboard Submit Sound"));
 
 		MenuHeading(FSUI_CSTR("Account"));
-		if (bsi->ContainsValue("Achievements", "Token"))
+		SettingsInterface* secrets_si = Host::Internal::GetSecretsSettingsLayer();
+		const TinyString username = bsi->GetTinyStringValue("Achievements", "Username", "");
+		const bool has_token = (secrets_si && secrets_si->ContainsValue("Achievements", "Token"));
+		if (has_token)
 		{
 			ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImGui::GetStyle().Colors[ImGuiCol_Text]);
 			ActiveButton(SmallString::from_format(
-							 fmt::runtime(FSUI_ICONSTR(ICON_FA_USER, "Username: {}")), bsi->GetTinyStringValue("Achievements", "Username")),
+							 fmt::runtime(FSUI_ICONSTR(ICON_FA_USER, "Username: {}")), username.empty() ? "Unknown" : username.view()),
 				false, false, ImGuiFullscreen::LAYOUT_MENU_BUTTON_HEIGHT_NO_SUMMARY);
 			ActiveButton(SmallString::from_format(fmt::runtime(FSUI_ICONSTR(ICON_FA_CLOCK, "Login token generated on {}")),
 							 TimeToPrintableString(static_cast<time_t>(
@@ -3920,6 +4395,7 @@ void FullscreenUI::DrawAchievementsSettingsPage(std::unique_lock<std::mutex>& se
 			if (MenuButton(FSUI_ICONSTR(ICON_FA_KEY, "Login"), FSUI_CSTR("Logs in to RetroAchievements.")))
 			{
 				s_achievements_login_reason = Achievements::LoginRequestReason::UserInitiated;
+				s_achievements_login_show_dismiss = false;
 				s_achievements_login_open = true;
 			}
 		}
@@ -4045,6 +4521,7 @@ TRANSLATE_NOOP("FullscreenUI", "Failed to delete save state.");
 TRANSLATE_NOOP("FullscreenUI", "empty title");
 TRANSLATE_NOOP("FullscreenUI", "no serial");
 TRANSLATE_NOOP("FullscreenUI", "Failed to copy text to clipboard.");
+TRANSLATE_NOOP("FullscreenUI", "Download Failed");
 TRANSLATE_NOOP("FullscreenUI", "Enable Achievements");
 TRANSLATE_NOOP("FullscreenUI", "Achievement tracking is not currently enabled. Your login will have no effect until after tracking is enabled.\n\nDo you want to enable tracking now?");
 TRANSLATE_NOOP("FullscreenUI", "Enable Hardcore Mode");
@@ -4092,20 +4569,23 @@ TRANSLATE_NOOP("FullscreenUI", "Sets which view the game list will open to.");
 TRANSLATE_NOOP("FullscreenUI", "Determines which field the game list will be sorted by.");
 TRANSLATE_NOOP("FullscreenUI", "Reverses the game list sort order from the default (usually ascending to descending).");
 TRANSLATE_NOOP("FullscreenUI", "Shows Titles for Games when in Game Grid View Mode");
-TRANSLATE_NOOP("FullscreenUI", "Cover Settings");
-TRANSLATE_NOOP("FullscreenUI", "Downloads covers from a user-specified URL template.");
 TRANSLATE_NOOP("FullscreenUI", "Operations");
 TRANSLATE_NOOP("FullscreenUI", "Identifies any new files added to the game directories.");
 TRANSLATE_NOOP("FullscreenUI", "Forces a full rescan of all games previously identified.");
 TRANSLATE_NOOP("FullscreenUI", "About PCSX2");
 TRANSLATE_NOOP("FullscreenUI", "PCSX2 is a free and open-source PlayStation 2 (PS2) emulator. Its purpose is to emulate the PS2's hardware, using a combination of MIPS CPU Interpreters, Recompilers and a Virtual Machine which manages hardware states and PS2 system memory. This allows you to play PS2 games on your PC, with many additional features and benefits.");
 TRANSLATE_NOOP("FullscreenUI", "PlayStation 2 and PS2 are registered trademarks of Sony Interactive Entertainment. This application is not affiliated in any way with Sony Interactive Entertainment.");
-TRANSLATE_NOOP("FullscreenUI", "Version: %s");
+TRANSLATE_NOOP("FullscreenUI", "PCSX2 can automatically download covers for games which do not currently have a cover set. We do not host any cover images, the user must provide their own source for images.");
+TRANSLATE_NOOP("FullscreenUI", "Enter one or more cover image URL templates below. Variables such as ${serial} and ${title} are supported. See the Qt Cover Downloader for more information.");
+TRANSLATE_NOOP("FullscreenUI", "URLs:");
+TRANSLATE_NOOP("FullscreenUI", "Saves covers using the game's title instead of serial number.");
+TRANSLATE_NOOP("FullscreenUI", "Downloading covers...");
 TRANSLATE_NOOP("FullscreenUI", "RetroAchievements");
 TRANSLATE_NOOP("FullscreenUI", "Please enter your user name and password for retroachievements.org below.\n\nYour password will not be saved in PCSX2, an access token will be generated and used instead.");
 TRANSLATE_NOOP("FullscreenUI", "Username");
 TRANSLATE_NOOP("FullscreenUI", "Password");
 TRANSLATE_NOOP("FullscreenUI", "Logging in...");
+TRANSLATE_NOOP("FullscreenUI", "Dismiss");
 TRANSLATE_NOOP("FullscreenUI", "Login");
 TRANSLATE_NOOP("FullscreenUI", "Cancel");
 TRANSLATE_NOOP("FullscreenUI", "When enabled and logged in, PCSX2 will scan for achievements on startup.");
@@ -4143,6 +4623,10 @@ TRANSLATE_NOOP("FullscreenUI", "Time Played: {}");
 TRANSLATE_NOOP("FullscreenUI", "Last Played: {}");
 TRANSLATE_NOOP("FullscreenUI", "Size: {:.2f} MB");
 TRANSLATE_NOOP("FullscreenUI", "Are you sure you want to reset the play time for '{}' ({})?\n\nYour current play time is {}.\n\nThis action cannot be undone.");
+TRANSLATE_NOOP("FullscreenUI", "Version: {}");
+TRANSLATE_NOOP("FullscreenUI", "Error: {}");
+TRANSLATE_NOOP("FullscreenUI", "Warning: {}");
+TRANSLATE_NOOP("FullscreenUI", "Successfully logged in as {}.");
 TRANSLATE_NOOP("FullscreenUI", "Login failed.\nError: {}\n\nPlease check your username and password, and try again.");
 TRANSLATE_NOOP("FullscreenUI", "Failed to Load State From Backup Slot {}");
 TRANSLATE_NOOP("FullscreenUI", "Failed to Load State From Slot {}");
@@ -4169,6 +4653,7 @@ TRANSLATE_NOOP("FullscreenUI", "Select State");
 TRANSLATE_NOOP("FullscreenUI", "Options");
 TRANSLATE_NOOP("FullscreenUI", "Load/Save State");
 TRANSLATE_NOOP("FullscreenUI", "Select Game");
+TRANSLATE_NOOP("FullscreenUI", "Cover Downloader");
 TRANSLATE_NOOP("FullscreenUI", "Change View");
 TRANSLATE_NOOP("FullscreenUI", "Launch Options");
 TRANSLATE_NOOP("FullscreenUI", "Startup Error");
@@ -4205,8 +4690,6 @@ TRANSLATE_NOOP("FullscreenUI", "Default View");
 TRANSLATE_NOOP("FullscreenUI", "Sort By");
 TRANSLATE_NOOP("FullscreenUI", "Sort Reversed");
 TRANSLATE_NOOP("FullscreenUI", "Show Titles");
-TRANSLATE_NOOP("FullscreenUI", "Covers Directory");
-TRANSLATE_NOOP("FullscreenUI", "Download Covers");
 TRANSLATE_NOOP("FullscreenUI", "Scan For New Games");
 TRANSLATE_NOOP("FullscreenUI", "Rescan All Games");
 TRANSLATE_NOOP("FullscreenUI", "Website");
@@ -4214,6 +4697,9 @@ TRANSLATE_NOOP("FullscreenUI", "Support Forums");
 TRANSLATE_NOOP("FullscreenUI", "GitHub Repository");
 TRANSLATE_NOOP("FullscreenUI", "License");
 TRANSLATE_NOOP("FullscreenUI", "Close");
+TRANSLATE_NOOP("FullscreenUI", "Use Title File Names");
+TRANSLATE_NOOP("FullscreenUI", "Stop");
+TRANSLATE_NOOP("FullscreenUI", "Start");
 TRANSLATE_NOOP("FullscreenUI", "RAIntegration is being used instead of the built-in achievements implementation.");
 TRANSLATE_NOOP("FullscreenUI", "Hardcore Mode");
 TRANSLATE_NOOP("FullscreenUI", "Achievement Notifications");

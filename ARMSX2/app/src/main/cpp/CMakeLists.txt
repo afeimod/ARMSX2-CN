@@ -45,10 +45,6 @@ include(SearchForStuff)
 
 # Must be done after SearchForStuff
 get_git_version_info()
-if(ANDROID)
-	set(PCSX2_GIT_REV "v2.7.228-SNAPSHOT")
-	set(PCSX2_GIT_TAG "v2.7.228-SNAPSHOT")
-endif()
 write_svnrev_h()
 
 # make common
@@ -61,6 +57,12 @@ add_subdirectory(pcsx2)
 # Android JNI shared library
 if(ANDROID)
 	add_subdirectory(3rdparty/googletest EXCLUDE_FROM_ALL)
+	# libadrenotools: custom Vulkan ICD loading for Adreno devices. Provides
+	# the static `adrenotools` library (linked into emucore for the loader
+	# splice) plus four runtime hook .so's (hook_impl/main_hook/
+	# file_redirect_hook/gsl_alloc_hook) that ship in the apk's
+	# lib/<abi>/ and get dlopen'd by the loaded driver.
+	add_subdirectory(3rdparty/adrenotools)
 	add_library(emucore SHARED
 		native-lib.cpp
 		tests/arm64/codegen_tests.cpp
@@ -74,6 +76,7 @@ if(ANDROID)
 	)
 	target_link_libraries(emucore PRIVATE
 		PCSX2
+		PCSX2_FLAGS
 		common
 		imgui
 		gtest
@@ -82,12 +85,43 @@ if(ANDROID)
 		shaderc
 		android
 		log
+		vixl
+		adrenotools
 	)
 	target_include_directories(emucore PRIVATE
 		"${CMAKE_SOURCE_DIR}"
 		"${CMAKE_SOURCE_DIR}/pcsx2"
-		"${CMAKE_SOURCE_DIR}/3rdparty/vixl/include"
 	)
+endif()
+
+# Desktop Linux executable
+if(NOT ANDROID AND UNIX AND NOT APPLE)
+	add_executable(armsx2
+		desktop/main.cpp
+	)
+	target_link_libraries(armsx2 PRIVATE
+		PCSX2
+		common
+		imgui
+		libzip::zip
+		SDL3::SDL3
+		simpleini
+		vixl
+	)
+	target_include_directories(armsx2 PRIVATE
+		"${CMAKE_SOURCE_DIR}"
+		"${CMAKE_SOURCE_DIR}/pcsx2"
+	)
+	target_compile_definitions(armsx2 PRIVATE
+		ARMSX2_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+	)
+
+	if(USE_OPENGL)
+		# Force libEGL into DT_NEEDED. The OpenGL renderer otherwise dlopens
+		# libEGL lazily, which trips LD_PRELOAD-based GL interposers (MangoHud)
+		# that index the EGL symbol table at process start.
+		target_link_libraries(armsx2 PRIVATE -Wl,--no-as-needed EGL -Wl,--as-needed)
+	endif()
 endif()
 
 # Updater is Windows only for now.

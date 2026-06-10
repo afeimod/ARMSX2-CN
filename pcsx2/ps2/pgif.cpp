@@ -160,14 +160,16 @@ void triggerPgifInt(int subCause)
 void getIrqCmd(u32 data)
 {
 	//For the IOP - GPU. This is triggered by the GP0(1Fh) - Interrupt Request (IRQ1) command.
-	//This may break stuff, because it doesn't detect whether this is really a GP0() command or data...
-	//Since PS1 HW also didn't recognize that is data or not, we should left it enabled.
+	//GP0(1Fh) has no parameters — its lower 24 bits are reserved/zero. Vertex
+	//and CLUT/texcoord data words can incidentally have a top byte of 0x1F
+	//(e.g. CLUT at VRAM Y=124..127 produces texcoord words with top byte
+	//0x1F), so matching on the top byte alone fires spurious IRQ1s during
+	//ordinary primitive uploads. Require the full opcode word (lower 24 bits
+	//zero) to disambiguate command from data.
+	if (data == 0x1F000000)
 	{
-		if ((data & 0xFF000000) == 0x1F000000)
-		{
-			pgpu.stat.bits.IRQ1 = 1;
-			iopIntcIrq(1);
-		}
+		pgpu.stat.bits.IRQ1 = 1;
+		iopIntcIrq(1);
 	}
 }
 
@@ -274,14 +276,20 @@ u32 getUpdPgpuStatReg()
 u8 getGP0RbC_Count()
 {
 	//Returns "correct" element-in-FIFO count, even if extremely large buffer is used.
-	return std::min(rb_gp0.count, 0x1F);
+	//Real PSX GP0 FIFO is 16 deep; cap the report at 0x10 so PS1DRV's
+	//backpressure / not-full checks (GP1(04h) DMA-direction case 1) see the
+	//hardware-shaped FIFO depth instead of our oversized 0x20000-word ring.
+	return std::min(rb_gp0.count, 0x10);
 }
 
 u32 getUpdPgifCtrlReg()
 {
-	//Update fifo counts before returning register value
+	//Update fifo counts before returning register value.
+	//GP1_fifo_count is a 3-bit field (max 7). rb_gp1 size is 8, so a fully-
+	//full ring would truncate to 0 and PS1DRV would think the FIFO is empty.
+	//Clamp at 7 to avoid the wrap.
 	pgif.ctrl.bits.GP0_fifo_count = getGP0RbC_Count();
-	pgif.ctrl.bits.GP1_fifo_count = rb_gp1.count;
+	pgif.ctrl.bits.GP1_fifo_count = std::min<u8>(rb_gp1.count, 0x7);
 	return pgif.ctrl.get();
 }
 

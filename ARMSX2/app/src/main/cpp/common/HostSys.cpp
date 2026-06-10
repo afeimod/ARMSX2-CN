@@ -108,10 +108,17 @@ static u32 GetSpinTime()
 	{
 		return 1000 * atoi(req);
 	}
-	else
-	{
-		return 50 * 1000; // 50µs
-	}
+#if defined(__ANDROID__)
+	// Mobile producer arrival is bimodal: either sub-µs (EE→MTGS handoff with
+	// work already queued) or many-ms (waiting for a frame boundary). A
+	// 50µs spin window is wrong for both cases — longer than the sub-µs hit
+	// rewards and uselessly short for the many-ms wait. Cut to 2µs to keep
+	// the fast path but stop bleeding CPU on the slow path; the simpleperf
+	// trace showed ~30% of total CPU in ShortSpin at the 50µs default.
+	return 2 * 1000;
+#else
+	return 50 * 1000; // 50µs
+#endif
 }
 
 const u32 SPIN_TIME_NS = GetSpinTime();

@@ -288,6 +288,20 @@ GSRendererType GSUtil::GetPreferredRenderer()
 #elif defined(_WIN32)
 		// Use D3D device info to select renderer.
 		preferred_renderer = D3D::GetPreferredRenderer();
+#elif defined(__ANDROID__)
+		// Android: prefer OpenGL HW. Vulkan's suitability probe is fragile
+		// across the wide spread of mobile driver stacks, and falling through
+		// to SW for alpha-heavy games (FFX battles, smoke effects) is far
+		// worse than running OGL HW even on devices where Vulkan would also
+		// have worked. Users can still pick Vulkan or SW explicitly via the
+		// renderer setting; this only steers the Auto resolution.
+#if defined(ENABLE_OPENGL)
+		preferred_renderer = GSRendererType::OGL;
+#elif defined(ENABLE_VULKAN)
+		preferred_renderer = GSRendererType::VK;
+#else
+		preferred_renderer = GSRendererType::SW;
+#endif
 #else
 		// Linux: Prefer Vulkan if the driver isn't buggy.
 #if defined(ENABLE_VULKAN)
@@ -338,4 +352,28 @@ const char* GSUtil::GetPSMName(int psm)
 		default:break;
 	}
 	return "BAD_PSM";
+}
+
+bool GSUtil::IsValidPSM(int psm)
+{
+	switch (psm)
+	{
+		case PSMCT32:
+		case PSMCT24:
+		case PSMCT16:
+		case PSMCT16S:
+		case PSMT8:
+		case PSMT4:
+		case PSMT8H:
+		case PSMT4HL:
+		case PSMT4HH:
+		case PSMZ32:
+		case PSMZ24:
+		case PSMZ16:
+		case PSMZ16S:
+		case PSGPU24:
+			return true;
+		default:
+			return false;
+	}
 }

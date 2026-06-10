@@ -3,6 +3,13 @@
 
 //#version 420 // Keep it for text editor detection
 
+// When dual source blending is unavailable (GLES without GL_EXT_blend_func_extended),
+// treat the second color output as disabled so no 'index' layout qualifiers are emitted.
+#if defined(DISABLE_DUAL_SOURCE) && !PS_NO_COLOR1
+#undef PS_NO_COLOR1
+#define PS_NO_COLOR1 1
+#endif
+
 #define FMT_32 0
 #define FMT_24 1
 #define FMT_16 2
@@ -32,6 +39,20 @@
 #define PS_ATST_NOTEQUAL 4
 #endif
 
+// Selector-refactor compatibility: PS_DEPTH_FEEDBACK / PS_COLOR_FEEDBACK / PS_ZWRITE
+// were dropped from PSSelector upstream. Derive safe defaults from existing macros.
+// Adreno's GLSL preprocessor errors on undefined identifiers in #if expressions, so
+// every macro referenced below MUST have a #define somewhere before its first #if use.
+#ifndef PS_DEPTH_FEEDBACK
+#define PS_DEPTH_FEEDBACK (DEPTH_FEEDBACK_SUPPORT == 1)
+#endif
+#ifndef PS_COLOR_FEEDBACK
+#define PS_COLOR_FEEDBACK 0
+#endif
+#ifndef PS_ZWRITE
+#define PS_ZWRITE (PS_ZCLAMP || PS_ZFLOOR || (PS_AFAIL == AFAIL_FB_ONLY) || (PS_AFAIL == AFAIL_RGB_ONLY) || (PS_ZTST == ZTST_GEQUAL) || (PS_ZTST == ZTST_GREATER))
+#endif
+
 // TEX_COORD_DEBUG output the uv coordinate as color. It is useful
 // to detect bad sampling due to upscaling
 //#define TEX_COORD_DEBUG
@@ -46,11 +67,11 @@
 #define SW_AD_TO_HW (PS_BLEND_C == 1 && PS_A_MASKED)
 #define PS_PRIMID_INIT (PS_DATE == 1 || PS_DATE == 2)
 #define NEEDS_RT_EARLY (PS_TEX_IS_FB == 1 || PS_DATE >= 5)
-#define NEEDS_RT_FOR_AFAIL (PS_AFAIL == PS_ZB_ONLY || PS_AFAIL == AFAIL_RGB_ONLY)
-#define NEEDS_DEPTH_FOR_AFAIL (PS_AFAIL == AFAIL_FB_ONLY || PS_AFAIL == AFAIL_RGB_ONLY)
+#define NEEDS_RT_FOR_AFAIL (PS_AFAIL == AFAIL_ZB_ONLY || PS_AFAIL == AFAIL_RGB_ONLY || PS_AFAIL == AFAIL_RGB_ONLY_SW_Z)
+#define NEEDS_DEPTH_FOR_AFAIL (PS_AFAIL == AFAIL_FB_ONLY || PS_AFAIL == AFAIL_RGB_ONLY_SW_Z)
 #define NEEDS_DEPTH_FOR_ZTST (PS_ZTST == ZTST_GEQUAL || PS_ZTST == ZTST_GREATER)
 
-#define NEEDS_RT (NEEDS_RT_EARLY || NEEDS_RT_FOR_AFAIL || (!PS_PRIMID_INIT && (PS_FBMASK || SW_BLEND_NEEDS_RT || SW_AD_TO_HW)) || PS_COLOR_FEEDBACK)
+#define NEEDS_RT (NEEDS_RT_EARLY || NEEDS_RT_FOR_AFAIL || (!PS_PRIMID_INIT && (PS_FBMASK || SW_BLEND_NEEDS_RT || SW_AD_TO_HW)))
 #define NEEDS_TEX (PS_TFX != 4)
 #define NEEDS_DEPTH (PS_DEPTH_FEEDBACK && (NEEDS_DEPTH_FOR_AFAIL || NEEDS_DEPTH_FOR_ZTST))
 
@@ -100,15 +121,21 @@ in SHADER
 #define TARGET_0_QUALIFIER out
 
 // Only enable framebuffer fetch when we actually need it.
+// We need to force the colour to be defined here, to read from it.
+// Basically the only scenario where this'll happen is RGBA masked and DATE is active.
+//
+// Mali devices use ARM_shader_framebuffer_fetch even when the EXT extension is
+// also advertised — the EXT inout path is broken on every Mali driver tested
+// and only `gl_LastFragColorARM` reads back the live tile pixel correctly.
+// Selection is driven by GPU_PROFILE_MALI (emitted from the C++ side after
+// the runtime profile is resolved).
 #if HAS_FRAMEBUFFER_FETCH && NEEDS_RT
-	// We need to force the colour to be defined here, to read from it.
-	// Basically the only scenario where this'll happen is RGBA masked and DATE is active.
 	#undef PS_NO_COLOR
 	#define PS_NO_COLOR 0
 	#if defined(GL_EXT_shader_framebuffer_fetch)
 		#undef TARGET_0_QUALIFIER
 		#define TARGET_0_QUALIFIER inout
-		#define LAST_FRAG_COLOR SV_Target0
+		#define LAST_FRAG_COLOR o_col0
 	#elif defined(GL_ARM_shader_framebuffer_fetch)
 		#define LAST_FRAG_COLOR gl_LastFragColorARM
 	#endif
@@ -116,20 +143,20 @@ in SHADER
 
 #if !PS_NO_COLOR && !PS_NO_COLOR1
 	// Same buffer but 2 colors for dual source blending
-	layout(location = 0, index = 0) TARGET_0_QUALIFIER vec4 SV_Target0;
-	layout(location = 0, index = 1) out vec4 SV_Target1;
+	layout(location = 0, index = 0) TARGET_0_QUALIFIER vec4 o_col0;
+	layout(location = 0, index = 1) out vec4 o_col1;
 #elif !PS_NO_COLOR
-	layout(location = 0) TARGET_0_QUALIFIER vec4 SV_Target0;
+	layout(location = 0) TARGET_0_QUALIFIER vec4 o_col0;
 #endif
 
 // Depth feedback mode 2 is for depth as color.
 // Use FB fetch for the feedback if it's available.
-#if NEEDS_DEPTH && PS_NO_COLOR1 && (DEPTH_FEEDBACK_SUPPORT == 2)
-#if HAS_FRAMEBUFFER_FETCH
-	layout(location = 1) inout float SV_Target1;
-#else
-	layout(location = 1) out float SV_Target1;
-#endif
+#if SW_DEPTH && PS_NO_COLOR1 && (DEPTH_FEEDBACK_SUPPORT == 2)
+	#if HAS_FRAMEBUFFER_FETCH
+		layout(location = 1) inout float o_col1;
+	#else
+		layout(location = 1) out float o_col1;
+	#endif
 #endif
 
 #if NEEDS_TEX
@@ -148,11 +175,11 @@ layout(binding = 3) uniform sampler2D img_prim_min;
 // Depth feedback mode 1 binds depth buffer directly as a texture.
 // Depth feedback mode 2 (depth as color) can use FB fetch for the feedback,
 // in which case we don't need to explicitly bind depth as a texture.
-#if (DEPTH_FEEDBACK_SUPPORT == 1 || (DEPTH_FEEDBACK_SUPPORT == 2 && !HAS_FRAMEBUFFER_FETCH)) && NEEDS_DEPTH
+#if (DEPTH_FEEDBACK_SUPPORT == 1 || (DEPTH_FEEDBACK_SUPPORT == 2 && !HAS_FRAMEBUFFER_FETCH)) && SW_DEPTH
 layout(binding = 4) uniform sampler2D DepthSampler;
 #endif
 
-#if PS_ZWRITE && PS_HAS_CONSERVATIVE_DEPTH && !NEEDS_DEPTH
+#if ZWRITE && PS_HAS_CONSERVATIVE_DEPTH && !SW_DEPTH
 layout(depth_less) out float gl_FragDepth;
 #endif
 
@@ -167,14 +194,14 @@ vec4 sample_from_rt()
 #endif
 }
 
-vec4 sample_from_depth()
+float sample_from_depth()
 {
-#if !NEEDS_DEPTH
-	return vec4(0.0);
+#if !SW_DEPTH
+	return 0.0f;
 #elif HAS_FRAMEBUFFER_FETCH && (DEPTH_FEEDBACK_SUPPORT == 2)
-	return SV_Target1;
+	return o_col1;
 #else
-	return texelFetch(DepthSampler, ivec2(gl_FragCoord.xy), 0);
+	return texelFetch(DepthSampler, ivec2(gl_FragCoord.xy), 0).r;
 #endif
 }
 
@@ -365,7 +392,11 @@ mat4 sample_4p(uvec4 u)
 
 uint fetch_raw_depth()
 {
+#if HAS_CLIP_CONTROL
 	float multiplier = exp2(32.0f);
+#else
+	float multiplier = exp2(24.0f);
+#endif
 
 #if PS_TEX_IS_FB == 1
 	return uint(sample_from_rt().r * multiplier);
@@ -469,15 +500,23 @@ vec4 sample_depth(vec2 st)
 
 
 #elif PS_DEPTH_FMT == 1
-	// Based on ps_convert_float32_rgba8 of convert
+	// Based on ps_convert_depth32_rgba8 of convert
 	// Convert a GL_FLOAT32 depth texture into a RGBA color texture
+#if HAS_CLIP_CONTROL
 	uint d = uint(fetch_c(uv).r * exp2(32.0f));
+#else
+	uint d = uint(fetch_c(uv).r * exp2(24.0f));
+#endif
 	t = vec4(uvec4((d & 0xFFu), ((d >> 8) & 0xFFu), ((d >> 16) & 0xFFu), (d >> 24)));
 
 #elif PS_DEPTH_FMT == 2
-	// Based on ps_convert_float16_rgb5a1 of convert
+	// Based on ps_convert_depth16_rgb5a1 of convert
 	// Convert a GL_FLOAT32 (only 16 lsb) depth into a RGB5A1 color texture
+#if HAS_CLIP_CONTROL
 	uint d = uint(fetch_c(uv).r * exp2(32.0f));
+#else
+	uint d = uint(fetch_c(uv).r * exp2(24.0f));
+#endif
 	t = vec4(uvec4((d & 0x1Fu), ((d >> 5) & 0x1Fu), ((d >> 10) & 0x1Fu), (d >> 15) & 0x01u)) * vec4(8.0f, 8.0f, 8.0f, 128.0f);
 
 #elif PS_DEPTH_FMT == 3
@@ -1036,19 +1075,19 @@ void ps_main()
 	float input_z = gl_FragCoord.z;
 
 	// Must floor before depth testing.
-#if PS_ZFLOOR
+	// Only valid with clip control (ZERO_TO_ONE depth range); on GLES without clip
+	// control gl_FragCoord.z is shifted/scaled and the floor gives wrong results.
+#if PS_ZFLOOR && HAS_CLIP_CONTROL
 	input_z = floor(input_z * exp2(32.0f)) * exp2(-32.0f);
 #endif
 
-#if NEEDS_DEPTH && (PS_ZTST == ZTST_GEQUAL || PS_ZTST == ZTST_GREATER)
-	#if PS_ZTST == ZTST_GEQUAL
-		if (input_z < sample_from_depth().r)
-			discard;
-	#elif PS_ZTST == ZTST_GREATER
-		if (input_z <= sample_from_depth().r)
-			discard;
-	#endif
-#endif // PS_ZTST
+#if PS_ZTST == ZTST_GEQUAL
+	if (input_z < sample_from_depth())
+		discard;
+#elif PS_ZTST == ZTST_GREATER
+	if (input_z <= sample_from_depth())
+		discard;
+#endif
 
 #if PS_SCANMSK & 2
 	// fail depth test on prohibited lines
@@ -1106,7 +1145,7 @@ void ps_main()
 
 	bool atst_pass = atst(C);
 
-#if PS_AFAIL == AFAIL_KEEP
+#if PS_ATST != PS_ATST_NONE && PS_AFAIL == AFAIL_KEEP
 	if (!atst_pass)
 		discard;
 #endif
@@ -1135,12 +1174,12 @@ void ps_main()
 #if PS_DATE == 1
 	// DATM == 0
 	// Pixel with alpha equal to 1 will failed (128-255)
-	SV_Target0 = (C.a > 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
+	o_col0 = (C.a > 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
 	return;
 #elif PS_DATE == 2
 	// DATM == 1
 	// Pixel with alpha equal to 0 will failed (0-127)
-	SV_Target0 = (C.a < 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
+	o_col0 = (C.a < 127.5f) ? vec4(gl_PrimitiveID) : vec4(0x7FFFFFFF);
 	return;
 #endif
 
@@ -1217,8 +1256,8 @@ void ps_main()
 	// Alpha test with feedback
 	#if (PS_AFAIL == AFAIL_FB_ONLY) && NEEDS_DEPTH && PS_ZWRITE
 		if (!atst_pass)
-			input_z = sample_from_depth().r;
-	#elif (PS_AFAIL == AFAIL_ZB_ONLY) && NEEDS_RT
+			input_z = sample_from_depth();
+	#elif PS_AFAIL == AFAIL_ZB_ONLY
 		if (!atst_pass)
 			C = sample_from_rt();
 	#elif (PS_AFAIL == AFAIL_RGB_ONLY) 
@@ -1226,19 +1265,18 @@ void ps_main()
 		{
 		#if NEEDS_RT
 			C.a = sample_from_rt().a;
-		#endif
-		#if NEEDS_DEPTH && PS_ZWRITE
-			input_z = sample_from_depth().r;
+		#if PS_AFAIL == AFAIL_RGB_ONLY_SW_Z
+			input_z = sample_from_depth();
 		#endif
 		}
 	#endif
 
-	// Warning: do not write SV_Target0 until the end since the value might be needed for
+	// Warning: do not write o_col0 until the end since the value might be needed for
 	// FB fetch in sample_from_rt().
-	SV_Target0 = C;
+	o_col0 = C;
 
 	#if !PS_NO_COLOR1
-		SV_Target1 = alpha_blend;
+		o_col1 = alpha_blend;
 	#endif
 #endif
 
@@ -1246,13 +1284,19 @@ void ps_main()
 	input_z = min(input_z, MaxDepthPS);
 #endif
 
-#if PS_ZWRITE
-	#if NEEDS_DEPTH && PS_NO_COLOR1 && (DEPTH_FEEDBACK_SUPPORT == 2)
+#if PS_AA1 == PS_AA1_TRIANGLE_SW_Z
+	if (!bool(PSin.interior))
+		input_z = sample_from_depth(); // No depth update for triangle edges.
+#endif
+
+// Writing back depth
+#if ZWRITE
+	#if SW_DEPTH && PS_NO_COLOR1 && (DEPTH_FEEDBACK_SUPPORT == 2)
 		// Depth as color write. For depth as color feedback we write to both
 		// color copy and real depth to avoid having to copy back to real depth.
-		// Warning: do not write SV_Target1 until the end since the value might
+		// Warning: do not write o_col1 until the end since the value might
 		// be needed for FB fetch in sample_from_depth().
-		SV_Target1 = input_z;
+		o_col1 = input_z;
 	#endif
 	// Standard depth write.
 	gl_FragDepth = input_z;
