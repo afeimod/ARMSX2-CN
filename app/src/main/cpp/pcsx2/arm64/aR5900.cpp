@@ -1585,6 +1585,8 @@ static bool recTryTranslateCachedLoadQuad(u32 rt, u32 rs, s32 imm,
 	static const a64::Register RADDR = a64::x9;
 	static const a64::Register RHOST = a64::x10;
 
+	// Effective address, forced 16-byte aligned (the EE silently aligns 128-bit
+	// accesses; matches the x86 recLQ `xAND(arg1regd, ~0x0F)` and armEmitLoadQuad).
 	recEmitCachedEffectiveAddr(cache, const_state, rs, imm, RADDR);
 	armAsm->And(RADDR.W(), RADDR.W(), ~0x0F);
 	const RecGprCacheState pre_load_cache = cache;

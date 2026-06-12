@@ -10,8 +10,9 @@
 // That makes these helpers correct by construction (interpreter is ground truth)
 // and avoids needing the register allocator / indirect dispatchers yet.
 //
-// The fast path (direct access through REFASTMEMBASE with SIGSEGV backpatching
-// via vtlb_DynBackpatchLoadStore) is Phase 2.2 — see arm64/RecStubs.cpp.
+// The fastmem path (direct access through a pinned 4GB base with SIGSEGV
+// backpatching via vtlb_DynBackpatchLoadStore) was never wired up; the vtlb
+// vmap path through REVTLBPTR is the fast path (see aR5900.h).
 
 #include "aR5900.h"
 
