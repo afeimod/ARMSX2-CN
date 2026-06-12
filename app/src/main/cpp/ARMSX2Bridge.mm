@@ -2629,6 +2629,55 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     g_p44_settings_interface->Save();
 }
 
++ (int)limiterMode
+{
+    if (!VMManager::HasValidVM())
+        return static_cast<int>(LimiterModeType::Nominal);
+
+    return static_cast<int>(VMManager::GetLimiterMode());
+}
+
++ (void)setLimiterMode:(int)mode
+{
+    const bool hasValidVM = VMManager::HasValidVM();
+    std::fprintf(stderr, "@@LIMITER_MODE_REQUEST@@ mode=%d valid=%d state=%d\n",
+        mode, hasValidVM ? 1 : 0, static_cast<int>(VMManager::GetState()));
+    std::fflush(stderr);
+
+    if (!hasValidVM)
+        return;
+
+    LimiterModeType limiterMode = LimiterModeType::Nominal;
+    switch (mode) {
+    case static_cast<int>(LimiterModeType::Turbo):
+        limiterMode = LimiterModeType::Turbo;
+        break;
+    case static_cast<int>(LimiterModeType::Slomo):
+        limiterMode = LimiterModeType::Slomo;
+        break;
+    case static_cast<int>(LimiterModeType::Unlimited):
+        limiterMode = LimiterModeType::Unlimited;
+        break;
+    default:
+        break;
+    }
+
+    Host::RunOnCPUThread([limiterMode]() {
+        if (!VMManager::HasValidVM())
+            return;
+
+        const LimiterModeType previousMode = VMManager::GetLimiterMode();
+        VMManager::SetLimiterMode(limiterMode);
+        const LimiterModeType appliedMode = VMManager::GetLimiterMode();
+        std::fprintf(stderr,
+            "@@LIMITER_MODE@@ before=%d after=%d target=%.3f nominal=%.3f turbo=%.3f slomo=%.3f\n",
+            static_cast<int>(previousMode), static_cast<int>(appliedMode), VMManager::GetTargetSpeed(),
+            EmuConfig.EmulationSpeed.NominalScalar, EmuConfig.EmulationSpeed.TurboScalar,
+            EmuConfig.EmulationSpeed.SlomoScalar);
+        std::fflush(stderr);
+    }, false);
+}
+
 #pragma mark - Compatibility Lab
 
 + (BOOL)getJITBisectFlag:(nonnull NSString *)key defaultValue:(BOOL)def

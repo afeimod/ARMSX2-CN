@@ -207,6 +207,10 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (void)setINIFloat:(nonnull NSString *)section key:(nonnull NSString *)key value:(float)value;
 + (void)setINIString:(nonnull NSString *)section key:(nonnull NSString *)key value:(nonnull NSString *)value;
 
+// Runtime speed control
++ (int)limiterMode;
++ (void)setLimiterMode:(int)mode;
+
 // Compatibility Lab
 + (BOOL)getJITBisectFlag:(nonnull NSString *)key defaultValue:(BOOL)def;
 + (void)setJITBisectFlag:(nonnull NSString *)key value:(BOOL)value;

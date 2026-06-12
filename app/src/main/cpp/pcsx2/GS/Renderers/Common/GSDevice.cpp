@@ -6,6 +6,7 @@
 #include "GS/GS.h"
 #include "GS/GSUtil.h"
 #include "Host.h"
+#include "VMManager.h"
 
 #include "common/Console.h"
 #include "common/BitUtils.h"
@@ -19,8 +20,14 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
 #include <ostream>
 #include <fstream>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 const char* ShaderEntryPoint(ShaderConvert value)
 {
@@ -399,20 +406,92 @@ bool GSDevice::AcquireWindow(bool recreate_window)
 
 bool GSDevice::ShouldSkipPresentingFrame()
 {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	// iOS: the CAMetalLayer swapchain is ALWAYS display-synced — there is no mailbox
+	// mode, and setDisplaySyncEnabled does not exist on iOS (it is macOS-only and
+	// compiled out in GSDeviceMTL). Every present consumes one of the layer's ~3
+	// drawables, so presenting faster than the display refresh rate turns
+	// [layer nextDrawable] into the real frame limiter: the GS thread blocks there,
+	// the MTGS queue fills, and the EE settles back to ~100% no matter what the
+	// requested target speed is (fast-forward only "bursts" for the depth of the
+	// drawable queue — exactly the reported behavior).
+	//
+	// The desktop FIFO gate below never fires on iOS because the effective vsync
+	// mode is Disabled (or Mailbox-mapped) rather than FIFO, so additionally engage
+	// present skipping whenever we're running off-speed (turbo or unlimited): cap
+	// actual presents at the display refresh rate and skip the rest, so the VM
+	// thread never waits on the compositor. Normal-speed behavior is unchanged.
+	// 1.05 threshold: sync-to-host-refresh can legitimately set the target to
+	// ~1.001 at normal speed — that must not engage off-speed present skipping.
+	// Real turbo scalars are >= 1.25 (UI minimum).
+	const float target_speed = VMManager::GetTargetSpeed();
+	const bool ios_offspeed_throttle = (target_speed > 1.05f || target_speed == 0.0f);
+	if (!ios_offspeed_throttle && (!m_allow_present_throttle || m_vsync_mode != GSVSyncMode::FIFO))
+		return false;
+#else
 	// Only needed with FIFO.
 	if (!m_allow_present_throttle || m_vsync_mode != GSVSyncMode::FIFO)
 		return false;
+#endif
 
-	const float throttle_rate = (m_window_info.surface_refresh_rate > 0.0f) ? m_window_info.surface_refresh_rate : 60.0f;
+	float throttle_rate = (m_window_info.surface_refresh_rate > 0.0f) ? m_window_info.surface_refresh_rate : 60.0f;
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if (ios_offspeed_throttle)
+	{
+		// The reported refresh rate is NOT the rate the compositor will actually
+		// recycle drawables at: iPhones report 120Hz on ProMotion panels but cap
+		// CAMetalLayer presents at 60Hz unless CADisableMinimumFrameDurationOnPhone
+		// is set — presenting at the reported 120 made every nextDrawable block
+		// ~15ms and stalled fast-forward (the KH2 report). Cap off-speed presents
+		// at 60, and back off further to 30 if the measured drawable-wait EMA says
+		// even 60 isn't sustainable (heavy GPU load / low power mode). Hysteresis
+		// (enter > 4ms, exit < 1ms) avoids flip-flopping.
+		if (m_present_backoff)
+		{
+			if (m_present_block_ema_us < 1000.0f)
+				m_present_backoff = false;
+		}
+		else
+		{
+			if (m_present_block_ema_us > 4000.0f)
+				m_present_backoff = true;
+		}
+		throttle_rate = m_present_backoff ? 30.0f : std::min(throttle_rate, 60.0f);
+	}
+#endif
+
 	const u64 throttle_period = static_cast<u64>(static_cast<double>(GetTickFrequency()) / static_cast<double>(throttle_rate));
 
 	const u64 now = GetCPUTicks();
 	const double diff = now - m_last_frame_displayed_time;
-	if (diff < throttle_period)
-		return true;
+	const bool skip = (diff < throttle_period);
+	if (!skip)
+		m_last_frame_displayed_time = now;
 
-	m_last_frame_displayed_time = now;
-	return false;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	// Lightweight tester marker: presented vs skipped GS frames while off-speed.
+	// presented ≈ present cap with a growing skipped count means the throttle is
+	// working and the VM is free-running; block_ema_us should stay low — if it
+	// climbs, the backoff engages (backoff=1) until the compositor catches up.
+	if (ios_offspeed_throttle)
+	{
+		static u32 s_ff_calls = 0;
+		static u32 s_ff_skipped = 0;
+		s_ff_skipped += skip ? 1u : 0u;
+		if ((++s_ff_calls & 0x1FFu) == 0)
+		{
+			std::fprintf(stderr,
+				"@@FF_PRESENT@@ target=%.2f rate=%.1f window=512 skipped=%u presented=%u block_ema_us=%.0f backoff=%d\n",
+				target_speed, throttle_rate, s_ff_skipped, 512u - s_ff_skipped,
+				m_present_block_ema_us, m_present_backoff ? 1 : 0);
+			std::fflush(stderr);
+			s_ff_skipped = 0;
+		}
+	}
+#endif
+
+	return skip;
 }
 
 void GSDevice::ThrottlePresentation()

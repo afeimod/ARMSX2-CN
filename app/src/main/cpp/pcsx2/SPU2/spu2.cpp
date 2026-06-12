@@ -14,6 +14,12 @@
 
 #include "common/Error.h"
 
+#include <cstdio>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 const StereoOut32 StereoOut32::Empty(0, 0);
 
 namespace SPU2
@@ -262,6 +268,14 @@ void SPU2::OnTargetSpeedChanged()
 	}
 
 	s_output_stream->SetNominalRate(GetNominalRate());
+
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	// Tester probe: confirms the audio stream adapted to the new target speed
+	// (time-stretch keeps the output path non-blocking during fast-forward).
+	std::fprintf(stderr, "@@FF_AUDIO@@ target=%.2f stretch=%d nominal_rate=%.3f\n",
+		VMManager::GetTargetSpeed(), s_output_stream->IsStretchEnabled() ? 1 : 0, GetNominalRate());
+	std::fflush(stderr);
+#endif
 
 	// Flipped save as speed has already changed.
 	if (!s_output_muted)

@@ -84,6 +84,11 @@ enum ControllerAsset {
             return customImage
         }
 
+        if let directoryName = skin.bundledDirectoryName,
+           let bundledImage = bundledSkinImage(named: baseName, directoryName: directoryName) {
+            return bundledImage
+        }
+
         if let image = UIImage(named: baseName) ?? UIImage(named: fileName) {
             return image
         }
@@ -93,6 +98,15 @@ enum ControllerAsset {
         }
 
         return UIImage(contentsOfFile: path)
+    }
+
+    private static func bundledSkinImage(named baseName: String, directoryName: String) -> UIImage? {
+        let subdirectory = "controller_skins/\(directoryName)"
+        guard let url = Bundle.main.url(forResource: baseName, withExtension: "png", subdirectory: subdirectory) else {
+            return nil
+        }
+
+        return UIImage(contentsOfFile: url.path)
     }
 
     static func fullSkinImage(skin: VirtualPadSkin, isLandscape: Bool) -> UIImage? {

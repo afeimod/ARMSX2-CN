@@ -2425,6 +2425,16 @@ void VMManager::ResetFrameLimiter()
 	s_limiter_frame_start = GetCPUTicks();
 }
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+// Tester probe (@@VM_PACE@@): per-window count of VM frames that overran their
+// budget (couldn't reach the target speed — EE/VU/GS bound) vs time the limiter
+// slept off (host has headroom). Printed once per 1024 frames while running
+// off-speed; otherwise just a couple of counter increments per frame.
+static u32 s_vm_pace_frames = 0;
+static u32 s_vm_pace_overruns = 0;
+static u64 s_vm_pace_slept_ms = 0;
+#endif
+
 void VMManager::Internal::Throttle()
 {
 	if (s_target_speed == 0.0f || s_use_vsync_for_timing)
@@ -2436,9 +2446,23 @@ void VMManager::Internal::Throttle()
 	const u64 iEnd = GetCPUTicks(); // The current tick we actually stopped on.
 	const s64 sDeltaTime = iEnd - uExpectedEnd; // The diff between when we stopped and when we expected to.
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+	if ((++s_vm_pace_frames & 0x3FFu) == 0 && s_target_speed != 1.0f)
+	{
+		std::fprintf(stderr, "@@VM_PACE@@ target=%.2f window=1024 overruns=%u slept_ms=%llu\n",
+			s_target_speed, s_vm_pace_overruns, static_cast<unsigned long long>(s_vm_pace_slept_ms));
+		std::fflush(stderr);
+		s_vm_pace_overruns = 0;
+		s_vm_pace_slept_ms = 0;
+	}
+#endif
+
 	// If frame ran too long...
 	if (sDeltaTime >= s_limiter_ticks_per_frame)
 	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		s_vm_pace_overruns++;
+#endif
 		// ... Fudge the next frame start over a bit. Prevents fast forward zoomies.
 		s_limiter_frame_start += (sDeltaTime / s_limiter_ticks_per_frame) * s_limiter_ticks_per_frame;
 		return;
@@ -2452,6 +2476,9 @@ void VMManager::Internal::Throttle()
 	// further testing suggests instead that this was utter bullshit.
 	if (msec > 1)
 	{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+		s_vm_pace_slept_ms += static_cast<u64>(msec - 1);
+#endif
 		Threading::Sleep(msec - 1);
 	}
 

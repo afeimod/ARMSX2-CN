@@ -99,8 +99,10 @@ struct PadLayoutEditView: View {
                                     Text("Landscape").tag(true)
                                 }
                                 .pickerStyle(.segmented)
-                                .frame(width: 200)
+                                .frame(width: 168)
                                 .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+                                Spacer()
+                                skinPickerMenu
                                 Spacer()
                                 Button("Save") {
                                     NSLog("@@PAD_LAYOUT@@ save portrait=%d landscape=%d", layout.portrait.count, layout.landscape.count)
@@ -146,8 +148,10 @@ struct PadLayoutEditView: View {
                 Text("Landscape").tag(true)
             }
             .pickerStyle(.segmented)
-            .frame(width: 200)
+            .frame(width: 168)
             .background(.black.opacity(0.3), in: RoundedRectangle(cornerRadius: 8))
+            Spacer()
+            skinPickerMenu
             Spacer()
             Button("Save") {
                 NSLog("@@PAD_LAYOUT@@ save portrait=%d landscape=%d", layout.portrait.count, layout.landscape.count)
@@ -160,6 +164,24 @@ struct PadLayoutEditView: View {
         }
         .padding(.horizontal)
         .padding(.top, 4)
+    }
+
+    private var skinPickerMenu: some View {
+        Menu {
+            ForEach(VirtualPadSkin.allCases) { skin in
+                Button {
+                    settings.virtualPadSkin = skin
+                } label: {
+                    Label(settings.localized(skin.label), systemImage: settings.virtualPadSkin == skin ? "checkmark" : "circle")
+                }
+            }
+        } label: {
+            Image(systemName: "paintpalette.fill")
+                .font(.callout)
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(.black.opacity(0.5), in: Circle())
+        }
     }
 
     @ViewBuilder

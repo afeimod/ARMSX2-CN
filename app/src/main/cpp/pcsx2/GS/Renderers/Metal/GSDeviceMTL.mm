@@ -8,6 +8,7 @@
 #include "GS/Renderers/Metal/GSTextureMTL.h"
 #include "GS/GSPerfMon.h"
 #include "GS/GSShaderCompileIndicator.h"
+#include "VMManager.h"
 
 #include "common/Console.h"
 #include "common/HostSys.h"
@@ -1389,7 +1390,44 @@ GSDevice::PresentResult GSDeviceMTL::BeginPresent(bool frame_skip)
 		return PresentResult::FrameSkipped;
 	}
 	id<MTLCommandBuffer> buf = GetRenderCmdBuf();
+#if TARGET_OS_IPHONE
+	// Measure how long the GS thread blocks acquiring a drawable. On iOS this is
+	// the hidden frame limiter when presenting above the display refresh rate (the
+	// layer is always display-synced). During fast-forward this should now stay
+	// near zero, because off-speed presents are throttled to the refresh rate in
+	// GSDevice::ShouldSkipPresentingFrame.
+	const u64 dw_start = GetCPUTicks();
+#endif
 	m_current_drawable = MRCRetain([m_layer nextDrawable]);
+#if TARGET_OS_IPHONE
+	{
+		const u64 dw_ticks = GetCPUTicks() - dw_start;
+		const u64 dw_us = (dw_ticks * 1000000ull) / GetTickFrequency();
+		// Feed the adaptive present-rate backoff in GSDevice::ShouldSkipPresentingFrame.
+		m_present_block_ema_us = m_present_block_ema_us * 0.9f + static_cast<float>(dw_us) * 0.1f;
+		static u64 s_dw_total_us = 0;
+		static u64 s_dw_max_us = 0;
+		static u32 s_dw_count = 0;
+		static u32 s_dw_timeouts = 0;
+		s_dw_total_us += dw_us;
+		s_dw_max_us = std::max<u64>(s_dw_max_us, dw_us);
+		s_dw_timeouts += (m_current_drawable == nil) ? 1u : 0u;
+		if ((++s_dw_count & 0x1FFu) == 0)
+		{
+			const float target_speed = VMManager::GetTargetSpeed();
+			if (target_speed != 1.0f)
+			{
+				std::fprintf(stderr, "@@MTL_DRAWABLE_WAIT@@ target=%.2f window=512 avg_us=%llu max_us=%llu timeouts=%u\n",
+					target_speed, static_cast<unsigned long long>(s_dw_total_us / 512ull),
+					static_cast<unsigned long long>(s_dw_max_us), s_dw_timeouts);
+				std::fflush(stderr);
+			}
+			s_dw_total_us = 0;
+			s_dw_max_us = 0;
+			s_dw_timeouts = 0;
+		}
+	}
+#endif
 	EndRenderPass();
 	if (!m_current_drawable)
 	{

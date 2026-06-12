@@ -65,11 +65,15 @@ final class SettingsStore: @unchecked Sendable {
     static let minTargetFPS: Float = 15.0
     static let maxTargetFPS: Float = 120.0
     static let defaultTargetFPS: Float = 60.0
+    static let minFastForwardScalar: Float = 1.25
+    static let maxFastForwardScalar: Float = 10.0
+    static let defaultFastForwardScalar: Float = 2.0
     static let textureOffsetRange = -4096...4096
     static let skipDrawRange = 0...5000
     static let defaultOsdPerformancePosition = 3
 
     @ObservationIgnored private var suppressINIWrites = false
+    @ObservationIgnored private var frameLimiterDisabledForFastForward = false
 
     // ── Emulator / CPU ──
     var eeCoreType: Int {
@@ -114,6 +118,7 @@ final class SettingsStore: @unchecked Sendable {
     var frameLimiterEnabled: Bool {
         didSet { applyFrameLimiterSettings() }
     }
+    var fastForwardRuntimeEnabled = false
     var targetFPS: Float {
         didSet {
             let normalized = Self.clampedTargetFPS(targetFPS)
@@ -122,6 +127,17 @@ final class SettingsStore: @unchecked Sendable {
                 return
             }
             applyFrameLimiterSettings()
+        }
+    }
+    var fastForwardScalar: Float {
+        didSet {
+            let normalized = Self.clampedSpeedScalar(fastForwardScalar)
+            guard abs(fastForwardScalar - normalized) <= 0.001 else {
+                fastForwardScalar = normalized
+                return
+            }
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setINIFloat("Framerate", key: "TurboScalar", value: fastForwardScalar)
         }
     }
     var ntscFramerate: Float {
@@ -557,6 +573,7 @@ final class SettingsStore: @unchecked Sendable {
         frameLimiterEnabled = Self.frameLimiterEnabled(fromNominalScalar: nominalScalar)
         targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: loadedNTSCFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
+        fastForwardScalar = Self.clampedSpeedScalar(ARMSX2Bridge.getINIFloat("Framerate", key: "TurboScalar", defaultValue: Self.defaultFastForwardScalar))
         // Boot
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         // Advanced Speedhacks
@@ -683,6 +700,7 @@ final class SettingsStore: @unchecked Sendable {
         frameLimiterEnabled = Self.frameLimiterEnabled(fromNominalScalar: nominalScalar)
         targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: ntscFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
+        fastForwardScalar = Self.clampedSpeedScalar(ARMSX2Bridge.getINIFloat("Framerate", key: "TurboScalar", defaultValue: Self.defaultFastForwardScalar))
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
         vu1Instant = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vu1Instant", defaultValue: true)
@@ -796,6 +814,12 @@ final class SettingsStore: @unchecked Sendable {
         return min(max(fps.rounded(), minTargetFPS), maxTargetFPS)
     }
 
+    private static func clampedSpeedScalar(_ scalar: Float) -> Float {
+        guard scalar.isFinite else { return defaultFastForwardScalar }
+        let stepped = (scalar * 4.0).rounded() / 4.0
+        return min(max(stepped, minFastForwardScalar), maxFastForwardScalar)
+    }
+
     private static func clampedAnalogStickScale(_ scale: Float) -> Float {
         guard scale.isFinite else { return 1.0 }
         return min(max(scale, 0.8), 1.6)
@@ -845,6 +869,25 @@ final class SettingsStore: @unchecked Sendable {
         NSLog("[ARMSX2 iOS Settings] Frame limiter %@ targetFPS=%.0f NominalScalar=%.3f",
               frameLimiterEnabled ? "ON" : "OFF", targetFPS, scalar)
         ARMSX2Bridge.setINIFloat("Framerate", key: "NominalScalar", value: scalar)
+    }
+
+    func setRuntimeFastForwardEnabled(_ enabled: Bool) {
+        fastForwardRuntimeEnabled = enabled
+        // Fast forward is purely a limiter-mode switch (Nominal <-> Turbo). The
+        // previous implementation also flipped frameLimiterEnabled, whose didSet
+        // writes NominalScalar=10 to the INI — that made the OSD report T: 1000%
+        // (the Nominal scalar) while the real turbo target was the FF scalar, and
+        // churned the INI on every toggle. Turbo mode alone is sufficient: the
+        // core computes the target from TurboScalar while in Turbo, and switching
+        // back to Nominal restores the user's normal target (T: 100%).
+        if enabled {
+            NSLog("@@FF_UI@@ enabled=1 turbo=%.3f", fastForwardScalar)
+            ARMSX2Bridge.setLimiterMode(1)
+        } else {
+            NSLog("@@FF_UI@@ enabled=0 targetFPS=%.0f", targetFPS)
+            frameLimiterDisabledForFastForward = false
+            ARMSX2Bridge.setLimiterMode(0)
+        }
     }
 
     private func normalizeDEV9Settings() {
@@ -912,6 +955,9 @@ final class SettingsStore: @unchecked Sendable {
         fastmem = true
         targetFPS = Self.defaultTargetFPS
         frameLimiterEnabled = true
+        fastForwardRuntimeEnabled = false
+        frameLimiterDisabledForFastForward = false
+        fastForwardScalar = Self.defaultFastForwardScalar
         ntscFramerate = 59.94
         palFramerate = 50.0
         fastCDVD = false

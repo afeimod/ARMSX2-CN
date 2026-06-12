@@ -1466,6 +1466,15 @@ protected:
 	bool m_allow_present_throttle = false;
 	u64 m_last_frame_displayed_time = 0;
 
+	// iOS off-speed present pacing: EMA of how long the backend blocked acquiring
+	// a swapchain image/drawable on the last presents (microseconds), updated by
+	// the backend (GSDeviceMTL). Drives the adaptive present-rate backoff in
+	// ShouldSkipPresentingFrame — e.g. iPhones report 120Hz but cap CAMetalLayer
+	// presents at 60Hz unless CADisableMinimumFrameDurationOnPhone is set, so the
+	// sustainable present rate must be discovered at runtime.
+	float m_present_block_ema_us = 0.0f;
+	bool m_present_backoff = false;
+
 	GSTexture* m_merge = nullptr;
 	GSTexture* m_weavebob = nullptr;
 	GSTexture* m_blend = nullptr;

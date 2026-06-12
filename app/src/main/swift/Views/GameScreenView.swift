@@ -250,6 +250,7 @@ struct GameScreenView: View {
             Toggle(isOn: $userVirtualPadVisible) {
                 Label(settings.localized("Virtual Pad"), systemImage: "gamecontroller")
             }
+            controllerSkinMenu
             if virtualPadHiddenByController {
                 Text(settings.localized("Hidden while controller is connected"))
             }
@@ -309,7 +310,7 @@ struct GameScreenView: View {
                         showSpeedControl = true
                     }
                 } label: {
-                    Label(settings.localized("Speed / FPS Target"), systemImage: "speedometer")
+                    Label(settings.localized("Speed / Fast Forward"), systemImage: "forward.fill")
                 }
 
                 Button {
@@ -363,6 +364,21 @@ struct GameScreenView: View {
                 .foregroundStyle(.white.opacity(0.5))
                 .padding(6)
                 .background(.black.opacity(0.15), in: Circle())
+        }
+    }
+
+    private var controllerSkinMenu: some View {
+        Menu {
+            ForEach(VirtualPadSkin.allCases) { skin in
+                Button {
+                    settings.virtualPadSkin = skin
+                    presentStatusMessage("\(settings.localized("Controller Skin")): \(settings.localized(skin.label))")
+                } label: {
+                    Label(settings.localized(skin.label), systemImage: settings.virtualPadSkin == skin ? "checkmark" : "circle")
+                }
+            }
+        } label: {
+            Label(settings.localized("Controller Skin"), systemImage: "paintpalette")
         }
     }
 
@@ -1065,6 +1081,39 @@ private struct SpeedControlPanel: View {
     var body: some View {
         NavigationStack {
             Form {
+                Section(settings.localized("Fast Forward")) {
+                    Toggle(settings.localized("Enable Fast Forward"), isOn: Binding(
+                        get: { settings.fastForwardRuntimeEnabled },
+                        set: { enabled in
+                            settings.setRuntimeFastForwardEnabled(enabled)
+                        }
+                    ))
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            Text(settings.localized("Fast Forward Speed"))
+                            Spacer()
+                            Text(Self.formatPercent(settings.fastForwardScalar))
+                                .foregroundStyle(.secondary)
+                                .font(.callout.monospacedDigit())
+                        }
+
+                        Slider(
+                            value: $settings.fastForwardScalar,
+                            in: SettingsStore.minFastForwardScalar...SettingsStore.maxFastForwardScalar,
+                            step: 0.25
+                        )
+
+                        HStack {
+                            quickFastForwardButton(1.5)
+                            quickFastForwardButton(2.0)
+                            quickFastForwardButton(3.0)
+                            quickFastForwardButton(5.0)
+                            quickFastForwardButton(10.0)
+                        }
+                    }
+                }
+
                 Section(settings.localized("Frame Limiter")) {
                     Toggle(settings.localized("Enable Limiter"), isOn: $settings.frameLimiterEnabled)
 
@@ -1113,7 +1162,7 @@ private struct SpeedControlPanel: View {
                     }
                 }
             }
-            .navigationTitle(settings.localized("Speed / FPS Target"))
+            .navigationTitle(settings.localized("Speed / Fast Forward"))
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(settings.localized("Done")) {
@@ -1121,7 +1170,22 @@ private struct SpeedControlPanel: View {
                     }
                 }
             }
+            .onAppear {
+                refreshFastForwardState()
+            }
         }
+    }
+
+    private func refreshFastForwardState() {
+        settings.fastForwardRuntimeEnabled = ARMSX2Bridge.limiterMode() == 1
+    }
+
+    private func quickFastForwardButton(_ scalar: Float) -> some View {
+        Button(Self.formatPercent(scalar)) {
+            settings.fastForwardScalar = scalar
+        }
+        .buttonStyle(.bordered)
+        .font(.caption.monospacedDigit())
     }
 
     private func quickTargetButton(_ fps: Float) -> some View {

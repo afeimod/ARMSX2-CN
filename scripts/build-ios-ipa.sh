@@ -101,6 +101,11 @@ mkdir -p "$STAGING_DIR/Payload"
 ditto "$APP_PATH" "$STAGING_DIR/Payload/ARMSX2iOS.app"
 STAGED_APP="$STAGING_DIR/Payload/ARMSX2iOS.app"
 
+CONTROLLER_SKINS_DIR="$ROOT_DIR/app/src/main/assets/app_icons/controller_skins"
+if [[ -d "$CONTROLLER_SKINS_DIR" ]]; then
+	ditto "$CONTROLLER_SKINS_DIR" "$STAGED_APP/controller_skins"
+fi
+
 if [[ -n "$SIGN_IDENTITY" || "$AD_HOC_SIGN" == "1" ]]; then
 	if [[ ! -f "$ENTITLEMENTS_FILE" ]]; then
 		echo "error: entitlements file was not found at $ENTITLEMENTS_FILE" >&2
