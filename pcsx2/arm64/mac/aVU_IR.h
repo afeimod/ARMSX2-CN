@@ -101,6 +101,28 @@ static inline void mVUshufflePS(const a64::VRegister& dst, const a64::VRegister&
 		armAsm->Ins(dst.V4S(), i, RQSCRATCH3.V4S(), (imm >> (2 * i)) & 3);
 }
 
+// Lane0-preserving scalar FP ops on the PQ latency reg (mVU_xmmPQ). AArch64 scalar
+// FP writes Sd and zeroes Vd[127:32], while x86 SSE scalar ops preserve the upper
+// three lanes. EFU P-pipe ops depend on the two Q instances and the other P
+// instance surviving, so compute in scratch and merge only lane0 back.
+static inline void mVUscalarSqrtKeep(const a64::VRegister& dst, const a64::VRegister& src)
+{
+	armAsm->Fsqrt(RQSCRATCH2.S(), src.S());
+	armAsm->Ins(dst.V4S(), 0, RQSCRATCH2.V4S(), 0);
+}
+
+static inline void mVUscalarAddKeep(const a64::VRegister& dst, const a64::VRegister& a, const a64::VRegister& b)
+{
+	armAsm->Fadd(RQSCRATCH2.S(), a.S(), b.S());
+	armAsm->Ins(dst.V4S(), 0, RQSCRATCH2.V4S(), 0);
+}
+
+static inline void mVUscalarMulKeep(const a64::VRegister& dst, const a64::VRegister& a, const a64::VRegister& b)
+{
+	armAsm->Fmul(RQSCRATCH2.S(), a.S(), b.S());
+	armAsm->Ins(dst.V4S(), 0, RQSCRATCH2.V4S(), 0);
+}
+
 //------------------------------------------------------------------
 // Byte offsets into VURegs (addressed from RVUSTATE = &vuRegs[index])
 //------------------------------------------------------------------
