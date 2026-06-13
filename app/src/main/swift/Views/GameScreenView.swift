@@ -86,22 +86,32 @@ struct GameScreenView: View {
                     }
                     .ignoresSafeArea()
                 } else {
-                    // Portrait: split layout. Full-phone skins are skipped until viewport metadata is parsed.
-                    ZStack {
-                        VStack(spacing: 0) {
-                            MetalGameView()
-                                .frame(height: geo.size.height / 2)
-                            if effectiveVirtualPadVisible {
+                    // Portrait: top game viewport, bottom controller deck.
+                    // Game respects the top safe area so OSD stays below the Dynamic Island.
+                    // Controller ignores the bottom safe area so buttons remain usable near the home indicator.
+                    VStack(spacing: 0) {
+                        let gameHeight = min(geo.size.width * 3 / 4, geo.size.height * 0.55)
+                        MetalGameView()
+                            .frame(height: gameHeight)
+                            .clipped()
+
+                        if effectiveVirtualPadVisible {
+                            ZStack {
+                                Color.black
                                 VirtualControllerView()
-                                    .frame(height: geo.size.height / 2)
-                            } else {
-                                Spacer()
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                             }
-                        }
-                        .overlay(alignment: .topTrailing) {
-                            menuButtonOverlay(isLandscape: false)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
                         }
                     }
+                    .overlay(alignment: .topTrailing) {
+                        if !menuButtonHidden {
+                            menuButton()
+                                .padding(.top, 4)
+                                .padding(.trailing, 4)
+                        }
+                    }
+                    .ignoresSafeArea(.container, edges: .bottom)
                 }
             }
             .preference(key: GameScreenSizePreferenceKey.self, value: geo.size)
@@ -125,12 +135,14 @@ struct GameScreenView: View {
             compatibilityLabPanel
                 .presentationDetents([.medium, .large])
         }
-        .fullScreenCover(isPresented: $showPadLayoutEditor, onDismiss: {
-            NSLog("@@PAD_LAYOUT@@ dismiss")
-            showPadLayoutEditor = false
-            updateRuntimeOverlayPause()
-        }) {
-            PadLayoutEditView()
+        .overlay(alignment: .top) {
+            if showPadLayoutEditor {
+                PadLayoutEditView(onDismiss: {
+                    showPadLayoutEditor = false
+                    updateRuntimeOverlayPause()
+                })
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            }
         }
         .sheet(isPresented: $showPNACHImporter) {
             ImportDocumentPicker(
@@ -930,7 +942,7 @@ struct GameScreenView: View {
     // MARK: - Virtual Pad
 
     private var effectiveVirtualPadVisible: Bool {
-        userVirtualPadVisible && (!settings.autoHideVirtualPadWhenControllerConnected || !externalControllerConnected)
+        userVirtualPadVisible && (!settings.autoHideVirtualPadWhenControllerConnected || !externalControllerConnected) && !showPadLayoutEditor
     }
 
     private var virtualPadHiddenByController: Bool {

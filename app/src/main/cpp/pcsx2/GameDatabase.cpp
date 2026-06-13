@@ -465,6 +465,16 @@ static bool IsIOSBlackGame(const std::string& name)
 	return name == "Black";
 }
 
+// Midnight Club 3 (DUB Edition + DUB Edition Remix). Its GameDB entry uses the
+// GSC_MidnightClub3 skip-count callback to drop broken bloom draws. The callback
+// only ever *skips* draws (no extra barriers or copies), which makes it one of
+// the safest callback classes for Metal — and without it the light blooms render
+// wrongly on iOS while desktop PCSX2 looks correct (reported on SLUS-21355).
+static bool IsIOSMidnightClub3Game(const std::string& name)
+{
+	return name.rfind("Midnight Club 3", 0) == 0;
+}
+
 static std::string GetIOSCompatibilityLabProfileForGSPolicy()
 {
 	SettingsInterface* si = Host::GetSettingsInterface();
@@ -582,8 +592,10 @@ static bool IsIOSMetalAllowedAutoGSHWCallback(const GameDatabaseSchema::GameEntr
 		{
 			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
 			static const s16 burnout_sky = GSLookupGetSkipCountFunctionId("GSC_BlackAndBurnoutSky");
+			static const s16 midnight_club3 = GSLookupGetSkipCountFunctionId("GSC_MidnightClub3");
 			return (IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_games) ||
-				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky);
+				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky) ||
+				(IsIOSMidnightClub3Game(entry.name) && value == midnight_club3);
 		}
 
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
@@ -608,8 +620,10 @@ static bool IsIOSMetalAllowedCompatLabOffGSHWFix(const GameDatabaseSchema::GameE
 		{
 			static const s16 burnout_games = GSLookupGetSkipCountFunctionId("GSC_BurnoutGames");
 			static const s16 burnout_sky = GSLookupGetSkipCountFunctionId("GSC_BlackAndBurnoutSky");
+			static const s16 midnight_club3 = GSLookupGetSkipCountFunctionId("GSC_MidnightClub3");
 			return (IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_games) ||
-				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky);
+				(IsIOSBurnoutMetalCallbackGame(entry.name) && value == burnout_sky) ||
+				(IsIOSMidnightClub3Game(entry.name) && value == midnight_club3);
 		}
 
 		case GameDatabaseSchema::GSHWFixId::BeforeDraw:
@@ -1293,6 +1307,34 @@ void GameDatabaseSchema::GameEntry::applyGSHardwareFixes(Pcsx2Config::GSOptions&
 
 			case GSHWFixId::RecommendedBlendingLevel:
 			{
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+				// On iOS, honor the GameDB blending recommendation automatically
+				// (upstream only shows an OSD hint the user has to act on). Games
+				// like Silent Hill 2 (recommends Full) render their core effects —
+				// the flashlight darkness mask, menu transparency — wrong at the
+				// Basic default, and iOS users rarely dig into per-game settings.
+				// Capped at Full (never Maximum), only raises the level, and never
+				// when the user runs manual hardware hacks (their blending choice
+				// wins). Applies in BOTH iOS policy modes — auto-apply and the
+				// compat-lab-off "blocked" mode (this case is only reached there
+				// when allowlisted as a safe non-callback fix); the Metal renderer
+				// has full texture-barrier support so all levels are functional.
+				if (!is_sw_renderer && !config.ManualUserHacks &&
+					value > 0 && value <= static_cast<int>(AccBlendLevel::Maximum) &&
+					static_cast<int>(config.AccurateBlendingUnit) < value)
+				{
+					const AccBlendLevel bumped =
+						static_cast<AccBlendLevel>(std::min(value, static_cast<int>(AccBlendLevel::Full)));
+					if (config.AccurateBlendingUnit < bumped)
+					{
+						Console.Warning("@@IOS_BLEND_BUMP@@ game=\"%s\" old=%d recommended=%d applied=%d",
+							name.c_str(), static_cast<int>(config.AccurateBlendingUnit), value,
+							static_cast<int>(bumped));
+						config.AccurateBlendingUnit = bumped;
+					}
+					break;
+				}
+#endif
 				if (!is_sw_renderer && value >= 0 && value <= static_cast<int>(AccBlendLevel::Maximum) && static_cast<int>(EmuConfig.GS.AccurateBlendingUnit) < value)
 				{
 					static constexpr std::array<const char*, static_cast<u8>(AccBlendLevel::MaxCount)> s_blending_option_names = {{
