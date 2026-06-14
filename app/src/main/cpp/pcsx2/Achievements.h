@@ -116,8 +116,27 @@ namespace Achievements
 		bool has_rich_presence = false;
 	};
 
+	struct AchievementInfo
+	{
+		std::string title;
+		std::string description;
+		std::string badge_path;
+		std::string measured_progress;
+		u32 id = 0;
+		u32 points = 0;
+		u32 unlock_time = 0;
+		u32 state = 0;
+		u32 category = 0;
+		u32 bucket = 0;
+		u32 unlocked = 0;
+		float measured_percent = 0.0f;
+		float rarity = 0.0f;
+		float rarity_hardcore = 0.0f;
+	};
+
 	bool GetCurrentUserStats(UserStats* stats);
 	bool GetCurrentGameStats(GameStats* stats);
+	bool GetCurrentAchievementList(std::vector<AchievementInfo>* achievements);
 
 	/// Returns true if RetroAchievements game data has been loaded.
 	bool HasActiveGame();

@@ -255,6 +255,7 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 
 // RetroAchievements
 + (nonnull NSDictionary<NSString *, id> *)retroAchievementsState;
++ (nonnull NSArray<NSDictionary<NSString *, id> *> *)retroAchievementsForCurrentGame;
 + (void)setRetroAchievementsEnabled:(BOOL)enabled;
 + (void)setRetroAchievementsHardcore:(BOOL)enabled;
 + (void)setRetroAchievementsNotifications:(BOOL)enabled;

@@ -415,6 +415,36 @@ extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void)
     });
 }
 
+extern "C" void ARMSX2_PostRetroAchievementsNotification(const char* title, const char* message, const char* badgePath)
+{
+    NSString* titleString = title ? [NSString stringWithUTF8String:title] : nil;
+    if (titleString.length == 0)
+        return;
+
+    NSString* messageString = message ? [NSString stringWithUTF8String:message] : nil;
+    NSString* badgePathString = badgePath ? [NSString stringWithUTF8String:badgePath] : nil;
+    if (!messageString)
+        messageString = @"";
+    if (!badgePathString)
+        badgePathString = @"";
+
+    std::fprintf(stderr, "@@RA_NOTIFY@@ title_len=%lu message_len=%lu badge=%d\n",
+        static_cast<unsigned long>(titleString.length),
+        static_cast<unsigned long>(messageString.length),
+        badgePathString.length > 0 ? 1 : 0);
+    std::fflush(stderr);
+
+    NSDictionary* userInfo = @{
+        @"title": titleString,
+        @"message": messageString,
+        @"badgePath": badgePathString,
+    };
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSNotificationCenter defaultCenter] postNotificationName:@"ARMSX2RetroAchievementsNotification" object:nil userInfo:userInfo];
+    });
+}
+
 static dispatch_queue_t ARMSX2RetroAchievementsQueue()
 {
     static dispatch_queue_t queue;
@@ -3331,6 +3361,34 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     };
 }
 
++ (nonnull NSArray<NSDictionary<NSString *, id> *> *)retroAchievementsForCurrentGame {
+    std::vector<Achievements::AchievementInfo> achievements;
+    if (!Achievements::GetCurrentAchievementList(&achievements))
+        return @[];
+
+    NSMutableArray<NSDictionary<NSString *, id> *> *result = [NSMutableArray arrayWithCapacity:achievements.size()];
+    for (const Achievements::AchievementInfo& achievement : achievements) {
+        [result addObject:@{
+            @"id": @(achievement.id),
+            @"title": ARMSX2NSStringFromStdString(achievement.title),
+            @"description": ARMSX2NSStringFromStdString(achievement.description),
+            @"badgePath": ARMSX2NSStringFromStdString(achievement.badge_path),
+            @"measuredProgress": ARMSX2NSStringFromStdString(achievement.measured_progress),
+            @"points": @(achievement.points),
+            @"unlockTime": @(achievement.unlock_time),
+            @"state": @(achievement.state),
+            @"category": @(achievement.category),
+            @"bucket": @(achievement.bucket),
+            @"unlocked": @(achievement.unlocked),
+            @"measuredPercent": @(achievement.measured_percent),
+            @"rarity": @(achievement.rarity),
+            @"rarityHardcore": @(achievement.rarity_hardcore),
+        }];
+    }
+
+    return result;
+}
+
 + (void)setRetroAchievementsEnabled:(BOOL)enabled {
     const bool enable = enabled ? true : false;
     dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
@@ -3423,6 +3481,9 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     std::string user(trimmedUsername.UTF8String ?: "");
     std::string pass(nativePassword.UTF8String ?: "");
 
+    NSLog(@"@@RA_LOGIN_NATIVE@@ requested username=%@ enabled=%d active=%d",
+        trimmedUsername, EmuConfig.Achievements.Enabled ? 1 : 0, Achievements::IsActive() ? 1 : 0);
+
     dispatch_async(ARMSX2RetroAchievementsQueue(), ^{
         @autoreleasepool {
             if (!EmuConfig.Achievements.Enabled) {
@@ -3446,6 +3507,10 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             NSString* message = result ? @"RetroAchievements login successful." :
                 (error.IsValid() ? ARMSX2NSStringFromStdString(error.GetDescription()) : @"RetroAchievements login failed.");
 
+            if (result && g_p44_settings_interface)
+                g_p44_settings_interface->Save();
+
+            NSLog(@"@@RA_LOGIN_NATIVE@@ result=%d message=%@", result ? 1 : 0, message);
             NSLog(@"[ARMSX2Bridge] RetroAchievements login username=%@ result=%d message=%@", trimmedUsername, result ? 1 : 0, message);
             ARMSX2_PostRetroAchievementsStateChanged();
 

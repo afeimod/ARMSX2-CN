@@ -46,6 +46,17 @@
 #include <string>
 #include <vector>
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
+#if defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+#define ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS 1
+extern "C" void ARMSX2_PostRetroAchievementsNotification(const char* title, const char* message, const char* badge_path);
+#else
+#define ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS 0
+#endif
+
 #ifdef ENABLE_RAINTEGRATION
 // RA_Interface ends up including windows.h, with its silly macros.
 #include "common/RedtapeWindows.h"
@@ -172,6 +183,7 @@ namespace Achievements
 	static void DisplayAchievementSummary();
 	static void UpdateRichPresence(std::unique_lock<std::recursive_mutex>& lock);
 	static void UpdateNotificationPosition();
+	static void PostIOSNotification(const std::string& title, const std::string& message, const std::string& badge_path);
 
 	static std::string GetAchievementBadgePath(const rc_client_achievement_t* achievement, int state);
 	static std::string GetSubsetBadgePath(const rc_client_subset_t* subset);
@@ -467,6 +479,56 @@ bool Achievements::GetCurrentGameStats(GameStats* stats)
 		stats->has_rich_presence = s_has_rich_presence;
 	}
 
+	return true;
+}
+
+bool Achievements::GetCurrentAchievementList(std::vector<AchievementInfo>* achievements)
+{
+	auto lock = GetLock();
+	if (!s_client || s_game_id == 0)
+		return false;
+
+	rc_client_achievement_list_t* list = rc_client_create_achievement_list(s_client,
+		RC_CLIENT_ACHIEVEMENT_CATEGORY_CORE_AND_UNOFFICIAL, RC_CLIENT_ACHIEVEMENT_LIST_GROUPING_PROGRESS);
+	if (!list)
+	{
+		Console.Error("Achievements: rc_client_create_achievement_list() returned null for iOS list");
+		return false;
+	}
+
+	if (achievements)
+	{
+		achievements->clear();
+		for (u32 bucket_index = 0; bucket_index < list->num_buckets; bucket_index++)
+		{
+			const rc_client_achievement_bucket_t& bucket = list->buckets[bucket_index];
+			for (u32 achievement_index = 0; achievement_index < bucket.num_achievements; achievement_index++)
+			{
+				const rc_client_achievement_t* achievement = bucket.achievements[achievement_index];
+				if (!achievement)
+					continue;
+
+				AchievementInfo info;
+				info.title = achievement->title ? achievement->title : "";
+				info.description = achievement->description ? achievement->description : "";
+				info.measured_progress = achievement->measured_progress;
+				info.id = achievement->id;
+				info.points = achievement->points;
+				info.unlock_time = static_cast<u32>(achievement->unlock_time);
+				info.state = achievement->state;
+				info.category = achievement->category;
+				info.bucket = bucket.bucket_type;
+				info.unlocked = achievement->unlocked;
+				info.measured_percent = achievement->measured_percent;
+				info.rarity = achievement->rarity;
+				info.rarity_hardcore = achievement->rarity_hardcore;
+				info.badge_path = GetAchievementBadgePath(achievement, achievement->state);
+				achievements->push_back(std::move(info));
+			}
+		}
+	}
+
+	rc_client_destroy_achievement_list(list);
 	return true;
 }
 
@@ -1224,6 +1286,17 @@ void Achievements::ClearGameHash()
 	std::string().swap(s_game_hash);
 }
 
+void Achievements::PostIOSNotification(const std::string& title, const std::string& message, const std::string& badge_path)
+{
+#if ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS
+	ARMSX2_PostRetroAchievementsNotification(title.c_str(), message.c_str(), badge_path.c_str());
+#else
+	(void)title;
+	(void)message;
+	(void)badge_path;
+#endif
+}
+
 void Achievements::DisplayAchievementSummary()
 {
 	if (EmuConfig.Achievements.Notifications)
@@ -1250,6 +1323,8 @@ void Achievements::DisplayAchievementSummary()
 		{
 			summary = TRANSLATE_STR("Achievements", "This game has no achievements.");
 		}
+
+		PostIOSNotification(title, summary, s_game_icon);
 
 		MTGS::RunOnGSThread([title = std::move(title), summary = std::move(summary), icon = s_game_icon]() {
 			if (ImGuiManager::InitializeFullscreenUI())
@@ -1307,10 +1382,12 @@ void Achievements::HandleUnlockEvent(const rc_client_event_t* event)
 		else
 			title = cheevo->title;
 
+		std::string summary(cheevo->description ? cheevo->description : "");
 		std::string badge_path = GetAchievementBadgePath(cheevo, cheevo->state);
+		PostIOSNotification(title, summary, badge_path);
 
 		MTGS::RunOnGSThread(
-			[title = std::move(title), summary = std::string(cheevo->description), badge_path = std::move(badge_path), id = cheevo->id]() {
+			[title = std::move(title), summary = std::move(summary), badge_path = std::move(badge_path), id = cheevo->id]() {
 				ImGuiFullscreen::AddNotification(fmt::format("achievement_unlock_{}", id), EmuConfig.Achievements.NotificationsDuration,
 					std::move(title), std::move(summary), std::move(badge_path));
 			});
@@ -1338,6 +1415,8 @@ void Achievements::HandleGameCompleteEvent(const rc_client_event_t* event)
 				s_game_summary.num_unlocked_achievements),
 			TRANSLATE_PLURAL_STR("Achievements", "%n points", "Mastery popup", s_game_summary.points_unlocked));
 
+		PostIOSNotification(title, message, s_game_icon);
+
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = s_game_icon]() {
 			if (ImGuiManager::InitializeFullscreenUI())
 			{
@@ -1364,6 +1443,7 @@ void Achievements::HandleSubsetCompleteEvent(const rc_client_event_t* event)
 			TRANSLATE_PLURAL_STR("Achievements", "%n points", "Mastery popup", s_game_summary.points_unlocked));
 
 		std::string badge_path = GetSubsetBadgePath(subset);
+		PostIOSNotification(title, message, badge_path);
 
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), badge_path = std::move(badge_path)]() {
 			if (ImGuiManager::InitializeFullscreenUI())

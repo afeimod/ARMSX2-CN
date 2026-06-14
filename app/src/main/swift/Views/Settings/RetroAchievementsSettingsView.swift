@@ -170,17 +170,18 @@ struct RetroAchievementsSettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: retroAchievementsNotification)) { _ in
             refresh()
         }
-        .alert(settings.localized("RetroAchievements Login"), isPresented: $showingLogin) {
-            TextField(settings.localized("Username"), text: $username)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-            SecureField(settings.localized("Password"), text: $password)
-            Button(settings.localized("Log In")) {
-                beginLogin()
-            }
-            Button(settings.localized("Cancel"), role: .cancel) {}
-        } message: {
-            Text(settings.localized("Use your RetroAchievements account credentials."))
+        .sheet(isPresented: $showingLogin) {
+            RetroAchievementsLoginSheet(
+                username: $username,
+                password: $password,
+                loggingIn: loggingIn,
+                onLogin: beginLogin,
+                onCancel: {
+                    guard !loggingIn else { return }
+                    password = ""
+                    showingLogin = false
+                }
+            )
         }
         .alert(settings.localized(messageTitle), isPresented: $showingMessage) {
             Button(settings.localized("OK"), role: .cancel) {}
@@ -245,11 +246,14 @@ struct RetroAchievementsSettingsView: View {
         }
 
         loggingIn = true
+        NSLog("@@RA_LOGIN_UI@@ begin username_present=1")
         ARMSX2Bridge.loginRetroAchievements(username: trimmedUsername, password: password) { success, message in
             Task { @MainActor in
                 loggingIn = false
                 password = ""
+                showingLogin = false
                 refresh()
+                NSLog("@@RA_LOGIN_UI@@ complete success=\(success ? 1 : 0)")
                 showMessage(title: success ? "Logged In" : "Login Failed", body: settings.localized(message))
             }
         }
@@ -280,5 +284,68 @@ struct RetroAchievementsSettingsView: View {
             return fallback
         }
         return value
+    }
+}
+
+private struct RetroAchievementsLoginSheet: View {
+    @State private var settings = SettingsStore.shared
+    @Binding var username: String
+    @Binding var password: String
+    let loggingIn: Bool
+    let onLogin: () -> Void
+    let onCancel: () -> Void
+
+    private var canSubmit: Bool {
+        !loggingIn &&
+        !username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !password.isEmpty
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField(settings.localized("Username"), text: $username)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .textContentType(.username)
+                        .submitLabel(.next)
+
+                    SecureField(settings.localized("Password"), text: $password)
+                        .textContentType(.password)
+                        .submitLabel(.go)
+                        .onSubmit {
+                            if canSubmit {
+                                onLogin()
+                            }
+                        }
+                } footer: {
+                    Text(settings.localized("Use your RetroAchievements account credentials."))
+                }
+
+                if loggingIn {
+                    Section {
+                        HStack {
+                            ProgressView()
+                            Text(settings.localized("Logging In..."))
+                        }
+                    }
+                }
+            }
+            .navigationTitle(settings.localized("RetroAchievements Login"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(settings.localized("Cancel"), action: onCancel)
+                        .disabled(loggingIn)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(settings.localized("Log In"), action: onLogin)
+                        .disabled(!canSubmit)
+                }
+            }
+        }
+        .interactiveDismissDisabled(loggingIn)
+        .presentationDetents([.medium, .large])
     }
 }
