@@ -823,22 +823,17 @@ struct ActionButtonsView: View {
 }
 
 
-
-
-// [ARMSX2] Dynamic per-skin PNG masks applied to real virtual buttons.
+// [ARMSX2] Refresh Legacy PNG masks applied to real virtual buttons only.
 //
 // Buttons-only version: this does NOT touch PadLayoutEditView.swift.
-// The real virtual-pad buttons use the alpha channel of the currently selected
-// controller skin asset as their interaction geometry:
+// The real virtual-pad buttons use the alpha channel of the bundled
+// ARMSX2 Refresh Legacy PNG assets as their interaction geometry:
 //
-//   app/src/main/assets/app_icons/controller_skins/<selected_skin>/*.png
+//   app/src/main/assets/app_icons/controller_skins/legacy_refresh/*.png
 //
-// The selected layout still controls position/scale/size. The selected skin now
-// controls the actual hit geometry and the press effect silhouette. This means
-// Legacy Refresh, Black, Xbox, White DS, Liquid Glass, Custom per-button PNGs,
-// etc. can each have their own button shapes without hardcoded Circle or
-// RoundedRectangle approximations.
-private final class ARMSX2SkinAlphaBitmap {
+// This is the same mask source used by the legacy-refresh editor geometry script,
+// but here it is applied to the actual buttons/touch surfaces instead of the editor.
+private final class ARMSX2LegacyAlphaBitmap {
     let width: Int
     let height: Int
     let alpha: [UInt8]
@@ -880,21 +875,11 @@ private final class ARMSX2SkinAlphaBitmap {
     }
 }
 
-private final class ARMSX2SkinMaskedButton: UIButton {
+private final class ARMSX2LegacyMaskedButton: UIButton {
     var maskButton: ARMSX2PadButton = .select {
         didSet {
             if oldValue != maskButton {
                 alphaBitmap = nil
-                cachedImage = nil
-            }
-        }
-    }
-
-    var maskSkin: VirtualPadSkin = .armsx2Refresh {
-        didSet {
-            if oldValue != maskSkin {
-                alphaBitmap = nil
-                cachedImage = nil
             }
         }
     }
@@ -904,40 +889,19 @@ private final class ARMSX2SkinMaskedButton: UIButton {
     // 40x22 even if the container is wider/taller.
     var maskVisualSize: CGSize = .zero
 
-    private var alphaBitmap: ARMSX2SkinAlphaBitmap?
-    private var cachedImage: UIImage?
-
-    private func resolvedMaskImage() -> UIImage? {
-        let fileName = ControllerAsset.fileName(for: maskButton)
-        if let image = ControllerAsset.image(named: fileName, skin: maskSkin) {
-            return image
-        }
-
-        // Stable fallback: if a skin has no per-button PNG, use the known-good
-        // legacy_refresh geometry instead of a generic rectangle.
-        if maskSkin != .legacyRefresh,
-           let fallback = ControllerAsset.image(named: fileName, skin: .legacyRefresh) {
-            return fallback
-        }
-
-        return nil
-    }
+    private var alphaBitmap: ARMSX2LegacyAlphaBitmap?
 
     override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         guard bounds.contains(point), bounds.width > 0, bounds.height > 0 else {
             return false
         }
 
-        if cachedImage == nil {
-            cachedImage = resolvedMaskImage()
-        }
-
-        guard let image = cachedImage else {
+        guard let image = ControllerAsset.image(named: ControllerAsset.fileName(for: maskButton), skin: .legacyRefresh) else {
             return super.point(inside: point, with: event)
         }
 
         if alphaBitmap == nil {
-            alphaBitmap = ARMSX2SkinAlphaBitmap(image: image)
+            alphaBitmap = ARMSX2LegacyAlphaBitmap(image: image)
         }
 
         guard let bitmap = alphaBitmap else {
@@ -979,27 +943,15 @@ private final class ARMSX2SkinMaskedButton: UIButton {
     }
 }
 
-private struct ARMSX2SkinMaskPressEffect: View {
+private struct ARMSX2LegacyMaskPressEffect: View {
     let button: ARMSX2PadButton
-    let skin: VirtualPadSkin
     let color: Color
     let isPressed: Bool
     let opacity: Double
 
-    private var maskImage: UIImage? {
-        let fileName = ControllerAsset.fileName(for: button)
-        if let image = ControllerAsset.image(named: fileName, skin: skin) {
-            return image
-        }
-        if skin != .legacyRefresh,
-           let fallback = ControllerAsset.image(named: fileName, skin: .legacyRefresh) {
-            return fallback
-        }
-        return nil
-    }
-
     var body: some View {
-        if isPressed, let image = maskImage {
+        if isPressed,
+           let image = ControllerAsset.image(named: ControllerAsset.fileName(for: button), skin: .legacyRefresh) {
             Image(uiImage: image)
                 .resizable()
                 .renderingMode(.template)
@@ -1023,7 +975,7 @@ private struct ARMSX2SkinMaskPressEffect: View {
         }
     }
 }
-// [/ARMSX2] Dynamic per-skin PNG masks applied to real virtual buttons.
+// [/ARMSX2] Refresh Legacy PNG masks applied to real virtual buttons only.
 
 private struct ControllerPressEffect<S: InsettableShape>: View {
     let shape: S
@@ -1049,7 +1001,7 @@ private struct ControllerPressEffect<S: InsettableShape>: View {
 }
 
 private func ARMSX2UsesUIKitPadPressSurface() -> Bool {
-    // Required for dynamic per-skin alpha-mask button geometry.
+    // Required for ARMSX2 Refresh Legacy alpha-mask button geometry.
     // The SwiftUI fallback only has rectangular contentShape support here.
     true
 }
@@ -1059,14 +1011,12 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     let content: Content
     let onPress: (Bool) -> Void
     let maskButton: ARMSX2PadButton
-    let maskSkin: VirtualPadSkin
     let maskVisualSize: CGSize
 
-    init(onPress: @escaping (Bool) -> Void, maskButton: ARMSX2PadButton, maskSkin: VirtualPadSkin, maskVisualSize: CGSize, @ViewBuilder content: () -> Content) {
+    init(onPress: @escaping (Bool) -> Void, maskButton: ARMSX2PadButton, maskVisualSize: CGSize, @ViewBuilder content: () -> Content) {
         self.content = content()
         self.onPress = onPress
         self.maskButton = maskButton
-        self.maskSkin = maskSkin
         self.maskVisualSize = maskVisualSize
     }
 
@@ -1075,9 +1025,8 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIButton {
-        let button = ARMSX2SkinMaskedButton(type: .custom)
+        let button = ARMSX2LegacyMaskedButton(type: .custom)
         button.maskButton = maskButton
-        button.maskSkin = maskSkin
         button.maskVisualSize = maskVisualSize
         button.backgroundColor = .clear
         button.isExclusiveTouch = false
@@ -1101,9 +1050,8 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIButton, context: Context) {
-        if let masked = uiView as? ARMSX2SkinMaskedButton {
+        if let masked = uiView as? ARMSX2LegacyMaskedButton {
             masked.maskButton = maskButton
-            masked.maskSkin = maskSkin
             masked.maskVisualSize = maskVisualSize
         }
         context.coordinator.onPress = onPress
@@ -1153,7 +1101,7 @@ struct PSBtn: View {
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskSkin: padSkin, maskVisualSize: CGSize(width: sz, height: sz)) {
+                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskVisualSize: CGSize(width: sz, height: sz)) {
                     buttonFace
                         .frame(width: sz, height: sz)
                 }
@@ -1183,7 +1131,7 @@ struct PSBtn: View {
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ARMSX2LegacyMaskPressEffect(button: btn, color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
@@ -1228,7 +1176,7 @@ struct PadBtn: View {
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskSkin: padSkin, maskVisualSize: CGSize(width: w, height: h)) {
+                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskVisualSize: CGSize(width: w, height: h)) {
                     buttonFace
                         .frame(width: w, height: h)
                 }
@@ -1259,7 +1207,7 @@ struct PadBtn: View {
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ARMSX2LegacyMaskPressEffect(button: btn, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
