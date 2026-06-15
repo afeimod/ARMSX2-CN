@@ -120,13 +120,9 @@ private final class ARMSX2GameplayHostingController<Content: View>: UIHostingCon
         // or after the app becomes active. Keep nudging UIKit while the gameplay controller
         // is the active full-screen controller, like a game view controller would do.
         refreshTimer?.invalidate()
-        // Swift 6 / Xcode 16 fix: avoid calling a @MainActor UIKit method from
-        // Timer's @Sendable closure. Use target/selector on the main run loop instead.
-        let timer = Timer(timeInterval: 0.75,
-                          target: self,
-                          selector: #selector(refreshSystemGestureChrome),
-                          userInfo: nil,
-                          repeats: true)
+        let timer = Timer(timeInterval: 0.75, repeats: true) { [weak self] _ in
+            self?.refreshSystemGestureChrome()
+        }
         refreshTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
