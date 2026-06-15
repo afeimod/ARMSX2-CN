@@ -7,30 +7,13 @@ import SwiftUI
 final class AppState: @unchecked Sendable {
     static let shared = AppState()
     static let systemChromeNeedsUpdateNotification = Notification.Name("ARMSX2iOSSystemChromeNeedsUpdate")
-    static let emulationPresentationNeedsUpdateNotification = Notification.Name("ARMSX2iOSEmulationPresentationNeedsUpdate")
-
-    // ARMSX2_ALUNE_STYLE_HOME_BAR_V3
-    // Alune-style presentation signal: gameplay/BIOS is hosted by a dedicated UIKit
-    // controller so UIKit evaluates Home Indicator policy on the active game controller.
-    static func requestEmulationPresentationUpdate() {
-        DispatchQueue.main.async {
-            NotificationCenter.default.post(name: Self.emulationPresentationNeedsUpdateNotification, object: nil)
-            NotificationCenter.default.post(name: Self.systemChromeNeedsUpdateNotification, object: nil)
-        }
-    }
 
     enum Screen {
         case menu
         case playing
     }
 
-    var currentScreen: Screen = .menu {
-        didSet {
-            if oldValue != currentScreen {
-                Self.requestEmulationPresentationUpdate()
-            }
-        }
-    }
+    var currentScreen: Screen = .menu
     var selectedTab: Int = 0
     var runningGameName: String? = nil
     var hideStatusBar: Bool = false {

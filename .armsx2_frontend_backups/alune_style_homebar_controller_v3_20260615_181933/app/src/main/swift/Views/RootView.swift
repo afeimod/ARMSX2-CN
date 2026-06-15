@@ -12,15 +12,14 @@ struct RootView: View {
 
     var body: some View {
         ZStack {
-            // ARMSX2_ALUNE_STYLE_HOME_BAR_V3
-            // RootView stays as the menu shell only. Gameplay/BIOS is presented by
-            // ARMSX2RootContainerController as a dedicated UIKit controller, like Alune.
-            Color(uiColor: .systemGroupedBackground)
-                .ignoresSafeArea()
-            MenuTabView()
-                .opacity(appState.currentScreen == .menu ? 1 : 0)
-                .allowsHitTesting(appState.currentScreen == .menu)
-                .accessibilityHidden(appState.currentScreen != .menu)
+            switch appState.currentScreen {
+            case .menu:
+                Color(uiColor: .systemGroupedBackground)
+                    .ignoresSafeArea()
+                MenuTabView()
+            case .playing:
+                GameScreenView()
+            }
 
             if showBootSplash {
                 BootSplashView {
