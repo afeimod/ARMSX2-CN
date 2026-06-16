@@ -243,6 +243,7 @@ struct GameScreenView: View {
         }
         .onAppear {
             enterGameplaySystemChromeMode()
+            AppState.requestEmulationPresentationUpdate()
             syncFullscreenStateFromWindow()
             applyInitialFullscreenPreference()
             refreshExternalControllerConnectionState()
