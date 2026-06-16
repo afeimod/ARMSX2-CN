@@ -1623,6 +1623,9 @@ struct PerGameSettingsPanel: View {
     @State private var skipDrawStart: Int
     @State private var skipDrawEndOverride: Bool
     @State private var skipDrawEnd: Int
+    @State private var globalVolumePercent: Int
+    @State private var volumeOverride: Bool
+    @State private var volumePercent: Int
     @State private var eeCoreType: Int
     @State private var mtvu: Bool
     @State private var enableCheats: Bool
@@ -1644,6 +1647,11 @@ struct PerGameSettingsPanel: View {
         // this view never re-scans the disc image during init while a game is running.
         let info = preloadedSettings ?? ARMSX2Bridge.gameSettings(forISO: game.bootName)
         _enabled = State(initialValue: Self.boolValue(info["enabled"], defaultValue: false))
+        let inheritedVolume = Self.clampedVolume(Self.intValue(info["globalVolumePercent"], defaultValue: SettingsStore.defaultEmulatorVolumePercent))
+        let loadedVolume = Self.clampedVolume(Self.intValue(info["volumePercent"], defaultValue: inheritedVolume))
+        _globalVolumePercent = State(initialValue: inheritedVolume)
+        _volumeOverride = State(initialValue: Self.boolValue(info["hasVolumeOverride"], defaultValue: false))
+        _volumePercent = State(initialValue: loadedVolume)
         _upscaleMultiplier = State(initialValue: Self.floatValue(info["upscaleMultiplier"], defaultValue: 1.0))
         _aspectRatio = State(initialValue: Self.normalizedAspect(info["aspectRatio"] as? String))
         _textureFiltering = State(initialValue: Self.intValue(info["textureFiltering"], defaultValue: 2))
@@ -1712,6 +1720,23 @@ struct PerGameSettingsPanel: View {
         )
     }
 
+    private var volumeOverrideBinding: Binding<Bool> {
+        Binding(
+            get: { volumeOverride },
+            set: { newValue in
+                volumeOverride = newValue
+                volumePercent = newValue ? Self.clampedVolume(volumePercent) : globalVolumePercent
+            }
+        )
+    }
+
+    private var volumeSliderBinding: Binding<Double> {
+        Binding(
+            get: { Double(volumePercent) },
+            set: { volumePercent = Self.clampedVolume(Int($0.rounded())) }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             Form {
@@ -1739,6 +1764,56 @@ struct PerGameSettingsPanel: View {
                 Section {
                     Toggle(settings.localized("Use Per-Game Overrides"), isOn: $enabled)
                     Text(settings.localized("Overrides are saved for this game only and apply on the next boot/reset of this title."))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Section(settings.localized("Audio")) {
+                    Toggle(settings.localized("Use Custom Volume"), isOn: volumeOverrideBinding)
+                        .disabled(!enabled)
+
+                    if volumeOverride {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(settings.localized("Emulator Volume"))
+                                Spacer()
+                                Text(Self.formatPercent(volumePercent))
+                                    .foregroundStyle(.secondary)
+                                    .font(.callout.monospacedDigit())
+                            }
+
+                            Slider(value: volumeSliderBinding, in: 0...100, step: 1)
+                                .disabled(!enabled)
+                                .accessibilityLabel(settings.localized("Per-Game Emulator Volume"))
+                                .accessibilityValue(Self.formatPercent(volumePercent))
+                                .accessibilityHint(settings.localized("Adjusts emulator audio for this game without changing iOS system volume or other apps."))
+
+                            HStack {
+                                Text("0%")
+                                Spacer()
+                                Button(settings.localized("Reset to Global")) {
+                                    volumeOverride = false
+                                    volumePercent = globalVolumePercent
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(!enabled)
+                                Spacer()
+                                Text("100%")
+                            }
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                        }
+                    } else {
+                        HStack {
+                            Text(settings.localized("Using Global"))
+                            Spacer()
+                            Text(Self.formatPercent(globalVolumePercent))
+                                .foregroundStyle(.secondary)
+                                .font(.callout.monospacedDigit())
+                        }
+                    }
+
+                    Text(settings.localized("Custom volume changes this game's emulator audio only. Turn it off to inherit the global Emulator Volume setting."))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1997,6 +2072,8 @@ struct PerGameSettingsPanel: View {
                 skipDrawStart: Int32(normalizedSkipDraw.start),
                 skipDrawEndOverride: skipDrawEndOverride,
                 skipDrawEnd: Int32(normalizedSkipDraw.end),
+                volumeOverride: enabled && volumeOverride,
+                volumePercent: Int32(volumePercent),
                 eeCoreType: Int32(eeCoreType),
                 mtvu: mtvu,
                 enableCheats: enableCheats,
@@ -2031,6 +2108,8 @@ struct PerGameSettingsPanel: View {
                 skipDrawStart: Int32(normalizedSkipDraw.start),
                 skipDrawEndOverride: skipDrawEndOverride,
                 skipDrawEnd: Int32(normalizedSkipDraw.end),
+                volumeOverride: enabled && volumeOverride,
+                volumePercent: Int32(volumePercent),
                 eeCoreType: Int32(eeCoreType),
                 mtvu: mtvu,
                 enableCheats: enableCheats,
@@ -2039,7 +2118,10 @@ struct PerGameSettingsPanel: View {
                 enableGameDBHardwareFixes: enableGameDBHardwareFixes
             )
         }
-        statusMessage = enabled ? "\(settings.localized("Saved for")) \(game.metadata["serial"] ?? game.name). \(settings.localized("Reset or relaunch the game to apply."))" : settings.localized("Per-game overrides cleared.")
+        let applyMessage = savesToRunningGame ?
+            settings.localized("Volume changes apply now; some settings need reset or relaunch.") :
+            settings.localized("Reset or relaunch the game to apply.")
+        statusMessage = enabled ? "\(settings.localized("Saved for")) \(game.metadata["serial"] ?? game.name). \(applyMessage)" : settings.localized("Per-game overrides cleared.")
     }
 
     private func normalizeSkipDrawRangeIfNeeded() {
@@ -2102,6 +2184,14 @@ struct PerGameSettingsPanel: View {
 
     private static func clampedSkipDraw(_ value: Int) -> Int {
         min(max(value, SettingsStore.skipDrawRange.lowerBound), SettingsStore.skipDrawRange.upperBound)
+    }
+
+    private static func clampedVolume(_ value: Int) -> Int {
+        SettingsStore.clampedEmulatorVolumePercent(value)
+    }
+
+    private static func formatPercent(_ value: Int) -> String {
+        "\(clampedVolume(value))%"
     }
 
     private static func normalizedSkipDrawEnd(start: Int, end: Int, startOverride: Bool, endOverride: Bool) -> Int {

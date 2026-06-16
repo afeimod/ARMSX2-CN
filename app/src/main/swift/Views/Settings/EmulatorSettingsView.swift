@@ -115,6 +115,47 @@ struct EmulatorSettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section(settings.localized("Audio")) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(settings.localized("Emulator Volume"))
+                        Spacer()
+                        Text(Self.formatPercent(settings.emulatorVolumePercent))
+                            .foregroundStyle(.secondary)
+                            .font(.callout.monospacedDigit())
+                    }
+
+                    Slider(
+                        value: Binding(
+                            get: { Double(settings.emulatorVolumePercent) },
+                            set: { settings.emulatorVolumePercent = Int($0.rounded()) }
+                        ),
+                        in: 0...100,
+                        step: 1
+                    )
+                    .accessibilityLabel(settings.localized("Emulator Volume"))
+                    .accessibilityValue(Self.formatPercent(settings.emulatorVolumePercent))
+                    .accessibilityHint(settings.localized("Adjusts emulator game audio without changing iOS system volume or other apps."))
+
+                    HStack {
+                        Text("0%")
+                        Spacer()
+                        Button(settings.localized("Reset")) {
+                            settings.emulatorVolumePercent = SettingsStore.defaultEmulatorVolumePercent
+                        }
+                        .buttonStyle(.borderless)
+                        Spacer()
+                        Text("100%")
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                }
+
+                Text(settings.localized("Controls emulator and game audio only. iOS system volume and other apps stay separate."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section(settings.localized("Performance")) {
                 Toggle(settings.localized("Frame Limiter"), isOn: $settings.frameLimiterEnabled)
 
@@ -248,5 +289,9 @@ struct EmulatorSettingsView: View {
 
     private static func formatFPS(_ value: Float) -> String {
         String(format: "%.2f FPS", value)
+    }
+
+    private static func formatPercent(_ value: Int) -> String {
+        "\(SettingsStore.clampedEmulatorVolumePercent(value))%"
     }
 }

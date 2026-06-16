@@ -68,6 +68,7 @@ final class SettingsStore: @unchecked Sendable {
     static let minFastForwardScalar: Float = 1.25
     static let maxFastForwardScalar: Float = 10.0
     static let defaultFastForwardScalar: Float = 2.0
+    static let defaultEmulatorVolumePercent = 100
     static let textureOffsetRange = -4096...4096
     static let skipDrawRange = 0...5000
     static let defaultOsdPerformancePosition = 3
@@ -138,6 +139,17 @@ final class SettingsStore: @unchecked Sendable {
             }
             guard !suppressINIWrites else { return }
             ARMSX2Bridge.setINIFloat("Framerate", key: "TurboScalar", value: fastForwardScalar)
+        }
+    }
+    var emulatorVolumePercent: Int {
+        didSet {
+            let normalized = Self.clampedEmulatorVolumePercent(emulatorVolumePercent)
+            guard emulatorVolumePercent == normalized else {
+                emulatorVolumePercent = normalized
+                return
+            }
+            guard !suppressINIWrites else { return }
+            ARMSX2Bridge.setEmulatorVolumePercent(Int32(normalized))
         }
     }
     var ntscFramerate: Float {
@@ -597,6 +609,7 @@ final class SettingsStore: @unchecked Sendable {
         targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: loadedNTSCFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
         fastForwardScalar = Self.clampedSpeedScalar(ARMSX2Bridge.getINIFloat("Framerate", key: "TurboScalar", defaultValue: Self.defaultFastForwardScalar))
+        emulatorVolumePercent = Self.clampedEmulatorVolumePercent(Int(ARMSX2Bridge.emulatorVolumePercent()))
         // Boot
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         // Advanced Speedhacks
@@ -728,6 +741,7 @@ final class SettingsStore: @unchecked Sendable {
         targetFPS = Self.targetFPS(fromNominalScalar: nominalScalar, baseFramerate: ntscFramerate)
         Self.sanitizeNominalScalarIfNeeded(nominalScalar)
         fastForwardScalar = Self.clampedSpeedScalar(ARMSX2Bridge.getINIFloat("Framerate", key: "TurboScalar", defaultValue: Self.defaultFastForwardScalar))
+        emulatorVolumePercent = Self.clampedEmulatorVolumePercent(Int(ARMSX2Bridge.emulatorVolumePercent()))
         fastCDVD = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "fastCDVD", defaultValue: false)
         eeCycleRate = Int(ARMSX2Bridge.getINIInt("EmuCore/Speedhacks", key: "EECycleRate", defaultValue: 0))
         vu1Instant = ARMSX2Bridge.getINIBool("EmuCore/Speedhacks", key: "vu1Instant", defaultValue: true)
@@ -849,6 +863,10 @@ final class SettingsStore: @unchecked Sendable {
         guard scalar.isFinite else { return defaultFastForwardScalar }
         let stepped = (scalar * 4.0).rounded() / 4.0
         return min(max(stepped, minFastForwardScalar), maxFastForwardScalar)
+    }
+
+    static func clampedEmulatorVolumePercent(_ value: Int) -> Int {
+        min(max(value, 0), 100)
     }
 
     private static func clampedAnalogStickScale(_ scale: Float) -> Float {
@@ -997,6 +1015,7 @@ final class SettingsStore: @unchecked Sendable {
         fastForwardRuntimeEnabled = false
         frameLimiterDisabledForFastForward = false
         fastForwardScalar = Self.defaultFastForwardScalar
+        emulatorVolumePercent = Self.defaultEmulatorVolumePercent
         ntscFramerate = 59.94
         palFramerate = 50.0
         fastCDVD = false

@@ -21,6 +21,7 @@ extern "C" bool ARMSX2_IsSDLFullscreen();
 #include "SIO/Sio.h"
 #include "Counters.h"
 #include "GS/GSState.h"
+#include "SPU2/spu2.h"
 #include "GameList.h"
 #include "ps2/BiosTools.h"
 #include "pcsx2/Host.h"
@@ -71,6 +72,7 @@ static NSString* const ARMSX2CompatibilityProfileBranches = @"branches";
 static NSString* const ARMSX2CompatibilityProfileCustom = @"custom";
 static constexpr int ARMSX2UseGlobalIntSentinel = -1;
 static constexpr int ARMSX2TriFilterUseGlobalSentinel = std::numeric_limits<int>::min();
+static constexpr int ARMSX2DefaultAudioVolumePercent = 100;
 
 static int ARMSX2ClampInt(int value, int minValue, int maxValue)
 {
@@ -1427,6 +1429,10 @@ static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
     const bool globalEnableGameDBHardwareFixes = g_p44_settings_interface ? !g_p44_settings_interface->GetBoolValue("EmuCore/GS", "UserHacks", false) : true;
     const int globalEECoreType = g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("EmuCore/CPU", "CoreType", 2) : 2;
     const bool globalMTVU = g_p44_settings_interface ? g_p44_settings_interface->GetBoolValue("EmuCore/Speedhacks", "vuThread", true) : true;
+    const int globalVolumePercent = ARMSX2ClampInt(
+        g_p44_settings_interface ? g_p44_settings_interface->GetIntValue("SPU2/Output", "StandardVolume", ARMSX2DefaultAudioVolumePercent) : ARMSX2DefaultAudioVolumePercent,
+        0,
+        ARMSX2DefaultAudioVolumePercent);
     return [@{
         @"enabled": @NO,
         @"path": @"",
@@ -1464,6 +1470,9 @@ static NSMutableDictionary<NSString*, id>* ARMSX2BuildGlobalGameSettingsResult()
         @"enableGameDBHardwareFixes": @(globalEnableGameDBHardwareFixes),
         @"eeCoreType": @(globalEECoreType),
         @"mtvu": @(globalMTVU),
+        @"globalVolumePercent": @(globalVolumePercent),
+        @"volumePercent": @(globalVolumePercent),
+        @"hasVolumeOverride": @NO,
     } mutableCopy];
 }
 
@@ -1519,9 +1528,20 @@ static void ARMSX2ApplyPerGameSettingsOverrides(NSMutableDictionary<NSString*, i
         si.ContainsValue("EmuCore/GS", "UserHacks") ||
         si.ContainsValue("EmuCore/CPU", "CoreType") ||
         si.ContainsValue("EmuCore/CPU", "UseArm64Dynarec") ||
-        si.ContainsValue("EmuCore/Speedhacks", "vuThread");
+        si.ContainsValue("EmuCore/Speedhacks", "vuThread") ||
+        si.ContainsValue("SPU2/Output", "StandardVolume") ||
+        si.ContainsValue("SPU2/Output", "FastForwardVolume");
 
     result[@"enabled"] = @(hasKnownOverride);
+    const bool hasStandardVolumeOverride = si.ContainsValue("SPU2/Output", "StandardVolume");
+    const bool hasFastForwardVolumeOverride = si.ContainsValue("SPU2/Output", "FastForwardVolume");
+    const bool hasVolumeOverride = hasStandardVolumeOverride || hasFastForwardVolumeOverride;
+    const int inheritedVolumePercent = [result[@"volumePercent"] intValue];
+    const int volumePercent = hasStandardVolumeOverride ?
+        si.GetIntValue("SPU2/Output", "StandardVolume", inheritedVolumePercent) :
+        (hasFastForwardVolumeOverride ? si.GetIntValue("SPU2/Output", "FastForwardVolume", inheritedVolumePercent) : inheritedVolumePercent);
+    result[@"hasVolumeOverride"] = @(hasVolumeOverride);
+    result[@"volumePercent"] = @(ARMSX2ClampInt(volumePercent, 0, ARMSX2DefaultAudioVolumePercent));
     NSString* currentAspect = [result[@"aspectRatio"] isKindOfClass:NSString.class] ? result[@"aspectRatio"] : @"Auto 4:3/3:2";
     result[@"upscaleMultiplier"] = @(si.GetFloatValue("EmuCore/GS", "upscale_multiplier", [result[@"upscaleMultiplier"] floatValue]));
     result[@"aspectRatio"] = ARMSX2NSStringFromStdString(si.GetStringValue("EmuCore/GS", "AspectRatio", currentAspect.UTF8String));
@@ -1583,6 +1603,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                                 int skipDrawStart,
                                                 BOOL skipDrawEndOverride,
                                                 int skipDrawEnd,
+                                                BOOL volumeOverride,
+                                                int volumePercent,
                                                 int eeCoreType,
                                                 BOOL mtvu,
                                                 BOOL enableCheats,
@@ -1658,6 +1680,15 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         else
             si.DeleteValue("EmuCore/GS", "UserHacks_SkipDraw_End");
 
+        if (volumeOverride) {
+            const int clampedVolumePercent = ARMSX2ClampInt(volumePercent, 0, ARMSX2DefaultAudioVolumePercent);
+            si.SetIntValue("SPU2/Output", "StandardVolume", clampedVolumePercent);
+            si.SetIntValue("SPU2/Output", "FastForwardVolume", clampedVolumePercent);
+        } else {
+            si.DeleteValue("SPU2/Output", "StandardVolume");
+            si.DeleteValue("SPU2/Output", "FastForwardVolume");
+        }
+
         si.SetBoolValue("EmuCore", "EnableCheats", enableCheats);
         si.SetBoolValue("EmuCore", "EnablePatches", enablePatches);
         si.SetBoolValue("EmuCore", "EnableGameFixes", enableGameFixes);
@@ -1702,6 +1733,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVU");
         si.DeleteValue("ARMSX2iOS/PerGame", "ManualMTVUVersion");
         si.DeleteValue("EmuCore/Speedhacks", "vuThread");
+        si.DeleteValue("SPU2/Output", "StandardVolume");
+        si.DeleteValue("SPU2/Output", "FastForwardVolume");
         si.RemoveEmptySections();
     }
 
@@ -2231,6 +2264,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
             skipDrawStart:(int)skipDrawStart
        skipDrawEndOverride:(BOOL)skipDrawEndOverride
               skipDrawEnd:(int)skipDrawEnd
+         volumeOverride:(BOOL)volumeOverride
+           volumePercent:(int)volumePercent
                     eeCoreType:(int)eeCoreType
                           mtvu:(BOOL)mtvu
                   enableCheats:(BOOL)enableCheats
@@ -2250,7 +2285,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                         alignSprite, mergeSpriteOverride, mergeSprite, wildArmsOffsetOverride,
                                         wildArmsOffset, textureOffsetXOverride, textureOffsetX,
                                         textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
-                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd, eeCoreType, mtvu,
+                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd,
+                                        volumeOverride, volumePercent, eeCoreType, mtvu,
                                         enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
 }
 
@@ -2278,6 +2314,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                    skipDrawStart:(int)skipDrawStart
                               skipDrawEndOverride:(BOOL)skipDrawEndOverride
                                      skipDrawEnd:(int)skipDrawEnd
+                                   volumeOverride:(BOOL)volumeOverride
+                                     volumePercent:(int)volumePercent
                                       eeCoreType:(int)eeCoreType
                                             mtvu:(BOOL)mtvu
                                     enableCheats:(BOOL)enableCheats
@@ -2303,7 +2341,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
                                         alignSprite, mergeSpriteOverride, mergeSprite, wildArmsOffsetOverride,
                                         wildArmsOffset, textureOffsetXOverride, textureOffsetX,
                                         textureOffsetYOverride, textureOffsetY, skipDrawStartOverride,
-                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd, eeCoreType, mtvu,
+                                        skipDrawStart, skipDrawEndOverride, skipDrawEnd,
+                                        volumeOverride, volumePercent, eeCoreType, mtvu,
                                         enableCheats, enablePatches, enableGameFixes, enableGameDBHardwareFixes);
 
     if (VMManager::HasValidVM()) {
@@ -2550,6 +2589,47 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
     EmuConfig.GS.OsdShowIndicators = GSConfig.OsdShowIndicators;
     EmuConfig.GS.OsdShowSettings = GSConfig.OsdShowSettings;
     EmuConfig.GS.OsdShowInputs = GSConfig.OsdShowInputs;
+}
+
++ (int)emulatorVolumePercent {
+    const int value = g_p44_settings_interface ?
+        g_p44_settings_interface->GetIntValue("SPU2/Output", "StandardVolume", ARMSX2DefaultAudioVolumePercent) :
+        ARMSX2DefaultAudioVolumePercent;
+    return ARMSX2ClampInt(value, 0, ARMSX2DefaultAudioVolumePercent);
+}
+
++ (void)setEmulatorVolumePercent:(int)value {
+    if (!g_p44_settings_interface)
+        return;
+
+    const int clampedValue = ARMSX2ClampInt(value, 0, ARMSX2DefaultAudioVolumePercent);
+    g_p44_settings_interface->SetIntValue("SPU2/Output", "StandardVolume", clampedValue);
+    g_p44_settings_interface->SetIntValue("SPU2/Output", "FastForwardVolume", clampedValue);
+    g_p44_settings_interface->Save();
+
+    if (!VMManager::HasValidVM())
+        return;
+
+    Host::RunOnCPUThread([clampedValue]() {
+        if (!VMManager::HasValidVM())
+            return;
+
+        const std::string serial = VMManager::GetDiscSerial();
+        const u32 crc = VMManager::GetDiscCRC();
+        if (crc != 0) {
+            INISettingsInterface si(VMManager::GetGameSettingsPath(serial, crc));
+            if (si.Load() &&
+                (si.ContainsValue("SPU2/Output", "StandardVolume") ||
+                 si.ContainsValue("SPU2/Output", "FastForwardVolume"))) {
+                return;
+            }
+        }
+
+        const Pcsx2Config oldConfig(EmuConfig);
+        EmuConfig.SPU2.StandardVolume = clampedValue;
+        EmuConfig.SPU2.FastForwardVolume = clampedValue;
+        SPU2::CheckForConfigChanges(oldConfig);
+    }, false);
 }
 
 // ============================================================
