@@ -2,6 +2,8 @@ package com.armsx2.ui
 
 import android.content.Context
 import android.net.Uri
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -13,15 +15,18 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items as lazyRowItems
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
@@ -33,16 +38,28 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
+import com.armsx2.R
 import com.armsx2.FilenameParser
 import com.armsx2.GameInfo
 import com.armsx2.GamePlatform
@@ -50,6 +67,9 @@ import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 private val GAME_EXTENSIONS = setOf(
     "iso", "chd", "cso", "zso", "gz", "bin", "mdf", "img", "nrg", "dump"
@@ -70,6 +90,8 @@ object GamesList {
     private val scanError = mutableStateOf<String?>(null)
     private val lastScannedRoms = mutableStateOf<String?>(null)
     private val cacheLoaded = mutableStateOf(false)
+    private val recentUris = mutableStateListOf<String>()
+    private val recentLoaded = mutableStateOf(false)
 
     @Composable
     fun GamesRow() {
@@ -84,6 +106,11 @@ object GamesList {
 
         LaunchedEffect(romsKey) {
             if (romsDirs.isEmpty()) return@LaunchedEffect
+
+            if (!recentLoaded.value) {
+                recentLoaded.value = true
+                loadRecents()
+            }
 
             if (!cacheLoaded.value) {
                 cacheLoaded.value = true
@@ -101,7 +128,20 @@ object GamesList {
             }
         }
 
-        Box(Modifier.fillMaxSize().padding(16.dp)) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF001124),
+                            Color(0xFF002647),
+                            Color(0xFF000711),
+                        ),
+                    ),
+                )
+                .padding(16.dp),
+        ) {
             when {
                 romsDirs.isEmpty() -> EmptyMessage(
                     "No ROMs folders configured",
@@ -113,42 +153,7 @@ object GamesList {
                     color = Color(0xFFFF6B6B),
                 )
                 else -> {
-                    LazyVerticalGrid(
-                        columns = GridCells.Fixed(5),
-                        contentPadding = PaddingValues(4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(8.dp),
-                        modifier = Modifier.fillMaxSize(),
-                    ) {
-                        item(key = "__refresh__") {
-                            BoxWithConstraints {
-                                val gameCardHeight = maxWidth / 0.7f + 88.dp
-                                Column(
-                                    Modifier.height(gameCardHeight),
-                                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                                ) {
-                                    RefreshCard(
-                                        modifier = Modifier.weight(1f),
-                                        isScanning = scanning.value,
-                                        onRefresh = {
-                                            if (!scanning.value && romsDirs.isNotEmpty())
-                                                scanRoms(context, romsDirs, romsKey)
-                                        },
-                                    )
-                                    BiosCard(
-                                        modifier = Modifier.weight(1f),
-                                        onLaunch = {
-                                            WindowImpl.showLibrary.value = false
-                                            Main.startBios()
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                        items(games, key = { it.uri.toString() }) { game ->
-                            GameCard(game)
-                        }
-                    }
+                    LibraryScreen(context, romsDirs, romsKey)
                 }
             }
         }
@@ -161,6 +166,504 @@ object GamesList {
      *  serials — bump again any time the probe coverage changes. */
     private fun cacheKeyForDirs(dirs: List<String>): String =
         dirs.toSet().sorted().joinToString("|") + "|v2"
+
+    @Composable
+    private fun LibraryScreen(context: Context, romsDirs: List<String>, romsKey: String) {
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            val landscape = maxWidth >= maxHeight
+            if (landscape) {
+                Row(
+                    Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(28.dp))
+                        .background(Color(0xFF00101F)),
+                ) {
+                    LibraryNavRail(landscape = true)
+                    LibraryContent(
+                        context = context,
+                        romsDirs = romsDirs,
+                        romsKey = romsKey,
+                        landscape = true,
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            } else {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .clip(RoundedCornerShape(28.dp))
+                        .background(Color(0xFF00101F)),
+                ) {
+                    LibraryContent(
+                        context = context,
+                        romsDirs = romsDirs,
+                        romsKey = romsKey,
+                        landscape = false,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 86.dp),
+                    )
+                    LibraryNavRail(
+                        landscape = false,
+                        modifier = Modifier.align(Alignment.BottomCenter),
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun LibraryContent(
+        context: Context,
+        romsDirs: List<String>,
+        romsKey: String,
+        landscape: Boolean,
+        modifier: Modifier = Modifier,
+    ) {
+        val currentShelfGames = recentUris
+            .mapNotNull { uri -> games.firstOrNull { it.uri.toString() == uri } }
+            .take(5)
+            .ifEmpty { games.take(if (landscape) 8 else 6) }
+        val libraryRows = games.chunked(if (landscape) 8 else 5)
+
+        Box(modifier = modifier.fillMaxSize()) {
+            // Base reactor-blue wash (unchanged palette).
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.radialGradient(
+                            listOf(
+                                Color(0xFF07355E),
+                                Color(0xFF001C35),
+                                Color(0xFF000814),
+                            ),
+                        ),
+                    ),
+            )
+            // "Inside the core reactor": the app's glowing monolith stands tall
+            // behind the shelves, scaled past the screen height and dimmed so it
+            // reads as ambient light rather than a foreground object. The cover
+            // cards sit over it.
+            Image(
+                painter = painterResource(id = R.drawable.savetowerforeground),
+                contentDescription = null,
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .fillMaxHeight(1.25f)
+                    .graphicsLayer { alpha = 0.30f },
+                contentScale = ContentScale.Fit,
+            )
+            // Vertical vignette so the tower glow falls off toward the bottom and
+            // the shelf rows keep their contrast.
+            Box(
+                Modifier
+                    .matchParentSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color(0x66000814)),
+                        ),
+                    ),
+            )
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(
+                        horizontal = if (landscape) 26.dp else 18.dp,
+                        vertical = if (landscape) 22.dp else 20.dp,
+                    ),
+                verticalArrangement = Arrangement.spacedBy(if (landscape) 18.dp else 16.dp),
+                contentPadding = PaddingValues(bottom = 18.dp),
+            ) {
+            if (currentShelfGames.isNotEmpty()) {
+                item(key = "__current_title__") {
+                    HeaderRow(
+                        title = "Recently Played",
+                        context = context,
+                        romsDirs = romsDirs,
+                        romsKey = romsKey,
+                    )
+                }
+                item(key = "__current_shelf__") {
+                    GameShelf(
+                        games = currentShelfGames,
+                        label = null,
+                        coverWidth = if (landscape) 92.dp else 98.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (landscape) 204.dp else 178.dp),
+                    )
+                }
+            } else {
+                item(key = "__empty_actions__") {
+                    HeaderRow(
+                        title = "Library",
+                        context = context,
+                        romsDirs = romsDirs,
+                        romsKey = romsKey,
+                    )
+                }
+            }
+
+            if (games.isNotEmpty()) {
+                item(key = "__library_title__") {
+                    SectionHeader("Library")
+                }
+                items(libraryRows, key = { row ->
+                    row.joinToString("|") { it.uri.toString() }
+                }) { row ->
+                    val label = shelfLabelFor(row)
+                    GameShelf(
+                        games = row,
+                        label = label,
+                        coverWidth = if (landscape) 86.dp else 98.dp,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(if (landscape) 188.dp else 214.dp),
+                    )
+                }
+            }
+            }
+        }
+    }
+
+    @Composable
+    private fun HeaderRow(
+        title: String,
+        context: Context,
+        romsDirs: List<String>,
+        romsKey: String,
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SectionHeader(
+                text = "$title⌄",
+                modifier = Modifier.weight(1f),
+            )
+            ActionChip("Scan") {
+                if (!scanning.value && romsDirs.isNotEmpty())
+                    scanRoms(context, romsDirs, romsKey)
+            }
+            ActionChip("BIOS") {
+                WindowImpl.showLibrary.value = false
+                Main.startBios()
+            }
+            ActionChip("Cards") {
+                MemoryCardManager.visible.value = true
+            }
+            ActionChip("Setup") {
+                SetupImpl.resetForReentry()
+                Main.reopenSetup()
+            }
+        }
+    }
+
+    @Composable
+    private fun ActionChip(label: String, onClick: () -> Unit) {
+        Box(
+            Modifier
+                .height(34.dp)
+                .clip(RoundedCornerShape(17.dp))
+                .background(Color.White.copy(alpha = 0.10f))
+                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(17.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                label,
+                color = Color.White,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+            )
+        }
+    }
+
+    @Composable
+    private fun LibraryNavRail(landscape: Boolean, modifier: Modifier = Modifier) {
+        if (landscape) {
+            Column(
+                modifier
+                    .fillMaxHeight()
+                    .width(82.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xFF06416E), Color(0xFF002C50)),
+                        ),
+                    )
+                    .padding(vertical = 28.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.SpaceBetween,
+            ) {
+                NavButton(NavKind.Library, "LIBRARY", active = true) {}
+                NavButton(NavKind.Settings, null, active = false) { InGameOverlay.openGlobalSettings() }
+            }
+        } else {
+            Row(
+                modifier
+                    .fillMaxWidth()
+                    .height(82.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0xCC0E4B79), Color(0xEE002E52)),
+                        ),
+                    )
+                    .padding(horizontal = 28.dp, vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                NavButton(NavKind.Library, "LIBRARY", active = true) {}
+                NavButton(NavKind.Settings, null, active = false) { InGameOverlay.openGlobalSettings() }
+            }
+        }
+    }
+
+    @Composable
+    private fun NavButton(kind: NavKind, label: String?, active: Boolean, onClick: () -> Unit) {
+        Column(
+            Modifier
+                .width(70.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .clickable(onClick = onClick)
+                .padding(vertical = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(42.dp)
+                    .clip(if (active) RoundedCornerShape(12.dp) else CircleShape)
+                    .background(if (active) Color.White.copy(alpha = 0.10f) else Color.Transparent),
+                contentAlignment = Alignment.Center,
+            ) {
+                NavGlyph(kind, active)
+            }
+            if (label != null) {
+                Text(
+                    label,
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+
+    private enum class NavKind { Library, Settings }
+
+    @Composable
+    private fun NavGlyph(kind: NavKind, active: Boolean) {
+        val color = Color.White.copy(alpha = if (active) 1f else 0.78f)
+        Canvas(Modifier.size(36.dp)) {
+            val min = size.minDimension
+            val stroke = Stroke(width = min * 0.075f, cap = StrokeCap.Round)
+            when (kind) {
+                NavKind.Library -> {
+                    val cell = min * 0.24f
+                    val gap = min * 0.16f
+                    val total = cell * 2f + gap
+                    val left = (size.width - total) / 2f
+                    val top = (size.height - total) / 2f
+                    repeat(2) { row ->
+                        repeat(2) { col ->
+                            drawRoundRect(
+                                color = color,
+                                topLeft = Offset(left + col * (cell + gap), top + row * (cell + gap)),
+                                size = Size(cell, cell),
+                                cornerRadius = CornerRadius(cell * 0.18f, cell * 0.18f),
+                                style = stroke,
+                            )
+                        }
+                    }
+                }
+                NavKind.Settings -> {
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val base = min * 0.28f
+                    val toothInner = min * 0.36f
+                    val toothOuter = min * 0.46f
+                    repeat(8) { index ->
+                        val angle = (index * 45.0 - 90.0) * PI / 180.0
+                        val dx = cos(angle).toFloat()
+                        val dy = sin(angle).toFloat()
+                        drawLine(
+                            color = color,
+                            start = Offset(center.x + dx * toothInner, center.y + dy * toothInner),
+                            end = Offset(center.x + dx * toothOuter, center.y + dy * toothOuter),
+                            strokeWidth = min * 0.075f,
+                            cap = StrokeCap.Round,
+                        )
+                    }
+                    drawCircle(color = color, radius = base, center = center, style = stroke)
+                    drawCircle(color = color, radius = min * 0.095f, center = center, style = stroke)
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SectionHeader(text: String, modifier: Modifier = Modifier) {
+        Text(
+            text,
+            color = Color.White,
+            fontSize = 24.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = modifier,
+        )
+    }
+
+    @Composable
+    private fun GameShelf(
+        games: List<GameInfo>,
+        label: String?,
+        coverWidth: Dp,
+        modifier: Modifier = Modifier,
+    ) {
+        Box(modifier) {
+            ShelfGlass(
+                label = label,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(76.dp),
+            )
+            LazyRow(
+                modifier = Modifier.fillMaxSize(),
+                contentPadding = PaddingValues(horizontal = 26.dp),
+                horizontalArrangement = Arrangement.spacedBy(28.dp),
+                verticalAlignment = Alignment.Bottom,
+            ) {
+                lazyRowItems(games, key = { "shelf_${label}_${it.uri}" }) { game ->
+                    ShelfGameCard(
+                        game = game,
+                        width = coverWidth,
+                        modifier = Modifier.padding(bottom = 22.dp),
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun ShelfGlass(label: String?, modifier: Modifier = Modifier) {
+        Canvas(modifier) {
+            val w = size.width
+            val h = size.height
+            val stroke = Stroke(width = 1.dp.toPx())
+            val top = Path().apply {
+                moveTo(w * 0.10f, h * 0.04f)
+                lineTo(w * 0.92f, h * 0.04f)
+                lineTo(w * 0.995f, h * 0.46f)
+                lineTo(w * 0.005f, h * 0.46f)
+                close()
+            }
+            val face = Path().apply {
+                moveTo(w * 0.005f, h * 0.46f)
+                lineTo(w * 0.995f, h * 0.46f)
+                lineTo(w * 0.975f, h * 0.82f)
+                lineTo(w * 0.025f, h * 0.82f)
+                close()
+            }
+            drawPath(
+                top,
+                brush = Brush.linearGradient(
+                    colors = listOf(
+                        Color(0x88D8F5FF),
+                        Color(0x442A76B4),
+                        Color(0x77E9FBFF),
+                    ),
+                ),
+            )
+            drawPath(
+                face,
+                brush = Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0x55C9F4FF),
+                        Color(0x303E607D),
+                        Color(0x1AFFFFFF),
+                    ),
+                ),
+            )
+            drawPath(top, Color.White.copy(alpha = 0.18f), style = stroke)
+            drawPath(face, Color.White.copy(alpha = 0.14f), style = stroke)
+        }
+        if (label != null) {
+            Text(
+                label,
+                color = Color.White.copy(alpha = 0.35f),
+                fontSize = 18.sp,
+                modifier = modifier.padding(top = 42.dp),
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
+
+    @Composable
+    private fun ShelfGameCard(game: GameInfo, width: Dp, modifier: Modifier = Modifier) {
+        Column(
+            modifier = modifier
+                .width(width)
+                .clickable { launchGame(game) },
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            CoverArt(
+                game = game,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(0.7f)
+                    .clip(RoundedCornerShape(5.dp)),
+            )
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(34.dp)
+                    .clip(RoundedCornerShape(3.dp)),
+            ) {
+                CoverArt(
+                    game = game,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(0.7f)
+                        .graphicsLayer {
+                            scaleY = -1f
+                            alpha = 0.22f
+                        },
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(
+                                    Color(0x0000172D),
+                                    Color(0xAA00172D),
+                                ),
+                            ),
+                        ),
+                )
+            }
+        }
+    }
+
+    private fun shelfLabelFor(row: List<GameInfo>): String {
+        fun labelFor(game: GameInfo): String =
+            game.title.firstOrNull { it.isLetterOrDigit() }?.uppercaseChar()?.toString() ?: "#"
+        if (row.isEmpty()) return ""
+        val first = labelFor(row.first())
+        val last = labelFor(row.last())
+        return if (first == last) first else "$first - $last"
+    }
+
+    private fun launchGame(game: GameInfo) {
+        WindowImpl.showLibrary.value = false
+        markRecentlyPlayed(game)
+        Main.launchGame(game.uri.toString(), game)
+    }
 
     @Composable
     private fun EmptyMessage(title: String, body: String) {
@@ -290,8 +793,43 @@ object GamesList {
     }
 
     @Composable
+    private fun UtilityCard(
+        modifier: Modifier = Modifier,
+        title: String,
+        subtitle: String,
+        onClick: () -> Unit,
+    ) {
+        Column(
+            modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF272525).copy(alpha = 0.35f))
+                .border(1.dp, Colors.pasx2_blue.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+                .clickable(onClick = onClick)
+                .padding(10.dp),
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                title,
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(Modifier.height(3.dp))
+            Text(
+                subtitle,
+                color = Color.LightGray,
+                fontSize = 10.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    @Composable
     private fun GameCard(game: GameInfo) {
-        val context = LocalContext.current
         Column(
             Modifier
                 .fillMaxWidth()
@@ -310,52 +848,15 @@ object GamesList {
                     // comes up uncovered. No-op when starting from idle.
                     // Pass GameInfo so the in-game overlay has cover art /
                     // extension badge / pre-resolved compat stars ready.
-                    WindowImpl.showLibrary.value = false
-                    Main.launchGame(game.uri.toString(), game)
+                    launchGame(game)
                 },
         ) {
-            Box(
-                Modifier
+            CoverArt(
+                game = game,
+                modifier = Modifier
                     .fillMaxWidth()
-                    .aspectRatio(0.7f) // PS2 cover boxart is taller than wide
-                    .background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                val coverUrl = game.coverUrl
-                if (coverUrl != null) {
-                    // SubcomposeAsyncImage so we can render a real fallback
-                    // composable when the cover URL 404s — happens for any
-                    // game the xlenore covers repo doesn't have (obscure
-                    // releases, regional dumps whose serial isn't covered).
-                    //
-                    // Per-platform contentScale: PS2 boxart is taller than
-                    // wide (matches the cell's 0.7 aspect ratio cleanly), so
-                    // ContentScale.Crop fills the cell with no margin. PS1
-                    // jewel-case covers are squarer/wider — cropping would
-                    // chop the sides; ContentScale.Fit + Center letterboxes
-                    // the cover inside the taller cell so the full art is
-                    // visible. Cell aspect stays uniform so the grid layout
-                    // doesn't shift between platforms.
-                    val scale = when (game.platform) {
-                        GamePlatform.PS2 -> ContentScale.Crop
-                        GamePlatform.PS1 -> ContentScale.Fit
-                    }
-                    SubcomposeAsyncImage(
-                        model = ImageRequest.Builder(context)
-                            .data(coverUrl)
-                            .crossfade(true)
-                            .build(),
-                        contentDescription = "${game.title} cover",
-                        contentScale = scale,
-                        alignment = Alignment.Center,
-                        modifier = Modifier.fillMaxSize(),
-                        loading = { CoverLoadingTile() },
-                        error = { NoCoverTile(missingSerial = false) },
-                    )
-                } else {
-                    NoCoverTile(missingSerial = true)
-                }
-            }
+                    .aspectRatio(0.7f),
+            )
             Column(Modifier.padding(8.dp)) {
                 Text(
                     game.title,
@@ -398,6 +899,79 @@ object GamesList {
                 }
             }
         }
+    }
+
+    @Composable
+    private fun CoverArt(game: GameInfo, modifier: Modifier = Modifier) {
+        val context = LocalContext.current
+        Box(
+            modifier
+                .background(Color(0xFF1B1A1A).copy(alpha = 0.3f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            val coverUrl = game.coverUrl
+            if (coverUrl != null) {
+                // SubcomposeAsyncImage so we can render a real fallback
+                // composable when the cover URL 404s — happens for any
+                // game the xlenore covers repo doesn't have (obscure
+                // releases, regional dumps whose serial isn't covered).
+                //
+                // Per-platform contentScale: PS2 boxart is taller than
+                // wide (matches the cell's 0.7 aspect ratio cleanly), so
+                // ContentScale.Crop fills the cell with no margin. PS1
+                // jewel-case covers are squarer/wider — cropping would
+                // chop the sides; ContentScale.Fit + Center letterboxes
+                // the cover inside the taller cell so the full art is
+                // visible. Cell aspect stays uniform so the grid layout
+                // doesn't shift between platforms.
+                val scale = when (game.platform) {
+                    GamePlatform.PS2 -> ContentScale.Crop
+                    GamePlatform.PS1 -> ContentScale.Fit
+                }
+                SubcomposeAsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(coverUrl)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = "${game.title} cover",
+                    contentScale = scale,
+                    alignment = Alignment.Center,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { CoverLoadingTile() },
+                    error = { NoCoverTile(missingSerial = false) },
+                )
+            } else {
+                NoCoverTile(missingSerial = true)
+            }
+        }
+    }
+
+    private fun markRecentlyPlayed(game: GameInfo) {
+        val uri = game.uri.toString()
+        recentUris.remove(uri)
+        recentUris.add(0, uri)
+        while (recentUris.size > 10) recentUris.removeAt(recentUris.lastIndex)
+        saveRecents()
+    }
+
+    private fun loadRecents() {
+        val raw = Main.prefs.getString("recentGameUris", null) ?: return
+        try {
+            val arr = JSONArray(raw)
+            recentUris.clear()
+            for (i in 0 until arr.length()) {
+                val uri = arr.optString(i)
+                if (uri.isNotEmpty() && uri !in recentUris) recentUris.add(uri)
+            }
+        } catch (_: Exception) {
+            recentUris.clear()
+        }
+    }
+
+    private fun saveRecents() {
+        val arr = JSONArray()
+        recentUris.forEach { arr.put(it) }
+        Main.prefs.edit().putString("recentGameUris", arr.toString()).apply()
     }
 
     /** Small PS2-blue rounded chip showing the container format (ISO /
@@ -641,7 +1215,9 @@ object GamesList {
                     extension = obj.optString("ext", "").ifEmpty {
                         obj.getString("uri").substringAfterLast('.', "").uppercase()
                     },
-                    platform = GamePlatform.fromKey(obj.optString("platform", null)),
+                    platform = GamePlatform.fromKey(
+                        if (obj.isNull("platform")) null else obj.optString("platform")
+                    ),
                 ))
             }
             cachedKey to list

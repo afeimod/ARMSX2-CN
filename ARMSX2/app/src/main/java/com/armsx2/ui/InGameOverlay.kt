@@ -77,6 +77,7 @@ import com.armsx2.R
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
 import com.armsx2.config.SettingsScope
+import com.armsx2.ui.settings.NetworkTab
 import com.armsx2.ui.settings.PerformanceTab
 import com.armsx2.ui.settings.RecompilerTab
 import com.armsx2.ui.settings.RendererTab
@@ -128,10 +129,11 @@ object InGameOverlay {
     // State / Change Disc / Reset / Close / etc), Performance and
     // Renderer host the speedhack + GS toggles backed by ConfigStore.
     private enum class Tab(val label: String) {
-        PlayingNow("Playing Now"),
-        Performance("Performance"),
-        Renderer("Renderer"),
-        Recompiler("Recompiler"),
+        PlayingNow("Play"),
+        Performance("Perf"),
+        Renderer("Render"),
+        Network("Network"),
+        Recompiler("JIT"),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
 
@@ -773,6 +775,7 @@ object InGameOverlay {
             Tab.PlayingNow -> PlayingNowTab()
             Tab.Performance -> PerformanceTab(settingsState)
             Tab.Renderer -> RendererTab(settingsState)
+            Tab.Network -> NetworkTab(settingsState)
             Tab.Recompiler -> RecompilerTab(settingsState)
         }
     }
@@ -787,7 +790,7 @@ object InGameOverlay {
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             val tabs = if (settingsOnly.value) {
-                listOf(Tab.Performance, Tab.Renderer, Tab.Recompiler)
+                listOf(Tab.Performance, Tab.Renderer, Tab.Network, Tab.Recompiler)
             } else {
                 Tab.values().toList()
             }
@@ -1203,8 +1206,7 @@ object InGameOverlay {
                 // Dedicated autosave slot — keeps numbered slots 0-9
                 // user-controlled. SaveStatePicker (Load mode) surfaces
                 // this state via the Autosave tile when present.
-                NativeApp.saveAutosaveState()
-                Main.stop()
+                Main.stop(saveAutosave = true)
                 closeKeepingState()
             }
             MenuRow("Exit Without Saving", danger = true) {

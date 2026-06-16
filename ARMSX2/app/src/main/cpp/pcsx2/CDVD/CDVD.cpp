@@ -171,6 +171,7 @@ void cdvdLoadNVRAM()
 	{
 		ERROR_LOG("Failed to open or read NVRAM at {}: {}", Path::GetFileName(nvmfile), error.GetDescription());
 		cdvdCreateNewNVM();
+		cdvdSaveNVRAM();
 	}
 	else
 	{
@@ -263,7 +264,10 @@ static void cdvdWriteNVM(const u8* src, int offset, int bytes)
 	}
 
 	if (to_write > 0) [[likely]]
+	{
 		std::memcpy(&s_nvram[offset], src, to_write);
+		cdvdSaveNVRAM();
+	}
 }
 
 static void cdvdReadConsoleID(u8* id)

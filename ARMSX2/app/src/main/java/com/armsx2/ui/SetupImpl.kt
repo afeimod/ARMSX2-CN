@@ -6,19 +6,23 @@ import android.net.Uri
 import android.os.ParcelFileDescriptor
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -49,10 +53,19 @@ import com.armsx2.CustomDriver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
@@ -100,6 +113,11 @@ object SetupImpl {
      *  picked folder" guard in SetupBiosContent's LaunchedEffect — without
      *  this we'd double-scan on every recomposition. */
     private val lastScannedDir = mutableStateOf<Uri?>(null)
+
+    /** Dashboard sub-flow: after the user grants access to a BIOS folder,
+     *  keep the original BIOS grid so they can choose the exact BIOS image
+     *  from that folder before returning to the glass setup page. */
+    private val showBiosChooser = mutableStateOf(false)
 
     /** Cached metadata for the configured BIOS file at `Main.bios.value`,
      *  used as a single-row fallback when we don't have a folder URI to
@@ -173,7 +191,10 @@ object SetupImpl {
         val idx = selectedBiosIdx.value
         // No selection — keep what's already configured (re-entry path
         // where the scan failed but a previous BIOS was set).
-        if (idx == null) return Main.bios.value
+        if (idx == null) {
+            Main.bios.value?.let { pinBiosIfReady(File(it)) }
+            return Main.bios.value
+        }
 
         val bios = scannedBioses.getOrNull(idx) ?: return null
 
@@ -193,6 +214,7 @@ object SetupImpl {
         // post-init via Main.kickoffEmucoreInit's pushBiosFilenamePin().
         if (outFile.absolutePath == Main.bios.value && outFile.exists()) {
             configuredBiosInfo.value = bios.info
+            pinBiosIfReady(outFile)
             return outFile.absolutePath
         }
 
@@ -203,15 +225,17 @@ object SetupImpl {
             Main.bios.value = outFile.absolutePath
             Main.prefs.edit().putString("bios", outFile.absolutePath).apply()
             configuredBiosInfo.value = bios.info
-
-            // BIOS filename pin (setSetting "Filenames/BIOS") is deferred —
-            // see comment above. kickoffEmucoreInit reads Main.bios.value
-            // after Java_..._initialize completes and pushes the filename
-            // then.
+            pinBiosIfReady(outFile)
             outFile.absolutePath
         } catch (_: Exception) {
             null
         }
+    }
+
+    private fun pinBiosIfReady(file: File) {
+        if (!Main.nativeReady.value) return
+        NativeApp.setSetting("Filenames", "BIOS", "string", file.name)
+        NativeApp.commitSettings()
     }
 
     /**
@@ -247,7 +271,16 @@ object SetupImpl {
         // Re-entry path: keep existing pref if user didn't repick. The
         // persistable grant from a prior session survives across process
         // restarts so we don't need to re-take it.
-        if (uri == null) return Main.systemDir.value
+        if (uri == null) {
+            // Re-entry after choosing the app-private/default folder has no
+            // SAF URI and no persisted systemDir by design. Treat that as a
+            // valid completed system-dir step so Let's Go can close setup.
+            if (Main.setupComplete.value && Main.systemDir.value == null) {
+                return context.getExternalFilesDir(null)?.absolutePath
+                    ?: context.dataDir.absolutePath
+            }
+            return Main.systemDir.value
+        }
 
         // Validate POSIX writability BEFORE persisting. The SAF
         // tree-URI grant lets us read, but emucore's FileSystem APIs
@@ -306,13 +339,26 @@ object SetupImpl {
         return romsDirsState.first().toString()
     }
 
+    private fun appFolderReady(): Boolean =
+        systemDirUri.value != null ||
+        systemDirUseDefault.value ||
+        Main.systemDir.value != null ||
+        (Main.setupComplete.value && Main.systemDir.value == null)
+
+    private fun biosReady(): Boolean =
+        selectedBiosIdx.value != null ||
+        Main.bios.value != null
+
+    private fun romsReady(): Boolean = romsDirsState.isNotEmpty()
+
+    private fun dashboardReady(): Boolean = appFolderReady() && biosReady() && romsReady()
+
     private fun refreshAllowNext() {
         allowNext.value = when (setupState.value) {
             0 -> true
-            // Renderer page — Next requires an explicit GL/VK pick. No
-            // default-through; we want every user to have made a conscious
-            // choice so support tickets can rely on the backend string.
-            1 -> selectedRenderer.value != null
+            // Setup dashboard — app folder, BIOS, and ROM folder must all
+            // be resolved before the final "Let's Go" commits first-run.
+            1 -> dashboardReady()
             // System dir page — Next when the user has a fresh URI selected,
             // an existing pref to keep (re-entry), or has explicitly opted
             // into the app-private fallback.
@@ -361,6 +407,7 @@ object SetupImpl {
         selectedBiosIdx.value = null
         biosScanning.value = false
         biosScanError.value = null
+        showBiosChooser.value = false
         // Drop the last-scanned marker so the SetupBiosContent
         // LaunchedEffect re-issues a scan against the (preserved) folder.
         lastScannedDir.value = null
@@ -459,7 +506,6 @@ object SetupImpl {
     @Composable
     fun SetupWindow() {
         val context = LocalContext.current
-
         val systemLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocumentTree()
         ) { treeUri: Uri? ->
@@ -496,6 +542,8 @@ object SetupImpl {
             // before — guards against a user picking the same folder
             // through the picker dialog after a "no results" outcome.
             lastScannedDir.value = null
+            showBiosChooser.value = true
+            scanBiosDirectory(context, treeUri)
         }
         val romsLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocumentTree()
@@ -516,172 +564,817 @@ object SetupImpl {
             }
         }
 
-        Box(Modifier.fillMaxSize().background(Colors.surface.value)) {
-            Column(Modifier.fillMaxSize()) {
-
-                // Title row — page heading on the left, ARMSX2 + version
-                // stacked above the logo on the right. Mirrors the
-                // InGameOverlay BrandHeader so wizard / pause overlay
-                // share the same wordmark layout. Version comes from
-                // BuildVersion::GitRev via NativeApp.getBuildVersion()
-                // so it tracks the C++ constants automatically.
-                Row(
-                    Modifier.fillMaxWidth().height(64.dp).padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        pageTitle(),
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Spacer(Modifier.weight(1f))
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text(
-                            "ARMSX2",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        Text(
-                            buildVersionString,
-                            color = Color(0xFF888888),
-                            fontSize = 10.sp,
-                        )
-                    }
-                    Image(
-                        painter = painterResource(id = R.drawable.savetowerforeground),
-                        contentDescription = null,
-                        modifier = Modifier.size(40.dp).padding(start = 8.dp),
-                    )
+        fun openBiosFlow() {
+            if (biosDirUri.value == null) {
+                Main.biosDir.value?.let { saved ->
+                    biosDirUri.value = runCatching { Uri.parse(saved) }.getOrNull()
                 }
-
-                // Content — fills remaining height. Pages no longer carry their
-                // own header / picker button; SetupWindow's title row + nav row
-                // own those, leaving the entire content area for the page list.
-                Box(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp)) {
-                    when (setupState.value) {
-                        0 -> {
-                            allowNext.value = true
-                            Welcome()
-                        }
-                        1 -> SetupRendererContent()
-                        2 -> SetupSystemDirContent()
-                        3 -> SetupBiosContent()
-                        4 -> SetupRomsDirContent()
-                        else -> {
-                            Main.prefs.edit().putBoolean("setupComplete", true).apply()
-                            Main.setupComplete.value = true
-                        }
-                    }
+            }
+            val uri = biosDirUri.value
+            if (uri != null) {
+                showBiosChooser.value = true
+                if (scannedBioses.isEmpty() && !biosScanning.value) {
+                    lastScannedDir.value = null
+                    scanBiosDirectory(context, uri)
                 }
+            } else if (scannedBioses.isNotEmpty() || Main.bios.value != null) {
+                showBiosChooser.value = true
+            } else {
+                biosLauncher.launch(null)
+            }
+        }
 
-                // Nav row — Prev, mid action, Next.
-                Row(
-                    Modifier.fillMaxWidth().height(72.dp).padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Button(
-                        onClick = {
-                            when (setupState.value) {
-                                1 -> {
-                                    setupState.value = 0
-                                    allowPrev.value = false
-                                    allowNext.value = true
-                                }
-                                2 -> {
-                                    setupState.value = 1
-                                    allowPrev.value = true
-                                    refreshAllowNext()
-                                }
-                                3 -> {
-                                    setupState.value = 2
-                                    allowPrev.value = true
-                                    refreshAllowNext()
-                                }
-                                4 -> {
-                                    setupState.value = 3
-                                    allowPrev.value = true
-                                    refreshAllowNext()
-                                }
-                            }
+        fun finishDashboard() {
+            if (!dashboardReady()) {
+                refreshAllowNext()
+                return
+            }
+            if (finishSystemDirStep(context) == null) {
+                refreshAllowNext()
+                return
+            }
+            if (finishBiosStep(context) == null) {
+                refreshAllowNext()
+                return
+            }
+            if (finishRomsStep(context) == null) {
+                refreshAllowNext()
+                return
+            }
+            Main.finishSetup()
+            allowPrev.value = false
+            allowNext.value = false
+        }
+
+        Box(
+            Modifier
+                .fillMaxSize()
+                .background(Color(0xFF030509)),
+        ) {
+            SetupBackdrop()
+            when (setupState.value) {
+                0 -> {
+                    allowNext.value = true
+                    allowPrev.value = false
+                    PowerWelcome(
+                        onPower = {
+                            setupState.value = 1
+                            allowPrev.value = true
+                            refreshAllowNext()
                         },
-                        enabled = allowPrev.value,
-                        colors = ps2Colors(),
-                    ) {
-                        Text("Prev")
-                    }
-
-                    Spacer(Modifier.width(12.dp))
-
-                    // Page-local action button (folder pickers).
-                    val midLabel = midButtonLabel()
-                    if (midLabel != null) {
-                        Button(
-                            onClick = {
-                                when (setupState.value) {
-                                    2 -> systemLauncher.launch(null)
-                                    3 -> biosLauncher.launch(null)
-                                    4 -> romsLauncher.launch(null)
-                                }
+                    )
+                }
+                else -> {
+                    if (showBiosChooser.value) {
+                        BiosChooserOverlay(
+                            onBack = {
+                                showBiosChooser.value = false
+                                refreshAllowNext()
                             },
-                            colors = ps2Colors(),
-                        ) {
-                            Text(midLabel)
-                        }
-                    }
-
-                    Spacer(Modifier.weight(1f))
-
-                    Button(
-                        onClick = {
-                            when (setupState.value) {
-                                0 -> {
-                                    setupState.value = 1
-                                    allowPrev.value = true
-                                    refreshAllowNext()
-                                }
-                                1 -> {
-                                    if (finishRendererStep() != null) {
-                                        setupState.value = 2
-                                        allowPrev.value = true
-                                        refreshAllowNext()
-                                    }
-                                }
-                                2 -> {
-                                    if (finishSystemDirStep(context) != null) {
-                                        setupState.value = 3
-                                        allowPrev.value = true
-                                        refreshAllowNext()
-                                    }
-                                }
-                                3 -> {
-                                    if (finishBiosStep(context) != null) {
-                                        setupState.value = 4
-                                        allowPrev.value = true
-                                        refreshAllowNext()
-                                    }
-                                }
-                                4 -> {
-                                    if (finishRomsStep(context) != null) {
-                                        setupState.value = 5
-                                        allowPrev.value = false
-                                        allowNext.value = false
-                                    }
-                                }
-                            }
-                        },
-                        enabled = allowNext.value,
-                        colors = ps2Colors(),
-                    ) {
-                        // Last setup page commits the prefs and dismisses
-                        // the wizard, so the action label changes to match.
-                        Text(if (setupState.value == 4) "Finish" else "Next")
+                            onPickDifferentFolder = { biosLauncher.launch(null) },
+                            onUseSelected = {
+                                showBiosChooser.value = false
+                                refreshAllowNext()
+                            },
+                        )
+                    } else {
+                        SetupDashboard(
+                            onBack = {
+                                setupState.value = 0
+                                allowPrev.value = false
+                                allowNext.value = true
+                            },
+                            onUseDefaultSystem = {
+                                systemDirUseDefault.value = true
+                                systemDirUri.value = null
+                                systemDirDisplay.value = null
+                                systemDirError.value = null
+                                refreshAllowNext()
+                            },
+                            onPickSystem = { systemLauncher.launch(null) },
+                            onPickBiosFolder = { openBiosFlow() },
+                            onPickRoms = { romsLauncher.launch(null) },
+                            onRemoveRoms = {
+                                romsDirsState.remove(it)
+                                refreshAllowNext()
+                            },
+                            onFinish = { finishDashboard() },
+                        )
                     }
                 }
             }
         }
     }
+
+    @Composable
+    private fun SetupBackdrop() {
+        Canvas(Modifier.fillMaxSize()) {
+            drawRect(
+                Brush.radialGradient(
+                    colors = listOf(Color(0xFF101928), Color(0xFF030509)),
+                    center = Offset(size.width * 0.5f, size.height * 0.24f),
+                    radius = size.maxDimension * 0.75f,
+                )
+            )
+            val dotColor = Color.White.copy(alpha = 0.06f)
+            val step = 18.dp.toPx()
+            var y = 0f
+            var row = 0
+            while (y < size.height) {
+                var x = (row % 2) * step * 0.5f
+                while (x < size.width) {
+                    drawCircle(dotColor, radius = 0.7.dp.toPx(), center = Offset(x, y))
+                    x += step
+                }
+                y += step
+                row++
+            }
+        }
+    }
+
+    @Composable
+    private fun PowerWelcome(onPower: () -> Unit) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            val artRatio = 1440f / 3120f
+            // Page-1 background: the PS-symbol wallpaper fills the whole
+            // screen, including the side gutters around the centered portrait
+            // welcome card in landscape. Only the first setup screen uses it;
+            // page 2 keeps its original dark dashboard.
+            Image(
+                painter = painterResource(id = R.drawable.setup_aero_bg),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            val frameModifier = if (maxWidth.value / maxHeight.value > artRatio) {
+                Modifier.fillMaxHeight().aspectRatio(artRatio)
+            } else {
+                Modifier.fillMaxWidth().aspectRatio(artRatio)
+            }
+            // No contentAlignment here: the default BoxWithConstraints
+            // alignment is TopStart, so the offset() below is measured from
+            // the frame's top-left — the same convention AssetSetupDashboard
+            // relies on. (A previous Alignment.Center pushed the hit target
+            // off the card, which is why tapping power did nothing.)
+            BoxWithConstraints(frameModifier) {
+                Image(
+                    painter = painterResource(id = R.drawable.setup_welcome_portrait),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.FillBounds,
+                )
+                Box(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.405f, y = maxHeight * 0.787f)
+                        .size(width = maxWidth * 0.19f, height = maxWidth * 0.19f)
+                        .clickable(onClick = onPower),
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun HeroLogo(modifier: Modifier = Modifier) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Image(
+                painter = painterResource(id = R.drawable.savetowerforeground),
+                contentDescription = null,
+                modifier = Modifier
+                    .fillMaxHeight(0.72f)
+                    .aspectRatio(1f),
+            )
+        }
+    }
+
+    @Composable
+    private fun PowerButton(onPower: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .size(116.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color(0xFF171D1E), Color(0xFF030405))
+                    )
+                )
+                .border(3.dp, Color.Black.copy(alpha = 0.78f), RoundedCornerShape(14.dp))
+                .clickable(onClick = onPower),
+            contentAlignment = Alignment.Center,
+        ) {
+            Canvas(Modifier.fillMaxSize()) {
+                val teal = Color(0xFF2FD0C8)
+                val center = Offset(size.width / 2f, size.height / 2f + 7.dp.toPx())
+                drawCircle(teal.copy(alpha = 0.22f), radius = 42.dp.toPx(), center = center)
+                drawArc(
+                    color = teal,
+                    startAngle = 135f,
+                    sweepAngle = 270f,
+                    useCenter = false,
+                    topLeft = Offset(center.x - 30.dp.toPx(), center.y - 30.dp.toPx()),
+                    size = Size(60.dp.toPx(), 60.dp.toPx()),
+                    style = Stroke(width = 7.dp.toPx()),
+                )
+                drawLine(
+                    color = teal,
+                    start = Offset(center.x, center.y - 43.dp.toPx()),
+                    end = Offset(center.x, center.y - 6.dp.toPx()),
+                    strokeWidth = 8.dp.toPx(),
+                )
+                drawCircle(
+                    color = Color(0xFF7BFF78),
+                    radius = 7.dp.toPx(),
+                    center = Offset(size.width - 23.dp.toPx(), 22.dp.toPx()),
+                )
+                drawCircle(
+                    color = Color(0xFF7BFF78).copy(alpha = 0.20f),
+                    radius = 14.dp.toPx(),
+                    center = Offset(size.width - 23.dp.toPx(), 22.dp.toPx()),
+                )
+            }
+        }
+    }
+
+    @Composable
+    private fun SetupDashboard(
+        onBack: () -> Unit,
+        onUseDefaultSystem: () -> Unit,
+        onPickSystem: () -> Unit,
+        onPickBiosFolder: () -> Unit,
+        onPickRoms: () -> Unit,
+        onRemoveRoms: (Uri) -> Unit,
+        onFinish: () -> Unit,
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(18.dp),
+        ) {
+            val wide = maxWidth > maxHeight
+            if (!wide) {
+                AssetSetupDashboard(
+                    onBack = onBack,
+                    onUseDefaultSystem = onUseDefaultSystem,
+                    onPickSystem = onPickSystem,
+                    onPickBiosFolder = onPickBiosFolder,
+                    onPickRoms = onPickRoms,
+                    onRemoveRoms = onRemoveRoms,
+                    onFinish = onFinish,
+                )
+                return@BoxWithConstraints
+            }
+            val horizontalPadding = if (wide) 44.dp else 34.dp
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(32.dp))
+                    .background(Color(0xFF050810).copy(alpha = 0.82f))
+                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(32.dp))
+                    .padding(horizontal = horizontalPadding, vertical = if (wide) 18.dp else 34.dp),
+            ) {
+                LazyColumn(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(if (wide) 14.dp else 26.dp),
+                ) {
+                    item {
+                        SetupStepCard(
+                            step = "1.",
+                            title = "Select App Folder",
+                            description = "Pick a folder for memory cards, save states, and configs. You can also use the app-private default.",
+                            ready = appFolderReady(),
+                            status = appFolderStatus(),
+                            visual = SetupVisual.Folder,
+                            onClick = onPickSystem,
+                            primaryLabel = "Select Folder",
+                            onPrimary = onPickSystem,
+                            secondaryLabel = "Use Default",
+                            onSecondary = onUseDefaultSystem,
+                        )
+                    }
+                    item {
+                        SetupStepCard(
+                            step = "2.",
+                            title = "BIOS Location",
+                            description = "Select a PS2 BIOS file to start playing your games.",
+                            ready = biosReady(),
+                            status = biosStatus(),
+                            visual = SetupVisual.Bios,
+                            onClick = onPickBiosFolder,
+                            primaryLabel = if (biosScanning.value) "Scanning..." else "Scan Folder",
+                            onPrimary = onPickBiosFolder,
+                            secondaryLabel = null,
+                            onSecondary = null,
+                        )
+                    }
+                    item {
+                        SetupStepCard(
+                            step = "3.",
+                            title = "ROM Location",
+                            description = "Pick one or more folders where you keep your PS2 games. Supports ISO, CHD, BIN, IMG, MDF, and GZ.",
+                            ready = romsReady(),
+                            status = romsStatus(),
+                            visual = SetupVisual.Disc,
+                            onClick = onPickRoms,
+                            primaryLabel = if (romsDirsState.isEmpty()) "Select Folder" else "Add Folder",
+                            onPrimary = onPickRoms,
+                            secondaryLabel = null,
+                            onSecondary = null,
+                        )
+                        if (romsDirsState.isNotEmpty()) {
+                            Spacer(Modifier.height(8.dp))
+                            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                for (uri in romsDirsState.toList()) {
+                                    CompactFolderRow(uri, onRemove = { onRemoveRoms(uri) })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(70.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircleBackButton(onBack)
+                    Spacer(Modifier.weight(1f))
+                    GlowActionButton(
+                        text = "Let's Go",
+                        enabled = dashboardReady(),
+                        onClick = onFinish,
+                        modifier = Modifier.fillMaxWidth(if (wide) 0.42f else 0.68f),
+                    )
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun AssetSetupDashboard(
+        onBack: () -> Unit,
+        onUseDefaultSystem: () -> Unit,
+        onPickSystem: () -> Unit,
+        onPickBiosFolder: () -> Unit,
+        onPickRoms: () -> Unit,
+        onRemoveRoms: (Uri) -> Unit,
+        onFinish: () -> Unit,
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center,
+        ) {
+            val artRatio = 1440f / 3120f
+            val frameModifier = if (maxWidth.value / maxHeight.value > artRatio) {
+                Modifier.fillMaxHeight().aspectRatio(artRatio)
+            } else {
+                Modifier.fillMaxWidth().aspectRatio(artRatio)
+            }
+            BoxWithConstraints(frameModifier) {
+                Image(
+                    painter = painterResource(id = R.drawable.setup_files_portrait),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.FillBounds,
+                )
+
+                SetupTapZone(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.06f, y = maxHeight * 0.07f)
+                        .size(width = maxWidth * 0.88f, height = maxHeight * 0.20f),
+                    onClick = onPickSystem,
+                )
+                SetupTapZone(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.06f, y = maxHeight * 0.34f)
+                        .size(width = maxWidth * 0.88f, height = maxHeight * 0.22f),
+                    onClick = onPickBiosFolder,
+                )
+                SetupTapZone(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.06f, y = maxHeight * 0.61f)
+                        .size(width = maxWidth * 0.88f, height = maxHeight * 0.23f),
+                    onClick = onPickRoms,
+                )
+
+                SetupStatusChip(
+                    text = appFolderStatus(),
+                    ready = appFolderReady(),
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.11f, y = maxHeight * 0.255f)
+                        .size(width = maxWidth * 0.50f, height = maxHeight * 0.032f),
+                )
+                SetupMiniButton(
+                    text = "Default",
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.68f, y = maxHeight * 0.252f)
+                        .size(width = maxWidth * 0.20f, height = maxHeight * 0.038f),
+                    onClick = onUseDefaultSystem,
+                )
+                SetupStatusChip(
+                    text = biosStatus(),
+                    ready = biosReady(),
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.11f, y = maxHeight * 0.535f)
+                        .size(width = maxWidth * 0.68f, height = maxHeight * 0.035f),
+                )
+                SetupStatusChip(
+                    text = romsStatus(),
+                    ready = romsReady(),
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.11f, y = maxHeight * 0.812f)
+                        .size(width = maxWidth * 0.68f, height = maxHeight * 0.035f),
+                )
+                if (romsDirsState.isNotEmpty()) {
+                    SetupMiniButton(
+                        text = "Clear",
+                        modifier = Modifier
+                            .offset(x = maxWidth * 0.78f, y = maxHeight * 0.809f)
+                            .size(width = maxWidth * 0.12f, height = maxHeight * 0.038f),
+                        onClick = {
+                            for (uri in romsDirsState.toList()) {
+                                onRemoveRoms(uri)
+                            }
+                        },
+                    )
+                }
+
+                SetupTapZone(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.065f, y = maxHeight * 0.90f)
+                        .size(width = maxWidth * 0.17f, height = maxWidth * 0.17f),
+                    onClick = onBack,
+                )
+                Box(
+                    modifier = Modifier
+                        .offset(x = maxWidth * 0.28f, y = maxHeight * 0.895f)
+                        .size(width = maxWidth * 0.60f, height = maxHeight * 0.075f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .clickable(enabled = dashboardReady(), onClick = onFinish),
+                ) {
+                    if (!dashboardReady()) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.48f)),
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun SetupTapZone(modifier: Modifier, onClick: () -> Unit) {
+        Box(modifier = modifier.clickable(onClick = onClick))
+    }
+
+    @Composable
+    private fun SetupStatusChip(text: String, ready: Boolean, modifier: Modifier) {
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color.Black.copy(alpha = 0.46f))
+                .border(
+                    1.dp,
+                    if (ready) Color(0xFF3CEBE0).copy(alpha = 0.60f) else Color.White.copy(alpha = 0.12f),
+                    RoundedCornerShape(50),
+                )
+                .padding(horizontal = 10.dp, vertical = 2.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                text,
+                color = if (ready) Color(0xFFBFFFFA) else Color.White.copy(alpha = 0.70f),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+    }
+
+    @Composable
+    private fun SetupMiniButton(text: String, modifier: Modifier, onClick: () -> Unit) {
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(50))
+                .background(Color(0xFF12191B).copy(alpha = 0.78f))
+                .border(1.dp, Color(0xFF38D5CB).copy(alpha = 0.45f), RoundedCornerShape(50))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text, color = Color(0xFF7CF6EF), fontSize = 11.sp, fontWeight = FontWeight.Black)
+        }
+    }
+
+    @Composable
+    private fun BiosChooserOverlay(
+        onBack: () -> Unit,
+        onPickDifferentFolder: () -> Unit,
+        onUseSelected: () -> Unit,
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color(0xFF030509))
+                .padding(18.dp),
+        ) {
+            SetupBackdrop()
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(Color(0xFF080B11).copy(alpha = 0.94f))
+                    .border(1.dp, Color.White.copy(alpha = 0.10f), RoundedCornerShape(28.dp))
+                    .padding(18.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "Select BIOS",
+                        color = Color.White,
+                        fontSize = 28.sp,
+                        fontWeight = FontWeight.Light,
+                    )
+                    Spacer(Modifier.weight(1f))
+                    SmallSetupButton("Scan Different Folder", strong = false, onClick = onPickDifferentFolder)
+                }
+                Spacer(Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .background(Color.Black.copy(alpha = 0.26f))
+                        .padding(12.dp),
+                ) {
+                    SetupBiosContent()
+                }
+                Spacer(Modifier.height(14.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircleBackButton(onBack)
+                    Spacer(Modifier.weight(1f))
+                    GlowActionButton(
+                        text = "Use Selected BIOS",
+                        enabled = selectedBiosIdx.value != null,
+                        onClick = onUseSelected,
+                        modifier = Modifier.fillMaxWidth(0.68f),
+                    )
+                }
+            }
+        }
+    }
+
+    private enum class SetupVisual { Folder, Bios, Disc }
+
+    @Composable
+    private fun SetupStepCard(
+        step: String,
+        title: String,
+        description: String,
+        ready: Boolean,
+        status: String,
+        visual: SetupVisual,
+        onClick: () -> Unit,
+        primaryLabel: String,
+        onPrimary: () -> Unit,
+        secondaryLabel: String?,
+        onSecondary: (() -> Unit)?,
+    ) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(26.dp))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.White.copy(alpha = if (ready) 0.30f else 0.13f),
+                            Color.White.copy(alpha = if (ready) 0.08f else 0.04f),
+                        )
+                    )
+                )
+                .border(
+                    1.dp,
+                    if (ready) Colors.pasx2_blue.copy(alpha = 0.52f) else Color.White.copy(alpha = 0.12f),
+                    RoundedCornerShape(26.dp)
+                )
+                .clickable(onClick = onClick)
+                .padding(20.dp),
+        ) {
+            val compact = maxWidth < 640.dp
+            if (compact) {
+                Column {
+                    StepText(step, title, description, status, ready)
+                    Spacer(Modifier.height(14.dp))
+                    StepVisual(visual, Modifier.fillMaxWidth().height(110.dp))
+                    Spacer(Modifier.height(14.dp))
+                    StepActions(primaryLabel, onPrimary, secondaryLabel, onSecondary)
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        StepText(step, title, description, status, ready)
+                        Spacer(Modifier.height(14.dp))
+                        StepActions(primaryLabel, onPrimary, secondaryLabel, onSecondary)
+                    }
+                    Spacer(Modifier.width(18.dp))
+                    StepVisual(visual, Modifier.width(210.dp).height(128.dp))
+                }
+            }
+        }
+    }
+
+    @Composable
+    private fun StepText(step: String, title: String, description: String, status: String, ready: Boolean) {
+        Text(
+            "$step $title",
+            color = Color.White,
+            fontSize = 34.sp,
+            fontWeight = FontWeight.Light,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Spacer(Modifier.height(7.dp))
+        Text(description, color = Color.White.copy(alpha = 0.82f), fontSize = 14.sp, lineHeight = 19.sp)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            status,
+            color = if (ready) Color(0xFF75FFF4) else Color.White.copy(alpha = 0.52f),
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+
+    @Composable
+    private fun StepActions(
+        primaryLabel: String,
+        onPrimary: () -> Unit,
+        secondaryLabel: String?,
+        onSecondary: (() -> Unit)?,
+    ) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallSetupButton(primaryLabel, strong = true, onClick = onPrimary)
+            if (secondaryLabel != null && onSecondary != null) {
+                SmallSetupButton(secondaryLabel, strong = false, onClick = onSecondary)
+            }
+        }
+    }
+
+    @Composable
+    private fun SmallSetupButton(text: String, strong: Boolean, onClick: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(9.dp))
+                .background(if (strong) Colors.pasx2_blue.copy(alpha = 0.75f) else Color.Black.copy(alpha = 0.32f))
+                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(9.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(text, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+
+    @Composable
+    private fun StepVisual(type: SetupVisual, modifier: Modifier = Modifier) {
+        // Vivi's page-2 logos (cropped from her Files-Portrait artwork), replacing
+        // the old programmatically-drawn icons. Each is shown in a dark rounded
+        // tile so the logo's own near-black backdrop blends into the card.
+        val res = when (type) {
+            SetupVisual.Folder -> R.drawable.setup_logo_folder
+            SetupVisual.Bios -> R.drawable.setup_logo_bios
+            SetupVisual.Disc -> R.drawable.setup_logo_disc
+        }
+        Box(
+            modifier = modifier
+                .clip(RoundedCornerShape(14.dp))
+                .background(Color(0xFF090C13)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Image(
+                painter = painterResource(id = res),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Fit,
+            )
+        }
+    }
+
+    @Composable
+    private fun CircleBackButton(onClick: () -> Unit) {
+        Box(
+            modifier = Modifier
+                .size(54.dp)
+                .clip(RoundedCornerShape(50))
+                .background(Color.White.copy(alpha = 0.10f))
+                .clickable(onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("<", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Light)
+        }
+    }
+
+    @Composable
+    private fun GlowActionButton(
+        text: String,
+        enabled: Boolean,
+        onClick: () -> Unit,
+        modifier: Modifier = Modifier,
+    ) {
+        Box(
+            modifier = modifier
+                .height(58.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color(0xFF1B2426).copy(alpha = if (enabled) 1f else 0.45f),
+                            Color.Black.copy(alpha = if (enabled) 0.92f else 0.45f),
+                        )
+                    )
+                )
+                .border(3.dp, Color.Black.copy(alpha = 0.82f), RoundedCornerShape(12.dp))
+                .clickable(enabled = enabled, onClick = onClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text,
+                color = if (enabled) Color(0xFF37D7CE) else Color.White.copy(alpha = 0.32f),
+                fontSize = 25.sp,
+                fontWeight = FontWeight.Black,
+            )
+        }
+    }
+
+    @Composable
+    private fun CompactFolderRow(uri: Uri, onRemove: () -> Unit) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(Color.Black.copy(alpha = 0.30f))
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                uri.lastPathSegment ?: uri.toString(),
+                color = Color.White.copy(alpha = 0.82f),
+                fontSize = 12.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            Text(
+                "Remove",
+                color = Color(0xFFFF8B8B),
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(onClick = onRemove),
+            )
+        }
+    }
+
+    private fun appFolderStatus(): String {
+        if (systemDirUseDefault.value || (Main.systemDir.value == null && Main.setupComplete.value)) {
+            return "Default app-private folder"
+        }
+        return systemDirDisplay.value
+            ?: Main.systemDir.value?.let { runCatching { Uri.parse(it).lastPathSegment }.getOrNull() ?: it }
+            ?: "Not selected"
+    }
+
+    private fun biosStatus(): String {
+        if (biosScanning.value) {
+            return "Scanning BIOS folder..."
+        }
+        selectedBiosIdx.value?.let { idx ->
+            return scannedBioses.getOrNull(idx)?.displayName ?: "BIOS selected"
+        }
+        if (scannedBioses.isNotEmpty()) {
+            return "${scannedBioses.size} BIOS files found - tap to choose"
+        }
+        return Main.bios.value?.let { File(it).name }
+            ?: biosScanError.value
+            ?: "Not selected"
+    }
+
+    private fun romsStatus(): String =
+        when (val count = romsDirsState.size) {
+            0 -> "Not selected"
+            1 -> romsDirsState.first().lastPathSegment ?: "1 folder selected"
+            else -> "$count folders selected"
+        }
 
     /** First-run welcome page. Upscale defaults to 1x and is exposed in the
      *  in-game overlay's Renderer tab for runtime override. Renderer is
@@ -1631,18 +2324,24 @@ object SetupImpl {
                     Main.prefs.edit().putString("biosDir", treeUri.toString()).apply()
 
                     val configuredName = Main.bios.value?.let { File(it).name }
-                    if (configuredName != null) {
-                        val matchIdx = scannedBioses.indexOfFirst { it.displayName == configuredName }
-                        if (matchIdx >= 0) {
-                            selectedBiosIdx.value = matchIdx
-                            refreshAllowNext()
-                        }
+                    val matchIdx = if (configuredName != null) {
+                        scannedBioses.indexOfFirst { it.displayName == configuredName }
+                    } else {
+                        -1
                     }
+                    selectedBiosIdx.value = when {
+                        matchIdx >= 0 -> matchIdx
+                        scannedBioses.size == 1 -> 0
+                        else -> null
+                    }
+                } else {
+                    biosScanError.value = "No valid PS2 BIOS files found in that folder."
                 }
             } catch (e: Exception) {
                 biosScanError.value = "Scan failed: ${e.message}"
             } finally {
                 biosScanning.value = false
+                refreshAllowNext()
             }
         }
     }

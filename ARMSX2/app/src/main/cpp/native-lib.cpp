@@ -17,6 +17,7 @@
 #include "common/ZipHelpers.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/VMManager.h"
+#include "pcsx2/R5900.h"
 #include "PerformanceMetrics.h"
 #include "GameList.h"
 #include "GameDatabase.h"
@@ -45,8 +46,11 @@
 #include "libchdr/chd.h"
 #include <algorithm>
 #include <cctype>
+#include <condition_variable>
+#include <deque>
 #include <future>
 #include <functional>
+#include <thread>
 #include <regex>
 #include <vector>
 
@@ -83,6 +87,16 @@ static void redirect_stdout_to_logcat()
 // loop flips it around each Execute() call). Read cross-thread by the savestate
 // JNI entry points to confirm the VM is actually quiescent, hence atomic.
 std::atomic<bool> s_execute_exit{false};
+// Latched the moment an Android shutdown is requested. The run loop honours
+// this regardless of VMState, because the settings-overlay pause/resume tasks
+// can race the async shutdown and flip s_state back to Running/Paused after
+// SetState(Stopping) — which previously let the run loop re-enter Execute()
+// forever (the exit-game hang: EE breaks out, loop re-enters, repeat). Reset
+// at the top of runVMThread so a fresh launch starts clean.
+std::atomic<bool> s_stop_requested{false};
+static std::mutex s_cpu_thread_mutex;
+static std::deque<std::function<void()>> s_cpu_thread_queue;
+static std::thread::id s_cpu_thread_id;
 int s_window_width = 0;
 int s_window_height = 0;
 ANativeWindow* s_window = nullptr;
@@ -607,13 +621,18 @@ class ScopedVMPause {
 public:
     ScopedVMPause() {
         m_was_running = (VMManager::GetState() == VMState::Running);
+        m_was_paused = (VMManager::GetState() == VMState::Paused);
         if (m_was_running)
+        {
             VMManager::SetPaused(true);
+            if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
+                Cpu->ExitExecution();
+        }
         // A healthy VM exits Execute() within a frame of the state flip;
         // allow a generous 3s before declaring failure.
         for (int i = 0; i < 3000 && !s_execute_exit.load(std::memory_order_acquire); ++i)
             usleep(1000);
-        m_parked = s_execute_exit.load(std::memory_order_acquire);
+        m_parked = s_execute_exit.load(std::memory_order_acquire) || m_was_paused;
     }
     ~ScopedVMPause() {
         if (m_was_running)
@@ -626,6 +645,7 @@ public:
 
 private:
     bool m_was_running = false;
+    bool m_was_paused = false;
     bool m_parked = false;
 };
 
@@ -996,6 +1016,14 @@ void Host::OnGameChanged(const std::string& title, const std::string& elf_overri
 }
 
 void Host::PumpMessagesOnCPUThread() {
+    std::deque<std::function<void()>> queue;
+    {
+        std::lock_guard lock(s_cpu_thread_mutex);
+        queue.swap(s_cpu_thread_queue);
+    }
+
+    for (auto& function : queue)
+        function();
 }
 
 int FileSystem::OpenFDFileContent(const char* filename)
@@ -1035,6 +1063,12 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
     /////////////////////////////
 
     s_execute_exit = false;
+    s_stop_requested = false;
+    {
+        std::lock_guard lock(s_cpu_thread_mutex);
+        s_cpu_thread_id = std::this_thread::get_id();
+        s_cpu_thread_queue.clear();
+    }
 
 //    const char* error;
 //    if (!VMManager::PerformEarlyHardwareChecks(&error)) {
@@ -1075,6 +1109,16 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
         VMManager::SetState(_vmState);
         ////
         while (true) {
+            if (s_stop_requested.load(std::memory_order_acquire)) {
+                // Latched stop wins over any state flip caused by racing
+                // pause/resume tasks; don't re-enter Execute().
+                if (VMManager::GetState() != VMState::Stopping &&
+                    VMManager::GetState() != VMState::Shutdown)
+                    VMManager::SetState(VMState::Stopping);
+                Console.WriteLn("@@ANDROID_RUNLOOP_BREAK@@ latched state=%d",
+                    static_cast<int>(VMManager::GetState()));
+                break;
+            }
             _vmState = VMManager::GetState();
             if (_vmState == VMState::Stopping || _vmState == VMState::Shutdown) {
                 break;
@@ -1082,6 +1126,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
                 s_execute_exit = false;
                 VMManager::Execute();
                 s_execute_exit = true;
+                Host::PumpMessagesOnCPUThread();
+            } else if (_vmState == VMState::Paused) {
+                VMManager::IdlePollUpdate();
+                Host::PumpMessagesOnCPUThread();
+                usleep(16000);
             } else {
                 usleep(250000);
             }
@@ -1090,7 +1139,13 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
         VMManager::Shutdown(false);
     }
     ////
+    Host::PumpMessagesOnCPUThread();
     VMManager::Internal::CPUThreadShutdown();
+    {
+        std::lock_guard lock(s_cpu_thread_mutex);
+        s_cpu_thread_id = std::thread::id();
+        s_cpu_thread_queue.clear();
+    }
 
     return true;
 }
@@ -1098,33 +1153,41 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_pause(JNIEnv *env, jclass clazz) {
-    // Synchronous on purpose. The old fire-and-forget detached thread
-    // returned before the VM actually stopped, so "pause then tweak
-    // settings" flows (pause overlay → upscale slider) raced a still-live
-    // EE/MTVU/MTGS pipeline. Block until the CPU thread parks outside
-    // Execute(); a healthy VM does so within a frame (the 3s cap is a
-    // watchdog, not an expected wait).
     if (!VMManager::HasValidVM())
         return;
-    if (VMManager::GetState() == VMState::Running)
-        VMManager::SetPaused(true);
-    if (VMManager::GetState() == VMState::Paused) {
-        for (int i = 0; i < 3000 && !s_execute_exit.load(std::memory_order_acquire); ++i)
-            usleep(1000);
-        if (!s_execute_exit.load(std::memory_order_acquire))
-            Console.Error("pause(): CPU thread failed to park within 3s");
+
+    const VMState state = VMManager::GetState();
+    if (state == VMState::Running)
+    {
+        Host::RunOnCPUThread([]() {
+            if (VMManager::HasValidVM() && VMManager::GetState() == VMState::Running)
+                VMManager::SetPaused(true);
+        });
+
+        if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
+            Cpu->ExitExecution();
+
+        Console.WriteLn("@@ANDROID_PAUSE@@ queued state=%d execute_exit=%d",
+            static_cast<int>(state),
+            s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
+    }
+    else if (state == VMState::Paused)
+    {
+        Console.WriteLn("@@ANDROID_PAUSE@@ already_paused");
     }
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_resume(JNIEnv *env, jclass clazz) {
-    // Inline on the calling thread (the old detached std::thread broke
-    // ordering against pause(): Kotlin now serializes pause/resume on one
-    // background executor, which only works if the native side runs
-    // synchronously on it). The resume path of SetState has no waits, so
-    // this is cheap even from the lifecycle onResume main-thread call.
-    VMManager::SetPaused(false);
+    if (!VMManager::HasValidVM())
+        return;
+
+    Host::RunOnCPUThread([]() {
+        if (VMManager::HasValidVM() && VMManager::GetState() == VMState::Paused)
+            VMManager::SetPaused(false);
+    });
+    Console.WriteLn("@@ANDROID_RESUME@@ queued state=%d", static_cast<int>(VMManager::GetState()));
 }
 
 extern "C"
@@ -1147,8 +1210,52 @@ Java_kr_co_iefriends_pcsx2_NativeApp_shutdown(JNIEnv *env, jclass clazz) {
     // SetState(Stopping) with no active VM leaves s_state stuck at Stopping,
     // which then makes the next VMManager::Initialize fail (it requires
     // s_state == Shutdown). Symptom was a "hang" on first card-tap launch.
-    if (VMManager::HasValidVM())
+    const VMState state = VMManager::GetState();
+    const bool active = (state >= VMState::Running && state <= VMState::Stopping);
+    Console.WriteLn("@@ANDROID_STOP@@ request active=%d state=%d execute_exit=%d",
+        active ? 1 : 0, static_cast<int>(state),
+        s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
+    if (!active)
+        return;
+
+    // Latch the stop FIRST, before SetState — so even if a queued pause/resume
+    // task flips s_state back to Running/Paused, the CPU thread's run loop will
+    // still break out and shut down instead of re-entering Execute().
+    s_stop_requested.store(true, std::memory_order_release);
+    Console.WriteLn("@@STOP_LATCH_SET@@ val=%d",
+        s_stop_requested.load(std::memory_order_acquire) ? 1 : 0);
+
+    VMManager::SetLimiterMode(LimiterModeType::Nominal);
+    if (VMManager::GetState() != VMState::Stopping)
         VMManager::SetState(VMState::Stopping);
+    if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
+        Cpu->ExitExecution();
+    Host::RunOnCPUThread([]() { Host::RequestVMShutdown(false, false, false); });
+
+    Console.WriteLn("@@ANDROID_STOP_SIGNAL@@ state=%d execute_exit=%d",
+        static_cast<int>(VMManager::GetState()),
+        s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
+
+    for (int i = 0; i < 250; ++i)
+    {
+        if (VMManager::GetState() == VMState::Shutdown)
+        {
+            Console.WriteLn("@@ANDROID_STOP_DONE@@ waited_ms=%d", i);
+            return;
+        }
+        usleep(1000);
+    }
+
+    Console.WriteLn("@@ANDROID_STOP_ASYNC@@ state=%d execute_exit=%d",
+        static_cast<int>(VMManager::GetState()),
+        s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_hasActiveVM(JNIEnv *env, jclass clazz) {
+    const VMState state = VMManager::GetState();
+    return (state >= VMState::Running && state <= VMState::Stopping);
 }
 
 
@@ -1452,10 +1559,12 @@ void Host::OnVMDestroyed()
 
 void Host::OnVMPaused()
 {
+    Native::vmSetPaused(true);
 }
 
 void Host::OnVMResumed()
 {
+    Native::vmSetPaused(false);
 }
 
 void Host::OnPerformanceMetricsUpdated()
@@ -1476,7 +1585,43 @@ void Host::OnSaveStateSaved(const std::string_view filename)
 
 void Host::RunOnCPUThread(std::function<void()> function, bool block /* = false */)
 {
-    pxFailRel("Not implemented");
+    const std::thread::id current_thread = std::this_thread::get_id();
+    bool run_inline = false;
+    {
+        std::lock_guard lock(s_cpu_thread_mutex);
+        run_inline = (s_cpu_thread_id == std::thread::id() || s_cpu_thread_id == current_thread);
+    }
+    if (run_inline)
+    {
+        function();
+        return;
+    }
+
+    if (block)
+    {
+        std::mutex wait_mutex;
+        std::condition_variable wait_cv;
+        bool done = false;
+        {
+            std::lock_guard lock(s_cpu_thread_mutex);
+            s_cpu_thread_queue.push_back([&]() {
+                function();
+                {
+                    std::lock_guard wait_lock(wait_mutex);
+                    done = true;
+                }
+                wait_cv.notify_one();
+            });
+        }
+
+        std::unique_lock wait_lock(wait_mutex);
+        wait_cv.wait(wait_lock, [&]() { return done; });
+    }
+    else
+    {
+        std::lock_guard lock(s_cpu_thread_mutex);
+        s_cpu_thread_queue.push_back(std::move(function));
+    }
 }
 
 void Host::RefreshGameListAsync(bool invalidate_cache)
@@ -1515,6 +1660,8 @@ void Host::RequestExitBigPicture()
 void Host::RequestVMShutdown(bool allow_confirm, bool allow_save_state, bool default_save_state)
 {
     VMManager::SetState(VMState::Stopping);
+    if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
+        Cpu->ExitExecution();
 }
 
 void Host::OnAchievementsLoginSuccess(const char* username, u32 points, u32 sc_points, u32 unread_messages)

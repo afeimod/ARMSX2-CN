@@ -3,7 +3,9 @@ package kr.co.iefriends.pcsx2;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.net.Uri;
+import android.os.Handler;
 import android.os.ParcelFileDescriptor;
+import android.os.Looper;
 import android.view.Surface;
 
 import com.armsx2.BiosInfo;
@@ -174,6 +176,7 @@ public class NativeApp {
 	public static native void pause();
 	public static native void resume();
 	public static native void shutdown();
+	public static native boolean hasActiveVM();
 
 	/** Persist the Vulkan pipeline cache to disk so cold restarts don't have
 	 *  to recompile every TFX pipeline. No-op for OpenGL (its cache flushes
@@ -250,10 +253,12 @@ public class NativeApp {
 	public static native String getAutosaveGamePath();
 
 	public static void vmSetPaused(boolean paused) {
-		if (paused)
-			Main.eState.setValue(EmuState.PAUSED);
-		else
-			Main.eState.setValue(EmuState.RUNNING);
+		new Handler(Looper.getMainLooper()).post(() -> {
+			if (paused)
+				Main.eState.setValue(EmuState.PAUSED);
+			else
+				Main.eState.setValue(EmuState.RUNNING);
+		});
 	}
 
 	// Call jni

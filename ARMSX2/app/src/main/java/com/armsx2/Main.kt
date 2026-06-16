@@ -183,6 +183,8 @@ class Main: ComponentActivity() {
         var instance : Main? = null
         lateinit var prefs: SharedPreferences
         val setupComplete = mutableStateOf(false)
+        val setupEditorVisible = mutableStateOf(false)
+        val nativeReady = mutableStateOf(false)
         // Tree URI of the user-picked PCSX2 system folder (where bios/,
         // memcards/, etc. should live). Persisted as `systemDir` pref.
         // When unset, emucore falls back to getExternalFilesDir(null)
@@ -394,18 +396,53 @@ class Main: ComponentActivity() {
             }
         }
 
+        private val vmLifecycleLock = Any()
+        @Volatile private var vmStopInProgress = false
+        @Volatile private var vmRestartAfterStop = false
+        @Volatile private var vmRunLoopActive = false
+
         fun start() {
-            invoke {
-                eState.value = EmuState.RUNNING
-                applyRendererPrefs()
-                NativeApp.runVMThread(m_szGamefile)
-                // runVMThread blocks until the VM exits (Stopping/Shutdown
-                // observed). Drop back to STOPPED so the GamesList overlay
-                // reappears — otherwise a failed Initialize leaves eState
-                // stuck at RUNNING and the UI looks hung.
-                eState.value = EmuState.STOPPED
+            synchronized(vmLifecycleLock) {
+                if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED) {
+                    vmRestartAfterStop = true
+                    return
+                }
+                vmRunLoopActive = true
             }
-            WindowImpl.toolbarVisible.value = false
+
+            invoke {
+                try {
+                    eState.value = EmuState.RUNNING
+                    WindowImpl.showLibrary.value = false
+                    WindowImpl.overlayVisible.value = false
+                    WindowImpl.toolbarVisible.value = false
+                    applyRendererPrefs()
+                    NativeApp.runVMThread(m_szGamefile)
+                } finally {
+                    // runVMThread blocks until the VM exits (Stopping/Shutdown
+                    // observed). Drop back to STOPPED only after native has
+                    // actually unwound, so users can't launch the next game
+                    // while the previous VM is still tearing down.
+                    eState.value = EmuState.STOPPED
+                    val restartNow = synchronized(vmLifecycleLock) {
+                        vmRunLoopActive = false
+                        vmStopInProgress = false
+                        if (vmRestartAfterStop) {
+                            vmRestartAfterStop = false
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (restartNow) {
+                        start()
+                    } else {
+                        WindowImpl.toolbarVisible.value = true
+                        WindowImpl.showLibrary.value = false
+                        WindowImpl.overlayVisible.value = false
+                    }
+                }
+            }
         }
 
         /** Push setup-wizard renderer/upscale choices into emucore's
@@ -467,7 +504,15 @@ class Main: ComponentActivity() {
         fun launchGame(uri: String, info: GameInfo? = null) {
             currentGame.value = info
             m_szGamefile = uri
-            restart()
+            synchronized(vmLifecycleLock) {
+                if (eState.value != EmuState.STOPPED || vmStopInProgress || vmRunLoopActive) {
+                    vmRestartAfterStop = true
+                }
+            }
+            if (eState.value == EmuState.STOPPED && !vmStopInProgress && !vmRunLoopActive)
+                start()
+            else
+                stop(restartAfterStop = true)
         }
 
         /**
@@ -479,23 +524,39 @@ class Main: ComponentActivity() {
         fun startBios() {
             currentGame.value = null
             m_szGamefile = ""
+            val shouldStart = synchronized(vmLifecycleLock) {
+                if (vmStopInProgress || vmRunLoopActive || eState.value != EmuState.STOPPED) {
+                    vmRestartAfterStop = true
+                    false
+                } else {
+                    vmRunLoopActive = true
+                    true
+                }
+            }
+            if (!shouldStart) {
+                stop(restartAfterStop = true)
+                return
+            }
             invoke {
-                eState.value = EmuState.RUNNING
-                applyRendererPrefs()
-                NativeApp.runVMThread(m_szGamefile)
-                eState.value = EmuState.STOPPED
+                try {
+                    eState.value = EmuState.RUNNING
+                    applyRendererPrefs()
+                    NativeApp.runVMThread(m_szGamefile)
+                } finally {
+                    eState.value = EmuState.STOPPED
+                    synchronized(vmLifecycleLock) {
+                        vmRunLoopActive = false
+                        vmStopInProgress = false
+                        vmRestartAfterStop = false
+                    }
+                }
             }
         }
 
         // pause/resume run on a dedicated serialized executor, NOT the UI
-        // thread. NativeApp.pause() is synchronous and can block for seconds:
-        // SetState(Paused) drains the MTVU ring (vu1Thread.WaitVU) and waits
-        // on MTGS (WaitGS) with no watchdog, then pause() busy-waits up to 3s
-        // for the EE to park outside Execute(). Running that on the UI thread
-        // froze the whole app on long-press-to-pause (overlay appeared late
-        // or never). A single thread keeps pause/resume strictly ordered, so
-        // a fast open→close can't resume before the pause lands; native
-        // resume() runs inline on this executor for the same reason.
+        // thread. The native side queues the real pause/resume onto the CPU
+        // thread, so a fast open→close still lands in the right order without
+        // making the Android UI wait for MTVU/MTGS to park.
         // eState is set eagerly for instant UI feedback — the authoritative
         // value is re-asserted by Host::OnVMPaused/Resumed → vmSetPaused.
         private val vmControl = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
@@ -503,23 +564,92 @@ class Main: ComponentActivity() {
         }
 
         fun pause() {
+            if (vmStopInProgress)
+                return
             eState.value = EmuState.PAUSED
-            vmControl.execute { NativeApp.pause() }
+            vmControl.execute {
+                if (!vmStopInProgress)
+                    NativeApp.pause()
+            }
         }
 
         fun resume() {
+            if (vmStopInProgress)
+                return
             eState.value = EmuState.RUNNING
-            vmControl.execute { NativeApp.resume() }
+            vmControl.execute {
+                if (!vmStopInProgress)
+                    NativeApp.resume()
+            }
         }
 
-        fun stop() {
-            NativeApp.shutdown()
-            eState.value = EmuState.STOPPED
+        fun stop(saveAutosave: Boolean = false, restartAfterStop: Boolean = false) {
+            val shouldStop = synchronized(vmLifecycleLock) {
+                if (restartAfterStop)
+                    vmRestartAfterStop = true
+                else
+                    vmRestartAfterStop = false
+
+                if (vmStopInProgress) {
+                    false
+                } else if (eState.value == EmuState.STOPPED && !vmRunLoopActive) {
+                    false
+                } else {
+                    vmStopInProgress = true
+                    true
+                }
+            }
+            if (!shouldStop)
+                return
+
+            WindowImpl.overlayVisible.value = false
+            WindowImpl.showLibrary.value = false
+            vmControl.execute {
+                if (saveAutosave)
+                    NativeApp.saveAutosaveState()
+                NativeApp.shutdown()
+                if (!vmRunLoopActive && (eState.value == EmuState.STOPPED || !NativeApp.hasActiveVM())) {
+                    eState.value = EmuState.STOPPED
+                    val restartNow = synchronized(vmLifecycleLock) {
+                        vmStopInProgress = false
+                        if (vmRestartAfterStop) {
+                            vmRestartAfterStop = false
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (restartNow) {
+                        start()
+                    } else {
+                        synchronized(vmLifecycleLock) {
+                            WindowImpl.toolbarVisible.value = true
+                            WindowImpl.showLibrary.value = false
+                            WindowImpl.overlayVisible.value = false
+                        }
+                    }
+                }
+            }
         }
 
         fun restart() {
-            stop()
-            start()
+            synchronized(vmLifecycleLock) {
+                vmRestartAfterStop = true
+            }
+            if (eState.value == EmuState.STOPPED && !vmStopInProgress && !vmRunLoopActive)
+                start()
+            else
+                stop(restartAfterStop = true)
+        }
+
+        fun finishSetup() {
+            prefs.edit().putBoolean("setupComplete", true).apply()
+            setupComplete.value = true
+            setupEditorVisible.value = false
+        }
+
+        fun reopenSetup() {
+            setupEditorVisible.value = true
         }
 
         fun renderOpenGL() {
@@ -654,6 +784,7 @@ class Main: ComponentActivity() {
 
         invoke {
             NativeApp.initializeOnce(applicationContext)
+            nativeReady.value = true
 
             // Pin Filenames/BIOS to the file the setup wizard copied —
             // deferred to here because Host::SetBaseStringSettingValue
@@ -824,7 +955,9 @@ class Main: ComponentActivity() {
             val needsGate = setupComplete.value &&
                 !allFilesAccessGranted.value &&
                 !systemDirIsAppPrivate(ctx)
-            if (needsGate) {
+            if (!setupComplete.value || setupEditorVisible.value) {
+                SetupImpl.SetupWindow()
+            } else if (needsGate) {
                 AllFilesAccessScreen(
                     onGrant = { requestAllFilesAccess(ctx) },
                     onUseAppPrivate = {
@@ -944,8 +1077,6 @@ class Main: ComponentActivity() {
                         }
                     }
                 }
-            } else {
-                SetupImpl.SetupWindow()
             }
         }
     }

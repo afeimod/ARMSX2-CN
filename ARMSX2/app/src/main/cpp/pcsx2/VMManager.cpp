@@ -276,6 +276,20 @@ void VMManager::SetState(VMState state)
 	// Some state transitions aren't valid.
 	const VMState old_state = s_state.load(std::memory_order_acquire);
 	pxAssert(state != VMState::Initializing && state != VMState::Shutdown);
+
+	// Once a stop has been signalled, Stopping is terminal: ignore any reversion
+	// to a live state. On Android, pause/resume are dispatched asynchronously to
+	// the CPU thread, and when Exit is pressed from the (paused) in-game overlay
+	// those queued tasks race the shutdown and flip Stopping back to Running/
+	// Paused. That left the run loop re-entering Execute() forever — the
+	// exit-game hang (the EE *did* break out on Stopping, but state bounced back
+	// to Running before the loop could tear down). Stopping only ever advances to
+	// Shutdown, which VMManager::Shutdown sets via a direct store, not SetState —
+	// so this guard never blocks the real teardown, and a brand-new VM (old_state
+	// == Shutdown) is unaffected.
+	if (old_state == VMState::Stopping)
+		return;
+
 	SetTimerResolutionIncreased(state == VMState::Running);
 	s_state.store(state, std::memory_order_release);
 

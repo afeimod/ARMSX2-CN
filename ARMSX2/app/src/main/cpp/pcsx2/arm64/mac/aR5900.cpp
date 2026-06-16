@@ -165,6 +165,7 @@ alignas(16) static u8 manual_counter[Ps2MemSize::TotalRam >> __pageshift];
 static bool eeRecExecuting = false;
 static bool eeRecNeedsReset = false;
 static bool eeRecExitRequested = false;
+static volatile u8 eeRecExitSignal = 0;
 static fastjmp_buf s_jmp_buf;
 
 static void recResetRaw();
@@ -2863,6 +2864,13 @@ static void recGenDispatchers()
 static void recEmitEventTestAndDispatch(u32 scaled_cycles, bool add_cycles, bool known_dispatch_pc, u32 dispatch_pc,
 	u32 waitloop_selfpc = 0)
 {
+	a64::Label no_forced_exit;
+	armMoveAddressToReg(RXARG3, const_cast<u8*>(&eeRecExitSignal));
+	armAsm->Ldrb(RWARG3, a64::MemOperand(RXARG3));
+	armAsm->Cbz(RWARG3, &no_forced_exit);
+	armEmitJmp(DispatcherEvent);
+	armAsm->Bind(&no_forced_exit);
+
 	armAsm->Ldr(RXARG1, a64::MemOperand(RESTATEPTR, EE_CYCLE_OFFSET)); // x0 = cpuRegs.cycle (u64)
 	if (add_cycles)
 	{
@@ -3186,9 +3194,23 @@ static void recEventTest()
 
 	_cpuEventTest_Shared();
 
-	if (eeRecExitRequested)
+	// Break out of the recompiler on a STOP/SHUTDOWN request, in addition to the
+	// cooperative eeRecExitRequested flag. We deliberately do NOT trigger on
+	// Paused: pausing must leave the CPU thread parked exactly where the old
+	// overlay-pause path left it. Forcing an exit on Paused made the run loop
+	// enter its idle/pump branch on every gear tap and crashed in-game settings.
+	// Stop/Shutdown is the state that genuinely must unwind out of Execute().
+	const VMState st = VMManager::GetState();
+	if (eeRecExitRequested || st == VMState::Stopping || st == VMState::Shutdown)
 	{
+		if (st == VMState::Stopping || st == VMState::Shutdown)
+		{
+			static int s_n = 0;
+			if (s_n < 4)
+				Console.WriteLn("@@EE_STOP_EXIT@@ n=%d state=%d", s_n++, static_cast<int>(st));
+		}
 		eeRecExitRequested = false;
+		eeRecExitSignal = 0;
 		fastjmp_jmp(&s_jmp_buf, 1);
 	}
 }
@@ -3241,8 +3263,14 @@ static void recExecute()
 static void recSafeExitExecution()
 {
 	// Ask the dispatcher loop to fastjmp out at the next event test. Forcing the
-	// event cycle to 0 guarantees the test fires after the current block.
+	// event cycle to 0 normally guarantees the test fires after the current block.
+	// Android pause/shutdown can request this from another thread while the Mac
+	// EE dispatcher is running entirely in generated code, so every block tail
+	// also checks a separate byte before the cycle compare. That prevents the
+	// VM from getting stuck in Execute() if the soft nextEventCycle poke does
+	// not interrupt promptly.
 	eeRecExitRequested = true;
+	eeRecExitSignal = 1;
 	cpuRegs.nextEventCycle = 0;
 }
 

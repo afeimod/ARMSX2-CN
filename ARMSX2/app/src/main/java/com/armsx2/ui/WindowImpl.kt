@@ -89,11 +89,13 @@ object WindowImpl {
                     if (overlayVisible.value) {
                         InGameOverlay.Render()
                     }
+                    if (MemoryCardManager.visible.value) {
+                        MemoryCardManager.Render()
+                    }
                 }
-                // Suppress the side toolbar while the overlay is up — the
-                // overlay's "Show Toolbar" item is the way to reach it.
-                if ((Main.eState.value == EmuState.STOPPED) && !overlayVisible.value)
-                    ToolbarImpl.Toolbar()
+                // The stopped-state library now owns its navigation chrome.
+                // Keeping the legacy side toolbar here makes the redesigned
+                // shelf UI look like the old app with a new panel bolted on.
             }
         }
     }

@@ -61,6 +61,18 @@ data class Settings(
     /** EmuCore/GS/FrameLimitEnable. */
     val frameLimitEnable: Boolean = true,
 
+    // ---- DEV9 — PS2 HDD / Ethernet ----
+    /** DEV9/Eth/EthEnable — PS2 network adapter. */
+    val dev9EthEnable: Boolean = false,
+    /** DEV9/Eth/EthApi — "Sockets" is the usable Android backend. */
+    val dev9EthApi: String = "Sockets",
+    /** DEV9/Eth/EthDevice — "Auto" lets the sockets backend choose. */
+    val dev9EthDevice: String = "Auto",
+    /** DEV9/Hdd/HddEnable — virtual PS2 HDD. */
+    val dev9HddEnable: Boolean = false,
+    /** DEV9/Hdd/HddFile — path/name of the virtual HDD image. */
+    val dev9HddFile: String = "DEV9hdd.raw",
+
     // ---- EmuCore/CPU/Recompiler — recompiler enables ----
     /** EmuCore/CPU/Recompiler/EnableEE — EE (R5900) recompiler. */
     val recEE: Boolean = true,
@@ -163,6 +175,13 @@ data class Settings(
         // 3 = Unlimited.
         NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", frameLimitEnable.toString())
         NativeApp.speedhackLimitermode(if (frameLimitEnable) 0 else 3)
+        // DEV9. Networking/HDD are initialized with the VM, so changes
+        // made from the in-game overlay are persisted for the next boot.
+        NativeApp.setSetting("DEV9/Eth", "EthEnable", "bool", dev9EthEnable.toString())
+        NativeApp.setSetting("DEV9/Eth", "EthApi", "string", dev9EthApi)
+        NativeApp.setSetting("DEV9/Eth", "EthDevice", "string", dev9EthDevice.ifEmpty { "Auto" })
+        NativeApp.setSetting("DEV9/Hdd", "HddEnable", "bool", dev9HddEnable.toString())
+        NativeApp.setSetting("DEV9/Hdd", "HddFile", "string", dev9HddFile.ifEmpty { "DEV9hdd.raw" })
         // Recompiler enables. Picked up by VMManager::ApplySettings →
         // SysCpuProviderPack rebind. Toggling these on a running VM swaps
         // the dispatch pointer; existing JIT block caches are flushed by
@@ -214,6 +233,11 @@ data class Settings(
         put("vuDeferredWrites", vuDeferredWrites)
         put("vuSkipStallSim", vuSkipStallSim)
         put("frameLimitEnable", frameLimitEnable)
+        put("dev9EthEnable", dev9EthEnable)
+        put("dev9EthApi", dev9EthApi)
+        put("dev9EthDevice", dev9EthDevice)
+        put("dev9HddEnable", dev9HddEnable)
+        put("dev9HddFile", dev9HddFile)
         put("recEE", recEE)
         put("recIOP", recIOP)
         put("recVU0", recVU0)
@@ -252,6 +276,11 @@ data class Settings(
                 vuDeferredWrites = json.optBoolean("vuDeferredWrites", def.vuDeferredWrites),
                 vuSkipStallSim = json.optBoolean("vuSkipStallSim", def.vuSkipStallSim),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
+                dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
+                dev9EthApi = json.optString("dev9EthApi", def.dev9EthApi).ifEmpty { def.dev9EthApi },
+                dev9EthDevice = json.optString("dev9EthDevice", def.dev9EthDevice).ifEmpty { def.dev9EthDevice },
+                dev9HddEnable = json.optBoolean("dev9HddEnable", def.dev9HddEnable),
+                dev9HddFile = json.optString("dev9HddFile", def.dev9HddFile).ifEmpty { def.dev9HddFile },
                 recEE = json.optBoolean("recEE", def.recEE),
                 recIOP = json.optBoolean("recIOP", def.recIOP),
                 recVU0 = json.optBoolean("recVU0", def.recVU0),
@@ -299,6 +328,11 @@ data class Settings(
             if (current.vuDeferredWrites    != base.vuDeferredWrites)    j.put("vuDeferredWrites", current.vuDeferredWrites)
             if (current.vuSkipStallSim      != base.vuSkipStallSim)      j.put("vuSkipStallSim", current.vuSkipStallSim)
             if (current.frameLimitEnable    != base.frameLimitEnable)    j.put("frameLimitEnable", current.frameLimitEnable)
+            if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
+            if (current.dev9EthApi          != base.dev9EthApi)          j.put("dev9EthApi", current.dev9EthApi)
+            if (current.dev9EthDevice       != base.dev9EthDevice)       j.put("dev9EthDevice", current.dev9EthDevice)
+            if (current.dev9HddEnable       != base.dev9HddEnable)       j.put("dev9HddEnable", current.dev9HddEnable)
+            if (current.dev9HddFile         != base.dev9HddFile)         j.put("dev9HddFile", current.dev9HddFile)
             if (current.recEE               != base.recEE)               j.put("recEE", current.recEE)
             if (current.recIOP              != base.recIOP)              j.put("recIOP", current.recIOP)
             if (current.recVU0              != base.recVU0)              j.put("recVU0", current.recVU0)
@@ -333,6 +367,11 @@ data class Settings(
             vuDeferredWrites = if (overrides.has("vuDeferredWrites")) overrides.getBoolean("vuDeferredWrites") else base.vuDeferredWrites,
             vuSkipStallSim = if (overrides.has("vuSkipStallSim")) overrides.getBoolean("vuSkipStallSim") else base.vuSkipStallSim,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
+            dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,
+            dev9EthApi = if (overrides.has("dev9EthApi")) overrides.getString("dev9EthApi").ifEmpty { base.dev9EthApi } else base.dev9EthApi,
+            dev9EthDevice = if (overrides.has("dev9EthDevice")) overrides.getString("dev9EthDevice").ifEmpty { base.dev9EthDevice } else base.dev9EthDevice,
+            dev9HddEnable = if (overrides.has("dev9HddEnable")) overrides.getBoolean("dev9HddEnable") else base.dev9HddEnable,
+            dev9HddFile = if (overrides.has("dev9HddFile")) overrides.getString("dev9HddFile").ifEmpty { base.dev9HddFile } else base.dev9HddFile,
             recEE = if (overrides.has("recEE")) overrides.getBoolean("recEE") else base.recEE,
             recIOP = if (overrides.has("recIOP")) overrides.getBoolean("recIOP") else base.recIOP,
             recVU0 = if (overrides.has("recVU0")) overrides.getBoolean("recVU0") else base.recVU0,

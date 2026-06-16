@@ -53,17 +53,27 @@
         <meta-data android:name="android.max_aspect" android:value="2.4" />
 
         <activity
+            android:name=".BootSplashActivity"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize"
+            android:hardwareAccelerated="true"
+            android:exported="true"
+            android:resizeableActivity="false"
+            android:theme="@style/Theme.PASX2.Boot">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.GAME" />
+            </intent-filter>
+        </activity>
+
+        <activity
             android:name=".Main"
             android:screenOrientation="sensorLandscape"
             android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|uiMode|screenSize|smallestScreenSize"
             android:hardwareAccelerated="true"
             android:exported="true"
-            android:resizeableActivity="false">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:resizeableActivity="false" />
     </application>
 
 

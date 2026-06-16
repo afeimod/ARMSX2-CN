@@ -28,10 +28,6 @@ class SettingsButton : ToolbarButton() {
 
         // Reset wizard navigation state so it opens at Welcome again.
         SetupImpl.resetForReentry()
-
-        // Clear the persisted setupComplete bit so a process death mid-edit
-        // re-enters the wizard rather than skipping past it.
-        Main.prefs.edit().putBoolean("setupComplete", false).apply()
-        Main.setupComplete.value = false
+        Main.reopenSetup()
     }
 }

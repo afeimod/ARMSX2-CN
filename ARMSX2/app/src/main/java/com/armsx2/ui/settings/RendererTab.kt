@@ -34,6 +34,10 @@ fun RendererTab(state: MutableState<Settings>) {
             .fillMaxWidth()
             .verticalScroll(scroll),
     ) {
+        // Graphics API (OpenGL / Vulkan) + Vulkan custom-driver picker. Ported
+        // from the removed first-run setup renderer page into settings.
+        RendererBackendSection()
+        SettingsDivider()
         IntSliderRow(
             label = "Upscale",
             value = Main.upscale.value,

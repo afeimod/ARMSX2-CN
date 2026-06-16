@@ -14,6 +14,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.armsx2.ui.toolbar.EmulatorSettingsButton
+import com.armsx2.ui.toolbar.MemoryCardsButton
 import com.armsx2.ui.toolbar.PauseButton
 import com.armsx2.ui.toolbar.RestartButton
 import com.armsx2.ui.toolbar.SettingsButton
@@ -36,7 +37,7 @@ object ToolbarImpl {
         // TestsButton uses the drawer pattern (the only button that does),
         // exposing the runtime-test pass/fail counts on demand instead of
         // taking up the main screen.
-        lowerButtons.addAll(arrayOf(PauseButton(), RestartButton(), StopButton(), TestsButton(), EmulatorSettingsButton(), SettingsButton()))
+        lowerButtons.addAll(arrayOf(PauseButton(), RestartButton(), StopButton(), TestsButton(), EmulatorSettingsButton(), MemoryCardsButton(), SettingsButton()))
     }
 
     @Composable

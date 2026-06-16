@@ -15,8 +15,8 @@ android {
         applicationId = "com.armsx2"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.0-stopstick"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
