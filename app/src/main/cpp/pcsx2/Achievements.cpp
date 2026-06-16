@@ -2006,11 +2006,45 @@ bool Achievements::Login(const char* username, const char* password, Error* erro
 	}
 
 	LoginWithPasswordParameters params = {username, error, nullptr, false};
+	auto begin_password_login = [&params, client, username, password]() {
+		Error::Clear(params.error);
+		params.request = nullptr;
+		params.result = false;
+		params.request = rc_client_begin_login_with_password(client, username, password, ClientLoginWithPasswordCallback, &params);
+		Console.WriteLn("@@RA_LOGIN_REQUEST@@ created=%d logged_in=%d error=\"%s\"",
+			params.request ? 1 : 0, rc_client_get_user_info(client) ? 1 : 0,
+			params.error && params.error->IsValid() ? params.error->GetDescription().c_str() : "");
+		return (params.request != nullptr);
+	};
 
-	params.request = rc_client_begin_login_with_password(client, username, password, ClientLoginWithPasswordCallback, &params);
+	if (!is_temporary_client && s_login_request)
+	{
+		Console.Warning("@@RA_LOGIN_RECOVER@@ reason=pending_token_login");
+		rc_client_abort_async(client, s_login_request);
+		s_login_request = nullptr;
+		rc_client_logout(client);
+		if (http)
+			http->WaitForAllRequests();
+	}
+
+	begin_password_login();
 	if (!params.request)
 	{
-		Error::SetString(error, "Failed to create login request.");
+		const bool login_already_in_progress =
+			error && error->IsValid() && StringUtil::ContainsSubString(error->GetDescription(), "Login already in progress");
+		if (!is_temporary_client && login_already_in_progress)
+		{
+			Console.Warning("@@RA_LOGIN_RECOVER@@ reason=stale_login_state");
+			rc_client_logout(client);
+			if (http)
+				http->WaitForAllRequests();
+			begin_password_login();
+		}
+	}
+	if (!params.request)
+	{
+		if (!error || !error->IsValid())
+			Error::SetString(error, "Failed to create login request.");
 		return false;
 	}
 
