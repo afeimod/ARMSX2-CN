@@ -263,6 +263,9 @@ object InGameOverlay {
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
         }
 
+        if (previous.vu1Instant != updated.vu1Instant)
+            NativeApp.setInstantVU1(updated.vu1Instant)
+
         if (previous.aspectRatio != updated.aspectRatio) {
             val ratio = updated.aspectRatio.coerceIn(0, 4)
             val name = when (ratio) {

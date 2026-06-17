@@ -26,9 +26,8 @@ data class Settings(
     /** EmuCore/Speedhacks/EECycleSkip — 0..3. 0 = no skip. */
     val eeCycleSkip: Int = 0,
     /** EmuCore/Speedhacks/vuThread — Multi-Threaded VU1 (MTVU).
-     *  Kept on by default for the mac ARM64 backend. Old Android Refresh
-     *  config blobs may contain mtvu=false, so loading/merging ignores stale
-     *  persisted values while the live toggle can still A/B a running game. */
+     *  Kept on by default for the mac ARM64 backend, but persisted normally
+     *  so testers can A/B games which dislike MTVU. */
     val mtvu: Boolean = true,
     /** EmuCore/Speedhacks/vu1Instant — completes VU1 in one cycle. */
     val vu1Instant: Boolean = true,
@@ -63,6 +62,9 @@ data class Settings(
     /** EmuCore/GS/AspectRatio:
      *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
     val aspectRatio: Int = 1,
+    /** EmuCore/GS/deinterlace_mode — GSInterlaceMode:
+     *  0 Auto · 1 Off · 2/3 Weave · 4/5 Bob · 6/7 Blend · 8/9 Adaptive. */
+    val deinterlaceMode: Int = 0,
 
     // ---- DEV9 — PS2 HDD / Ethernet ----
     /** DEV9/Eth/EthEnable — PS2 network adapter. */
@@ -141,6 +143,9 @@ data class Settings(
     /** EmuCore/GS/texture_preloading — TexturePreloadingLevel:
      *  0 Off · 1 Partial · 2 Full. */
     val texturePreloading: Int = 2,
+    /** EmuCore/GS/HWDownloadMode — GSHardwareDownloadMode:
+     *  0 Accurate · 1 Force Full · 2 No Readbacks · 3 Unsync · 4 Disabled. */
+    val hardwareDownloadMode: Int = 0,
     /** EmuCore/GS/LoadTextureReplacements. */
     val loadTextureReplacements: Boolean = false,
     /** EmuCore/GS/LoadTextureReplacementsAsync. */
@@ -197,6 +202,7 @@ data class Settings(
         }
         NativeApp.setSetting("EmuCore/GS", "AspectRatio", "string", aspectRatioName)
         NativeApp.setAspectRatio(aspectRatio.coerceIn(0, 4))
+        NativeApp.setSetting("EmuCore/GS", "deinterlace_mode", "int", deinterlaceMode.coerceIn(0, 9).toString())
         // DEV9. Networking/HDD are initialized with the VM, so changes
         // made from the in-game overlay are persisted for the next boot.
         NativeApp.setSetting("DEV9/Eth", "EthEnable", "bool", dev9EthEnable.toString())
@@ -228,6 +234,7 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
         NativeApp.setSetting("EmuCore/GS", "filter", "int", textureFiltering.toString())
         NativeApp.setSetting("EmuCore/GS", "texture_preloading", "int", texturePreloading.toString())
+        NativeApp.setSetting("EmuCore/GS", "HWDownloadMode", "int", hardwareDownloadMode.coerceIn(0, 4).toString())
         NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacements", "bool", loadTextureReplacements.toString())
         NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacementsAsync", "bool", loadTextureReplacementsAsync.toString())
         NativeApp.setSetting("EmuCore/GS", "PrecacheTextureReplacements", "bool", precacheTextureReplacements.toString())
@@ -250,7 +257,7 @@ data class Settings(
     fun toJson(): JSONObject = JSONObject().apply {
         put("eeCycleRate", eeCycleRate)
         put("eeCycleSkip", eeCycleSkip)
-        put("mtvu", true)
+        put("mtvu", mtvu)
         put("vu1Instant", vu1Instant)
         put("vuFlagHack", vuFlagHack)
         put("fastCDVD", fastCDVD)
@@ -261,6 +268,7 @@ data class Settings(
         put("vuSkipStallSim", vuSkipStallSim)
         put("frameLimitEnable", frameLimitEnable)
         put("aspectRatio", aspectRatio)
+        put("deinterlaceMode", deinterlaceMode)
         put("dev9EthEnable", dev9EthEnable)
         put("dev9EthApi", dev9EthApi)
         put("dev9EthDevice", dev9EthDevice)
@@ -279,6 +287,7 @@ data class Settings(
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
         put("texturePreloading", texturePreloading)
+        put("hardwareDownloadMode", hardwareDownloadMode)
         put("loadTextureReplacements", loadTextureReplacements)
         put("loadTextureReplacementsAsync", loadTextureReplacementsAsync)
         put("precacheTextureReplacements", precacheTextureReplacements)
@@ -299,7 +308,7 @@ data class Settings(
             return Settings(
                 eeCycleRate = json.optInt("eeCycleRate", def.eeCycleRate),
                 eeCycleSkip = json.optInt("eeCycleSkip", def.eeCycleSkip),
-                mtvu = true,
+                mtvu = json.optBoolean("mtvu", def.mtvu),
                 vu1Instant = json.optBoolean("vu1Instant", def.vu1Instant),
                 vuFlagHack = json.optBoolean("vuFlagHack", def.vuFlagHack),
                 fastCDVD = json.optBoolean("fastCDVD", def.fastCDVD),
@@ -310,6 +319,7 @@ data class Settings(
                 vuSkipStallSim = json.optBoolean("vuSkipStallSim", def.vuSkipStallSim),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
                 aspectRatio = json.optInt("aspectRatio", def.aspectRatio),
+                deinterlaceMode = json.optInt("deinterlaceMode", def.deinterlaceMode),
                 dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
                 dev9EthApi = json.optString("dev9EthApi", def.dev9EthApi).ifEmpty { def.dev9EthApi },
                 dev9EthDevice = json.optString("dev9EthDevice", def.dev9EthDevice).ifEmpty { def.dev9EthDevice },
@@ -332,6 +342,7 @@ data class Settings(
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
                 texturePreloading = json.optInt("texturePreloading", def.texturePreloading),
+                hardwareDownloadMode = json.optInt("hardwareDownloadMode", def.hardwareDownloadMode),
                 loadTextureReplacements = json.optBoolean("loadTextureReplacements", def.loadTextureReplacements),
                 loadTextureReplacementsAsync = json.optBoolean("loadTextureReplacementsAsync", def.loadTextureReplacementsAsync),
                 precacheTextureReplacements = json.optBoolean("precacheTextureReplacements", def.precacheTextureReplacements),
@@ -358,6 +369,7 @@ data class Settings(
             val j = JSONObject()
             if (current.eeCycleRate         != base.eeCycleRate)         j.put("eeCycleRate", current.eeCycleRate)
             if (current.eeCycleSkip         != base.eeCycleSkip)         j.put("eeCycleSkip", current.eeCycleSkip)
+            if (current.mtvu                != base.mtvu)                j.put("mtvu", current.mtvu)
             if (current.vu1Instant          != base.vu1Instant)          j.put("vu1Instant", current.vu1Instant)
             if (current.vuFlagHack          != base.vuFlagHack)          j.put("vuFlagHack", current.vuFlagHack)
             if (current.fastCDVD            != base.fastCDVD)            j.put("fastCDVD", current.fastCDVD)
@@ -368,6 +380,7 @@ data class Settings(
             if (current.vuSkipStallSim      != base.vuSkipStallSim)      j.put("vuSkipStallSim", current.vuSkipStallSim)
             if (current.frameLimitEnable    != base.frameLimitEnable)    j.put("frameLimitEnable", current.frameLimitEnable)
             if (current.aspectRatio         != base.aspectRatio)         j.put("aspectRatio", current.aspectRatio)
+            if (current.deinterlaceMode     != base.deinterlaceMode)     j.put("deinterlaceMode", current.deinterlaceMode)
             if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
             if (current.dev9EthApi          != base.dev9EthApi)          j.put("dev9EthApi", current.dev9EthApi)
             if (current.dev9EthDevice       != base.dev9EthDevice)       j.put("dev9EthDevice", current.dev9EthDevice)
@@ -386,6 +399,7 @@ data class Settings(
             if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
             if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
             if (current.texturePreloading   != base.texturePreloading)   j.put("texturePreloading", current.texturePreloading)
+            if (current.hardwareDownloadMode!= base.hardwareDownloadMode)j.put("hardwareDownloadMode", current.hardwareDownloadMode)
             if (current.loadTextureReplacements != base.loadTextureReplacements) j.put("loadTextureReplacements", current.loadTextureReplacements)
             if (current.loadTextureReplacementsAsync != base.loadTextureReplacementsAsync) j.put("loadTextureReplacementsAsync", current.loadTextureReplacementsAsync)
             if (current.precacheTextureReplacements != base.precacheTextureReplacements) j.put("precacheTextureReplacements", current.precacheTextureReplacements)
@@ -402,7 +416,7 @@ data class Settings(
         fun merge(base: Settings, overrides: JSONObject): Settings = Settings(
             eeCycleRate = if (overrides.has("eeCycleRate")) overrides.getInt("eeCycleRate") else base.eeCycleRate,
             eeCycleSkip = if (overrides.has("eeCycleSkip")) overrides.getInt("eeCycleSkip") else base.eeCycleSkip,
-            mtvu = true,
+            mtvu = if (overrides.has("mtvu")) overrides.getBoolean("mtvu") else base.mtvu,
             vu1Instant = if (overrides.has("vu1Instant")) overrides.getBoolean("vu1Instant") else base.vu1Instant,
             vuFlagHack = if (overrides.has("vuFlagHack")) overrides.getBoolean("vuFlagHack") else base.vuFlagHack,
             fastCDVD = if (overrides.has("fastCDVD")) overrides.getBoolean("fastCDVD") else base.fastCDVD,
@@ -413,6 +427,7 @@ data class Settings(
             vuSkipStallSim = if (overrides.has("vuSkipStallSim")) overrides.getBoolean("vuSkipStallSim") else base.vuSkipStallSim,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
             aspectRatio = if (overrides.has("aspectRatio")) overrides.getInt("aspectRatio") else base.aspectRatio,
+            deinterlaceMode = if (overrides.has("deinterlaceMode")) overrides.getInt("deinterlaceMode") else base.deinterlaceMode,
             dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,
             dev9EthApi = if (overrides.has("dev9EthApi")) overrides.getString("dev9EthApi").ifEmpty { base.dev9EthApi } else base.dev9EthApi,
             dev9EthDevice = if (overrides.has("dev9EthDevice")) overrides.getString("dev9EthDevice").ifEmpty { base.dev9EthDevice } else base.dev9EthDevice,
@@ -435,6 +450,7 @@ data class Settings(
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,
             texturePreloading = if (overrides.has("texturePreloading")) overrides.getInt("texturePreloading") else base.texturePreloading,
+            hardwareDownloadMode = if (overrides.has("hardwareDownloadMode")) overrides.getInt("hardwareDownloadMode") else base.hardwareDownloadMode,
             loadTextureReplacements = if (overrides.has("loadTextureReplacements")) overrides.getBoolean("loadTextureReplacements") else base.loadTextureReplacements,
             loadTextureReplacementsAsync = if (overrides.has("loadTextureReplacementsAsync")) overrides.getBoolean("loadTextureReplacementsAsync") else base.loadTextureReplacementsAsync,
             precacheTextureReplacements = if (overrides.has("precacheTextureReplacements")) overrides.getBoolean("precacheTextureReplacements") else base.precacheTextureReplacements,

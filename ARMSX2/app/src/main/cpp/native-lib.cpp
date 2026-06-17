@@ -610,6 +610,15 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackEecycleskip(JNIEnv *env, jclass cl
                                                           jint p_value) {
 }
 
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setInstantVU1(JNIEnv*, jclass, jboolean enabled) {
+    const bool value = (enabled == JNI_TRUE);
+    Host::SetBaseBoolSettingValue("EmuCore/Speedhacks", "vu1Instant", value);
+    EmuConfig.Speedhacks.vu1Instant = value;
+    Console.WriteLnFmt("@@ANDROID_SPEEDHACK@@ vu1Instant={}", value ? 1 : 0);
+}
+
 // Savestate save/load and live GS reconfiguration mutate VM state that the
 // EE/MTVU/MTGS pipeline reads concurrently, and upstream only ever runs them
 // on the CPU thread. Our JNI entry points run on UI / Dispatchers.IO threads

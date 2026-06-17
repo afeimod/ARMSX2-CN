@@ -87,6 +87,17 @@ fun RendererTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(aspectRatio = it)) },
         )
         SettingsDivider()
+        SegmentedGridRow(
+            label = "Deinterlacing",
+            options = listOf(
+                "Auto", "Off", "Weave TFF", "Weave BFF", "Bob TFF",
+                "Bob BFF", "Blend TFF", "Blend BFF", "Adapt TFF", "Adapt BFF",
+            ),
+            selectedIndex = s.deinterlaceMode.coerceIn(0, 9),
+            columns = 5,
+            onChange = { apply(s.copy(deinterlaceMode = it)) },
+        )
+        SettingsDivider()
         SegmentedRow(
             label = "Texture Filtering",
             options = listOf("Nearest", "Forced", "PS2", "Sprite"),
@@ -99,6 +110,14 @@ fun RendererTab(state: MutableState<Settings>) {
             options = listOf("Off", "Partial", "Full"),
             selectedIndex = s.texturePreloading.coerceIn(0, 2),
             onChange = { apply(s.copy(texturePreloading = it)) },
+        )
+        SettingsDivider()
+        SegmentedGridRow(
+            label = "Hardware Download Mode",
+            options = listOf("Accurate", "Force Full", "No Readbacks", "Unsync", "Disabled"),
+            selectedIndex = s.hardwareDownloadMode.coerceIn(0, 4),
+            columns = 3,
+            onChange = { apply(s.copy(hardwareDownloadMode = it)) },
         )
         SettingsDivider()
         ToggleRow("Load Texture Packs", s.loadTextureReplacements) {

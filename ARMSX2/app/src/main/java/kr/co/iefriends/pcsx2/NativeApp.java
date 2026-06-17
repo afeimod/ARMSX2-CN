@@ -168,6 +168,7 @@ public class NativeApp {
 	public static native void speedhackLimitermode(int value);
 	public static native void speedhackEecyclerate(int value);
 	public static native void speedhackEecycleskip(int value);
+	public static native void setInstantVU1(boolean enabled);
 
 	public static native void renderUpscalemultiplier(float value);
 	public static native void renderMipmap(int value);

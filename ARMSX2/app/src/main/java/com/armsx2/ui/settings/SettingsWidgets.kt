@@ -352,3 +352,59 @@ fun SegmentedRow(
         }
     }
 }
+
+/** Multi-row variant for longer option lists. Keeps deinterlacing / hardware
+ *  download choices readable inside the compact in-game overlay instead of
+ *  letting a long chip strip run off-screen. */
+@Composable
+fun SegmentedGridRow(
+    label: String,
+    options: List<String>,
+    selectedIndex: Int,
+    columns: Int = 3,
+    onChange: (Int) -> Unit,
+) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .background(rowAura())
+            .padding(horizontal = 6.dp, vertical = 3.dp),
+        contentAlignment = Alignment.CenterStart,
+    ) {
+        Column {
+            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(3.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                options.chunked(columns.coerceAtLeast(1)).forEachIndexed { rowIndex, rowOptions ->
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp), modifier = Modifier.fillMaxWidth()) {
+                        rowOptions.forEachIndexed { colIndex, option ->
+                            val idx = rowIndex * columns.coerceAtLeast(1) + colIndex
+                            val on = idx == selectedIndex
+                            Box(
+                                Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (on) Colors.pasx2_blue else Color(0xFF272525).copy(alpha = 0.5f))
+                                    .clickable { onChange(idx) }
+                                    .padding(horizontal = 5.dp, vertical = 3.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    option,
+                                    color = if (on) Color.White else Color(0xFFAAAAAA),
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                        repeat(columns.coerceAtLeast(1) - rowOptions.size) {
+                            Spacer(Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
