@@ -36,14 +36,18 @@ static void MultiPause()
 	__isb(_ARM64_BARRIER_SY);
 	__isb(_ARM64_BARRIER_SY);
 #elif defined(ARCH_ARM64)
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
-	__asm__ __volatile__("isb");
+	// Android's EE/MTGS/MTVU handoff loops hit this very frequently. ISB is a
+	// full instruction-stream barrier, not a spin-wait hint, and serializes the
+	// core hard enough to show up as EE/VU heat. YIELD is the intended ARM64
+	// low-power spin hint while preserving the short user-space wait behavior.
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
+	__asm__ __volatile__("yield");
 #else
 #error Unknown architecture.
 #endif

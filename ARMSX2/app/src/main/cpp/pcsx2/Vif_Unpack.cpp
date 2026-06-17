@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
+#include "AndroidPerfBuckets.h"
 #include "Vif.h"
 #include "Vif_Dma.h"
 #include "Vif_Dynarec.h"
@@ -356,9 +357,25 @@ _vifT int nVifUnpack(const u8* data)
 		if (!idx || !THREAD_VU1)
 		{
 			if (newVifDynaRec)
+			{
+#if defined(__ANDROID__)
+				AndroidPerfBuckets::ScopedTimer timer(
+					AndroidPerfBuckets::s_vif_cpu_dyn_count,
+					AndroidPerfBuckets::s_vif_cpu_dyn_us,
+					"vif_cpu_dyn");
+#endif
 				dVifUnpack<idx>(data, isFill);
+			}
 			else
+			{
+#if defined(__ANDROID__)
+				AndroidPerfBuckets::ScopedTimer timer(
+					AndroidPerfBuckets::s_vif_cpu_int_count,
+					AndroidPerfBuckets::s_vif_cpu_int_us,
+					"vif_cpu_int");
+#endif
 				_nVifUnpack(idx, data, vifRegs.mode, isFill);
+			}
 		}
 		else
 			vu1Thread.VifUnpack(vif, vifRegs, (u8*)data, (size + 4) & ~0x3);

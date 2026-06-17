@@ -3887,19 +3887,26 @@ void VMManager::EnsureCPUInfoInitialized()
 void VMManager::SetEmuThreadAffinities()
 {
 	const bool new_pin_enable = (GetState() != VMState::Shutdown && EmuConfig.EnableThreadPinning);
-	if (s_thread_affinities_set == new_pin_enable)
-		return;
 
-	// Track whether pinning is *currently effective*, not just whether the
-	// user enabled it in config. Previously this stored EmuConfig.EnableThreadPinning
-	// regardless of new_pin_enable, which on a shutdown call (state=Shutdown,
-	// new_pin_enable=false but EnableThreadPinning=true) left this flag as
-	// `true` while the actual pinning + SW renderer proc list got cleared
-	// below. The next VM start then early-returned at the guard above (`true
-	// == true`), never re-populating s_software_renderer_processor_list. SW
-	// workers ended up unpinned with an empty proc pool — the symptom users
-	// see as "Not pinning SW threads, we need 3 processors, but only have 0".
-	s_thread_affinities_set = new_pin_enable;
+	if (!new_pin_enable)
+	{
+		if (!s_thread_affinities_set)
+			return;
+
+		s_thread_affinities_set = false;
+		EnsureCPUInfoInitialized();
+		if (!s_processor_list.empty())
+		{
+			MTGS::GetThreadHandle().SetAffinity(0);
+			vu1Thread.GetThreadHandle().SetAffinity(0);
+			s_vm_thread_handle.SetAffinity(0);
+		}
+		s_software_renderer_processor_list = {};
+		return;
+	}
+
+	if (s_thread_affinities_set)
+		return;
 
 	EnsureCPUInfoInitialized();
 
@@ -3936,24 +3943,24 @@ void VMManager::SetEmuThreadAffinities()
 		ClusterAffinityMaskForOSId(ee_index) |
 		(mtvu ? ClusterAffinityMaskForOSId(vu_index) : 0) |
 		ClusterAffinityMaskForOSId(gs_index);
-	const u64 ee_affinity = performance_cluster_affinity ? performance_cluster_affinity : ee_single_affinity;
-	const u64 vu_affinity = performance_cluster_affinity ? performance_cluster_affinity : vu_single_affinity;
-	const u64 gs_affinity = performance_cluster_affinity ? performance_cluster_affinity : gs_single_affinity;
-	Console.WriteLnFmt("@@ANDROID_AFFINITY@@ mode={} ee_pick={} vu_pick={} gs_pick={} ee_mask=0x{:x} vu_mask=0x{:x} gs_mask=0x{:x}",
-		performance_cluster_affinity ? "performance_cluster" : "single_core",
-		ee_index, vu_index, gs_index, ee_affinity, vu_affinity, gs_affinity);
+	const u64 ee_affinity = ee_single_affinity;
+	const u64 vu_affinity = vu_single_affinity;
+	const u64 gs_affinity = gs_single_affinity;
+	Console.WriteLnFmt("@@ANDROID_AFFINITY@@ mode=dedicated_fast_cores ee_pick={} vu_pick={} gs_pick={} ee_mask=0x{:x} vu_mask=0x{:x} gs_mask=0x{:x} helper_cluster_mask=0x{:x}",
+		ee_index, vu_index, gs_index, ee_affinity, vu_affinity, gs_affinity, performance_cluster_affinity);
 #else
 	const u64 ee_affinity = static_cast<u64>(1) << ee_index;
 	const u64 vu_affinity = static_cast<u64>(1) << vu_index;
 	const u64 gs_affinity = static_cast<u64>(1) << gs_index;
 #endif
 	INFO_LOG("  EE thread is on processor {} (0x{:x})", ee_index, ee_affinity);
-	s_vm_thread_handle.SetAffinity(ee_affinity);
+	const bool ee_affinity_set = s_vm_thread_handle.SetAffinity(ee_affinity);
 
+	bool vu_affinity_set = true;
 	if (EmuConfig.Speedhacks.vuThread)
 	{
 		INFO_LOG("  VU thread is on processor {} (0x{:x})", vu_index, vu_affinity);
-		vu1Thread.GetThreadHandle().SetAffinity(vu_affinity);
+		vu_affinity_set = vu1Thread.GetThreadHandle().SetAffinity(vu_affinity);
 	}
 	else
 	{
@@ -3961,12 +3968,16 @@ void VMManager::SetEmuThreadAffinities()
 	}
 
 	INFO_LOG("  GS thread is on processor {} (0x{:x})", gs_index, gs_affinity);
-	MTGS::GetThreadHandle().SetAffinity(gs_affinity);
+	const bool gs_affinity_set = MTGS::GetThreadHandle().SetAffinity(gs_affinity);
+
+	s_thread_affinities_set = ee_affinity_set && vu_affinity_set && gs_affinity_set;
 
 #ifdef __ANDROID__
+	Console.WriteLnFmt("@@ANDROID_AFFINITY_APPLY@@ ee={} vu={} gs={} active={}",
+		ee_affinity_set, vu_affinity_set, gs_affinity_set, s_thread_affinities_set);
 	Console.WriteLnFmt("@@ANDROID_PRIORITY@@ ee={} vu={} gs={}",
-		s_vm_thread_handle.SetNicePriority(-2),
-		EmuConfig.Speedhacks.vuThread ? vu1Thread.GetThreadHandle().SetNicePriority(-2) : false,
+		s_vm_thread_handle.SetNicePriority(-1),
+		EmuConfig.Speedhacks.vuThread ? vu1Thread.GetThreadHandle().SetNicePriority(-1) : false,
 		MTGS::GetThreadHandle().SetNicePriority(-1));
 #endif
 

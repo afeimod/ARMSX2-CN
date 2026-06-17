@@ -5100,9 +5100,15 @@ VkPipeline GSDeviceVK::GetTFXPipeline(const PipelineSelector& p)
 
 	// Persist the pipeline cache every N new compiles so an Android OOM-kill
 	// or crash mid-session doesn't throw away pipelines that compiled after
-	// the last onPause flush. 32 is a balance between save overhead and how
-	// much work we'd lose in the worst case. onPause still does a final flush.
-	if (g_vulkan_shader_cache && ++m_tfx_pipeline_compile_counter >= 32)
+	// the last onPause flush. Android gets a larger threshold because the log
+	// showed repeated synchronous disk writes during normal gameplay in heavy
+	// scenes; onPause still performs a final flush.
+#ifdef __ANDROID__
+	static constexpr u32 PIPELINE_CACHE_FLUSH_THRESHOLD = 256;
+#else
+	static constexpr u32 PIPELINE_CACHE_FLUSH_THRESHOLD = 32;
+#endif
+	if (g_vulkan_shader_cache && ++m_tfx_pipeline_compile_counter >= PIPELINE_CACHE_FLUSH_THRESHOLD)
 	{
 		m_tfx_pipeline_compile_counter = 0;
 		g_vulkan_shader_cache->FlushPipelineCache();

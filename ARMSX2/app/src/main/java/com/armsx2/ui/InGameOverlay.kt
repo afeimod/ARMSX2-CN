@@ -77,7 +77,10 @@ import com.armsx2.R
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
 import com.armsx2.config.SettingsScope
+import com.armsx2.ui.settings.AudioTab
 import com.armsx2.ui.settings.NetworkTab
+import com.armsx2.ui.settings.OverlayTab
+import com.armsx2.ui.settings.PatchesTab
 import com.armsx2.ui.settings.PerformanceTab
 import com.armsx2.ui.settings.RecompilerTab
 import com.armsx2.ui.settings.RendererTab
@@ -132,7 +135,10 @@ object InGameOverlay {
         PlayingNow("Play"),
         Performance("Perf"),
         Renderer("Render"),
+        Audio("Audio"),
+        Patches("Patches"),
         Network("Network"),
+        Overlay("Overlay"),
         Recompiler("JIT"),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
@@ -263,6 +269,18 @@ object InGameOverlay {
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
         }
 
+        // Speed Limit / Custom FPS — setNominalSpeed is a light direct re-pace
+        // (sets EmuConfig.NominalScalar + UpdateTargetSpeed), no VM park, so it's
+        // safe on this in-game delta path. Persistence is handled by ConfigStore.
+        if (previous.nominalSpeedPercent != updated.nominalSpeedPercent)
+            NativeApp.setNominalSpeed(updated.nominalSpeedPercent.coerceIn(10, 1000))
+
+        // Audio — SPU2 setters apply live to the open stream, no VM park.
+        if (previous.audioVolume != updated.audioVolume)
+            NativeApp.setAudioVolume(updated.audioVolume.coerceIn(0, 200))
+        if (previous.audioMuted != updated.audioMuted)
+            NativeApp.setAudioMuted(updated.audioMuted)
+
         if (previous.vu1Instant != updated.vu1Instant)
             NativeApp.setInstantVU1(updated.vu1Instant)
 
@@ -289,6 +307,43 @@ object InGameOverlay {
             NativeApp.setSetting("EmuCore/GS", "DumpReplaceableTextures", "bool", updated.dumpReplaceableTextures.toString())
         if (previous.osdShowTextureReplacements != updated.osdShowTextureReplacements)
             NativeApp.setSetting("EmuCore/GS", "OsdShowTextureReplacements", "bool", updated.osdShowTextureReplacements.toString())
+
+        // Performance Overlay element toggles. Persist to base (survives the
+        // next ApplySettings reload) AND push live via the native setter,
+        // which flips EmuConfig.GS + MTGS::ApplySettings. Disabling GPU also
+        // stops the GPU timing queries (the perf win the tester asked for).
+        if (previous.osdShowFps != updated.osdShowFps) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowFPS", "bool", updated.osdShowFps.toString())
+            NativeApp.osdShowFPS(updated.osdShowFps)
+        }
+        if (previous.osdShowVps != updated.osdShowVps) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowVPS", "bool", updated.osdShowVps.toString())
+            NativeApp.osdShowVPS(updated.osdShowVps)
+        }
+        if (previous.osdShowSpeed != updated.osdShowSpeed) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowSpeed", "bool", updated.osdShowSpeed.toString())
+            NativeApp.osdShowSpeed(updated.osdShowSpeed)
+        }
+        if (previous.osdShowCpu != updated.osdShowCpu) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowCPU", "bool", updated.osdShowCpu.toString())
+            NativeApp.osdShowCPU(updated.osdShowCpu)
+        }
+        if (previous.osdShowGpu != updated.osdShowGpu) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowGPU", "bool", updated.osdShowGpu.toString())
+            NativeApp.osdShowGPU(updated.osdShowGpu)
+        }
+        if (previous.osdShowResolution != updated.osdShowResolution) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowResolution", "bool", updated.osdShowResolution.toString())
+            NativeApp.osdShowResolution(updated.osdShowResolution)
+        }
+        if (previous.osdShowGsStats != updated.osdShowGsStats) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowGSStats", "bool", updated.osdShowGsStats.toString())
+            NativeApp.osdShowGSStats(updated.osdShowGsStats)
+        }
+        if (previous.osdShowFrameTimes != updated.osdShowFrameTimes) {
+            NativeApp.setSetting("EmuCore/GS", "OsdShowFrameTimes", "bool", updated.osdShowFrameTimes.toString())
+            NativeApp.osdShowFrameTimes(updated.osdShowFrameTimes)
+        }
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
@@ -808,7 +863,10 @@ object InGameOverlay {
             Tab.PlayingNow -> PlayingNowTab()
             Tab.Performance -> PerformanceTab(settingsState)
             Tab.Renderer -> RendererTab(settingsState)
+            Tab.Audio -> AudioTab(settingsState)
+            Tab.Patches -> PatchesTab(settingsState)
             Tab.Network -> NetworkTab(settingsState)
+            Tab.Overlay -> OverlayTab(settingsState)
             Tab.Recompiler -> RecompilerTab(settingsState)
         }
     }
@@ -823,7 +881,7 @@ object InGameOverlay {
             horizontalArrangement = Arrangement.spacedBy(2.dp),
         ) {
             val tabs = if (settingsOnly.value) {
-                listOf(Tab.Performance, Tab.Renderer, Tab.Network, Tab.Recompiler)
+                listOf(Tab.Performance, Tab.Renderer, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Recompiler)
             } else {
                 Tab.values().toList()
             }

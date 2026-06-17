@@ -918,6 +918,13 @@ void GSUpdateConfig(const Pcsx2Config::GSOptions& new_config)
 		if (!g_gs_device->SetGPUTimingEnabled(true))
 			GSConfig.OsdShowGPU = false;
 	}
+	else if (!GSConfig.OsdShowGPU && old_config.OsdShowGPU)
+	{
+		// Turning the GPU readout off must also stop the GPU timing queries
+		// (timestamp queries + per-frame readback have real overhead) — that
+		// is the actual perf win of disabling this overlay element on Android.
+		g_gs_device->SetGPUTimingEnabled(false);
+	}
 }
 
 void GSSetSoftwareRendering(bool software_renderer, GSInterlaceMode new_interlace)

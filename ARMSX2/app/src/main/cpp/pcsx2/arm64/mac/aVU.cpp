@@ -21,6 +21,7 @@
 #include "arm64/mac/aVU_IR.h"
 #include "arm64/mac/aVU_Misc.h" // arch-neutral macro layer (task 7.3)
 
+#include "AndroidPerfBuckets.h"
 #include "VUmicro.h"
 #include "Memory.h"
 #include "Dmac.h"
@@ -872,6 +873,12 @@ void recMacMVU0::Execute(u32 cycles)
 		return;
 	VU0.VI[REG_TPC].UL <<= 3;
 
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::ScopedTimer timer(
+		AndroidPerfBuckets::s_vu0_execute_count,
+		AndroidPerfBuckets::s_vu0_execute_us,
+		"vu0_exec");
+#endif
 	((mVUrecCall)microVU0.startFunct)(VU0.VI[REG_TPC].UL, cycles);
 	VU0.VI[REG_TPC].UL >>= 3;
 	if (microVU0.regs().flags & 0x4)
@@ -1136,6 +1143,12 @@ void recMacMVU1::Execute(u32 cycles)
 		return;
 	}
 
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::ScopedTimer timer(
+		AndroidPerfBuckets::s_vu1_execute_count,
+		AndroidPerfBuckets::s_vu1_execute_us,
+		"vu1_exec");
+#endif
 	VU1.VI[REG_TPC].UL <<= 3;
 	((mVUrecCall)microVU1.startFunct)(VU1.VI[REG_TPC].UL, cycles);
 	VU1.VI[REG_TPC].UL >>= 3;

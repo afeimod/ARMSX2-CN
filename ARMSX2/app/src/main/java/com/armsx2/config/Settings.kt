@@ -59,6 +59,34 @@ data class Settings(
     // ---- EmuCore/GS — frame limiter ----
     /** EmuCore/GS/FrameLimitEnable. */
     val frameLimitEnable: Boolean = true,
+    /** Framerate/NominalScalar expressed as a percent of native speed
+     *  (100 = full speed ≈ 60fps NTSC / 50fps PAL). Applies when the Frame
+     *  Limiter is on: lower values cap the FPS (50 ≈ 30fps), higher values
+     *  fast-forward. Stored as percent; written to emucore as the 0.05..10.0
+     *  float scalar. */
+    val nominalSpeedPercent: Int = 100,
+    /** Deprecated Android-only FPS cap. Kept for JSON compatibility with test
+     *  builds, but no longer applied because it skipped GS rendering. */
+    val fpsLimit: Int = 0,
+    /** Deprecated Android-only frame skip. Kept for JSON compatibility only. */
+    val frameSkip: Int = 0,
+
+    // ---- Audio (SPU2/Output) ----
+    /** SPU2/Output/StandardVolume — output volume %, 0..200 (100 = full). */
+    val audioVolume: Int = 100,
+    /** SPU2/Output/OutputMuted — mute audio output. */
+    val audioMuted: Boolean = false,
+
+    // ---- EmuCore — patches / cheats ----
+    /** EmuCore/EnablePatches — game-compatibility patches (default on). */
+    val enablePatches: Boolean = true,
+    /** EmuCore/EnableCheats — PNACH cheats. */
+    val enableCheats: Boolean = false,
+    /** EmuCore/EnableWideScreenPatches — 16:9 widescreen patches. */
+    val enableWideScreenPatches: Boolean = false,
+    /** EmuCore/EnableNoInterlacingPatches — no-interlacing patches. */
+    val enableNoInterlacingPatches: Boolean = false,
+
     /** EmuCore/GS/AspectRatio:
      *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
     val aspectRatio: Int = 1,
@@ -156,6 +184,25 @@ data class Settings(
     val dumpReplaceableTextures: Boolean = false,
     /** EmuCore/GS/OsdShowTextureReplacements. */
     val osdShowTextureReplacements: Boolean = false,
+    // Performance Overlay element toggles. Default true to mirror native
+    // initialize(), which turns every OsdShow* bit on at first boot.
+    // Disabling GPU also stops the GPU timing queries (real perf win).
+    /** EmuCore/GS/OsdShowFPS. */
+    val osdShowFps: Boolean = true,
+    /** EmuCore/GS/OsdShowVPS. */
+    val osdShowVps: Boolean = true,
+    /** EmuCore/GS/OsdShowSpeed. */
+    val osdShowSpeed: Boolean = true,
+    /** EmuCore/GS/OsdShowCPU. */
+    val osdShowCpu: Boolean = true,
+    /** EmuCore/GS/OsdShowGPU. */
+    val osdShowGpu: Boolean = true,
+    /** EmuCore/GS/OsdShowResolution. */
+    val osdShowResolution: Boolean = true,
+    /** EmuCore/GS/OsdShowGSStats. */
+    val osdShowGsStats: Boolean = true,
+    /** EmuCore/GS/OsdShowFrameTimes. */
+    val osdShowFrameTimes: Boolean = true,
     /** EmuCore/GS/UserHacks_AutoFlushLevel — GSHWAutoFlushLevel:
      *  0 Disabled · 1 SpritesOnly · 2 Enabled. */
     val autoFlush: Int = 0,
@@ -193,6 +240,25 @@ data class Settings(
         // 3 = Unlimited.
         NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", frameLimitEnable.toString())
         NativeApp.speedhackLimitermode(if (frameLimitEnable) 0 else 3)
+        // Framerate/NominalScalar — custom speed / FPS cap as a fraction of
+        // native. commitSettings → ApplySettings → CheckForEmulationSpeedConfigChanges
+        // → UpdateTargetSpeed picks this up live. Clamp mirrors emucore's
+        // EmulationSpeedOptions::SanityCheck (0.05..10.0).
+        NativeApp.setSetting("Framerate", "NominalScalar", "float",
+            (nominalSpeedPercent.coerceIn(10, 1000) / 100f).toString())
+        // Live-apply: the setSetting above only persists; the running frame
+        // pacer needs a direct re-pace (mirrors speedhackLimitermode).
+        NativeApp.setNominalSpeed(nominalSpeedPercent.coerceIn(10, 1000))
+        // Audio (SPU2). Live + persisted by the native setters.
+        NativeApp.setAudioVolume(audioVolume.coerceIn(0, 200))
+        NativeApp.setAudioMuted(audioMuted)
+        // Patches / cheats (EmuCore). Reloaded by ApplySettings →
+        // CheckForPatchConfigChanges; widescreen/no-interlacing take effect on
+        // the next boot for most games.
+        NativeApp.setSetting("EmuCore", "EnablePatches", "bool", enablePatches.toString())
+        NativeApp.setSetting("EmuCore", "EnableCheats", "bool", enableCheats.toString())
+        NativeApp.setSetting("EmuCore", "EnableWideScreenPatches", "bool", enableWideScreenPatches.toString())
+        NativeApp.setSetting("EmuCore", "EnableNoInterlacingPatches", "bool", enableNoInterlacingPatches.toString())
         val aspectRatioName = when (aspectRatio.coerceIn(0, 4)) {
             0 -> "Stretch"
             2 -> "4:3"
@@ -240,6 +306,24 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "PrecacheTextureReplacements", "bool", precacheTextureReplacements.toString())
         NativeApp.setSetting("EmuCore/GS", "DumpReplaceableTextures", "bool", dumpReplaceableTextures.toString())
         NativeApp.setSetting("EmuCore/GS", "OsdShowTextureReplacements", "bool", osdShowTextureReplacements.toString())
+        // Performance Overlay element toggles — persist to base AND push live
+        // (the native setters apply via EmuConfig.GS + MTGS::ApplySettings).
+        NativeApp.setSetting("EmuCore/GS", "OsdShowFPS", "bool", osdShowFps.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowVPS", "bool", osdShowVps.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowSpeed", "bool", osdShowSpeed.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowCPU", "bool", osdShowCpu.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowGPU", "bool", osdShowGpu.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowResolution", "bool", osdShowResolution.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowGSStats", "bool", osdShowGsStats.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowFrameTimes", "bool", osdShowFrameTimes.toString())
+        NativeApp.osdShowFPS(osdShowFps)
+        NativeApp.osdShowVPS(osdShowVps)
+        NativeApp.osdShowSpeed(osdShowSpeed)
+        NativeApp.osdShowCPU(osdShowCpu)
+        NativeApp.osdShowGPU(osdShowGpu)
+        NativeApp.osdShowResolution(osdShowResolution)
+        NativeApp.osdShowGSStats(osdShowGsStats)
+        NativeApp.osdShowFrameTimes(osdShowFrameTimes)
         NativeApp.setSetting("EmuCore/GS", "UserHacks_AutoFlushLevel", "int", autoFlush.toString())
         NativeApp.setSetting("EmuCore/GS", "UserHacks_HalfPixelOffset", "int", halfPixelOffset.toString())
         NativeApp.setSetting("EmuCore/GS", "TriFilter", "int", triFilter.toString())
@@ -267,6 +351,15 @@ data class Settings(
         put("vuDeferredWrites", vuDeferredWrites)
         put("vuSkipStallSim", vuSkipStallSim)
         put("frameLimitEnable", frameLimitEnable)
+        put("nominalSpeedPercent", nominalSpeedPercent)
+        put("fpsLimit", fpsLimit)
+        put("frameSkip", frameSkip)
+        put("audioVolume", audioVolume)
+        put("audioMuted", audioMuted)
+        put("enablePatches", enablePatches)
+        put("enableCheats", enableCheats)
+        put("enableWideScreenPatches", enableWideScreenPatches)
+        put("enableNoInterlacingPatches", enableNoInterlacingPatches)
         put("aspectRatio", aspectRatio)
         put("deinterlaceMode", deinterlaceMode)
         put("dev9EthEnable", dev9EthEnable)
@@ -293,6 +386,14 @@ data class Settings(
         put("precacheTextureReplacements", precacheTextureReplacements)
         put("dumpReplaceableTextures", dumpReplaceableTextures)
         put("osdShowTextureReplacements", osdShowTextureReplacements)
+        put("osdShowFps", osdShowFps)
+        put("osdShowVps", osdShowVps)
+        put("osdShowSpeed", osdShowSpeed)
+        put("osdShowCpu", osdShowCpu)
+        put("osdShowGpu", osdShowGpu)
+        put("osdShowResolution", osdShowResolution)
+        put("osdShowGsStats", osdShowGsStats)
+        put("osdShowFrameTimes", osdShowFrameTimes)
         put("autoFlush", autoFlush)
         put("halfPixelOffset", halfPixelOffset)
         put("triFilter", triFilter)
@@ -318,6 +419,15 @@ data class Settings(
                 vuDeferredWrites = json.optBoolean("vuDeferredWrites", def.vuDeferredWrites),
                 vuSkipStallSim = json.optBoolean("vuSkipStallSim", def.vuSkipStallSim),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
+                nominalSpeedPercent = json.optInt("nominalSpeedPercent", def.nominalSpeedPercent),
+                fpsLimit = json.optInt("fpsLimit", def.fpsLimit),
+                frameSkip = json.optInt("frameSkip", def.frameSkip),
+                audioVolume = json.optInt("audioVolume", def.audioVolume),
+                audioMuted = json.optBoolean("audioMuted", def.audioMuted),
+                enablePatches = json.optBoolean("enablePatches", def.enablePatches),
+                enableCheats = json.optBoolean("enableCheats", def.enableCheats),
+                enableWideScreenPatches = json.optBoolean("enableWideScreenPatches", def.enableWideScreenPatches),
+                enableNoInterlacingPatches = json.optBoolean("enableNoInterlacingPatches", def.enableNoInterlacingPatches),
                 aspectRatio = json.optInt("aspectRatio", def.aspectRatio),
                 deinterlaceMode = json.optInt("deinterlaceMode", def.deinterlaceMode),
                 dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
@@ -348,6 +458,14 @@ data class Settings(
                 precacheTextureReplacements = json.optBoolean("precacheTextureReplacements", def.precacheTextureReplacements),
                 dumpReplaceableTextures = json.optBoolean("dumpReplaceableTextures", def.dumpReplaceableTextures),
                 osdShowTextureReplacements = json.optBoolean("osdShowTextureReplacements", def.osdShowTextureReplacements),
+                osdShowFps = json.optBoolean("osdShowFps", def.osdShowFps),
+                osdShowVps = json.optBoolean("osdShowVps", def.osdShowVps),
+                osdShowSpeed = json.optBoolean("osdShowSpeed", def.osdShowSpeed),
+                osdShowCpu = json.optBoolean("osdShowCpu", def.osdShowCpu),
+                osdShowGpu = json.optBoolean("osdShowGpu", def.osdShowGpu),
+                osdShowResolution = json.optBoolean("osdShowResolution", def.osdShowResolution),
+                osdShowGsStats = json.optBoolean("osdShowGsStats", def.osdShowGsStats),
+                osdShowFrameTimes = json.optBoolean("osdShowFrameTimes", def.osdShowFrameTimes),
                 autoFlush = json.optInt("autoFlush", def.autoFlush),
                 halfPixelOffset = json.optInt("halfPixelOffset", def.halfPixelOffset),
                 triFilter = json.optInt("triFilter", def.triFilter),
@@ -379,6 +497,15 @@ data class Settings(
             if (current.vuDeferredWrites    != base.vuDeferredWrites)    j.put("vuDeferredWrites", current.vuDeferredWrites)
             if (current.vuSkipStallSim      != base.vuSkipStallSim)      j.put("vuSkipStallSim", current.vuSkipStallSim)
             if (current.frameLimitEnable    != base.frameLimitEnable)    j.put("frameLimitEnable", current.frameLimitEnable)
+            if (current.nominalSpeedPercent != base.nominalSpeedPercent) j.put("nominalSpeedPercent", current.nominalSpeedPercent)
+            if (current.fpsLimit            != base.fpsLimit)            j.put("fpsLimit", current.fpsLimit)
+            if (current.frameSkip != base.frameSkip) j.put("frameSkip", current.frameSkip)
+            if (current.audioVolume != base.audioVolume) j.put("audioVolume", current.audioVolume)
+            if (current.audioMuted != base.audioMuted) j.put("audioMuted", current.audioMuted)
+            if (current.enablePatches != base.enablePatches) j.put("enablePatches", current.enablePatches)
+            if (current.enableCheats != base.enableCheats) j.put("enableCheats", current.enableCheats)
+            if (current.enableWideScreenPatches != base.enableWideScreenPatches) j.put("enableWideScreenPatches", current.enableWideScreenPatches)
+            if (current.enableNoInterlacingPatches != base.enableNoInterlacingPatches) j.put("enableNoInterlacingPatches", current.enableNoInterlacingPatches)
             if (current.aspectRatio         != base.aspectRatio)         j.put("aspectRatio", current.aspectRatio)
             if (current.deinterlaceMode     != base.deinterlaceMode)     j.put("deinterlaceMode", current.deinterlaceMode)
             if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
@@ -405,6 +532,14 @@ data class Settings(
             if (current.precacheTextureReplacements != base.precacheTextureReplacements) j.put("precacheTextureReplacements", current.precacheTextureReplacements)
             if (current.dumpReplaceableTextures != base.dumpReplaceableTextures) j.put("dumpReplaceableTextures", current.dumpReplaceableTextures)
             if (current.osdShowTextureReplacements != base.osdShowTextureReplacements) j.put("osdShowTextureReplacements", current.osdShowTextureReplacements)
+            if (current.osdShowFps != base.osdShowFps) j.put("osdShowFps", current.osdShowFps)
+            if (current.osdShowVps != base.osdShowVps) j.put("osdShowVps", current.osdShowVps)
+            if (current.osdShowSpeed != base.osdShowSpeed) j.put("osdShowSpeed", current.osdShowSpeed)
+            if (current.osdShowCpu != base.osdShowCpu) j.put("osdShowCpu", current.osdShowCpu)
+            if (current.osdShowGpu != base.osdShowGpu) j.put("osdShowGpu", current.osdShowGpu)
+            if (current.osdShowResolution != base.osdShowResolution) j.put("osdShowResolution", current.osdShowResolution)
+            if (current.osdShowGsStats != base.osdShowGsStats) j.put("osdShowGsStats", current.osdShowGsStats)
+            if (current.osdShowFrameTimes != base.osdShowFrameTimes) j.put("osdShowFrameTimes", current.osdShowFrameTimes)
             if (current.autoFlush           != base.autoFlush)           j.put("autoFlush", current.autoFlush)
             if (current.halfPixelOffset     != base.halfPixelOffset)     j.put("halfPixelOffset", current.halfPixelOffset)
             if (current.triFilter           != base.triFilter)           j.put("triFilter", current.triFilter)
@@ -426,6 +561,15 @@ data class Settings(
             vuDeferredWrites = if (overrides.has("vuDeferredWrites")) overrides.getBoolean("vuDeferredWrites") else base.vuDeferredWrites,
             vuSkipStallSim = if (overrides.has("vuSkipStallSim")) overrides.getBoolean("vuSkipStallSim") else base.vuSkipStallSim,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
+            nominalSpeedPercent = if (overrides.has("nominalSpeedPercent")) overrides.getInt("nominalSpeedPercent") else base.nominalSpeedPercent,
+            fpsLimit = if (overrides.has("fpsLimit")) overrides.getInt("fpsLimit") else base.fpsLimit,
+            frameSkip = if (overrides.has("frameSkip")) overrides.getInt("frameSkip") else base.frameSkip,
+            audioVolume = if (overrides.has("audioVolume")) overrides.getInt("audioVolume") else base.audioVolume,
+            audioMuted = if (overrides.has("audioMuted")) overrides.getBoolean("audioMuted") else base.audioMuted,
+            enablePatches = if (overrides.has("enablePatches")) overrides.getBoolean("enablePatches") else base.enablePatches,
+            enableCheats = if (overrides.has("enableCheats")) overrides.getBoolean("enableCheats") else base.enableCheats,
+            enableWideScreenPatches = if (overrides.has("enableWideScreenPatches")) overrides.getBoolean("enableWideScreenPatches") else base.enableWideScreenPatches,
+            enableNoInterlacingPatches = if (overrides.has("enableNoInterlacingPatches")) overrides.getBoolean("enableNoInterlacingPatches") else base.enableNoInterlacingPatches,
             aspectRatio = if (overrides.has("aspectRatio")) overrides.getInt("aspectRatio") else base.aspectRatio,
             deinterlaceMode = if (overrides.has("deinterlaceMode")) overrides.getInt("deinterlaceMode") else base.deinterlaceMode,
             dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,
@@ -456,6 +600,14 @@ data class Settings(
             precacheTextureReplacements = if (overrides.has("precacheTextureReplacements")) overrides.getBoolean("precacheTextureReplacements") else base.precacheTextureReplacements,
             dumpReplaceableTextures = if (overrides.has("dumpReplaceableTextures")) overrides.getBoolean("dumpReplaceableTextures") else base.dumpReplaceableTextures,
             osdShowTextureReplacements = if (overrides.has("osdShowTextureReplacements")) overrides.getBoolean("osdShowTextureReplacements") else base.osdShowTextureReplacements,
+            osdShowFps = if (overrides.has("osdShowFps")) overrides.getBoolean("osdShowFps") else base.osdShowFps,
+            osdShowVps = if (overrides.has("osdShowVps")) overrides.getBoolean("osdShowVps") else base.osdShowVps,
+            osdShowSpeed = if (overrides.has("osdShowSpeed")) overrides.getBoolean("osdShowSpeed") else base.osdShowSpeed,
+            osdShowCpu = if (overrides.has("osdShowCpu")) overrides.getBoolean("osdShowCpu") else base.osdShowCpu,
+            osdShowGpu = if (overrides.has("osdShowGpu")) overrides.getBoolean("osdShowGpu") else base.osdShowGpu,
+            osdShowResolution = if (overrides.has("osdShowResolution")) overrides.getBoolean("osdShowResolution") else base.osdShowResolution,
+            osdShowGsStats = if (overrides.has("osdShowGsStats")) overrides.getBoolean("osdShowGsStats") else base.osdShowGsStats,
+            osdShowFrameTimes = if (overrides.has("osdShowFrameTimes")) overrides.getBoolean("osdShowFrameTimes") else base.osdShowFrameTimes,
             autoFlush = if (overrides.has("autoFlush")) overrides.getInt("autoFlush") else base.autoFlush,
             halfPixelOffset = if (overrides.has("halfPixelOffset")) overrides.getInt("halfPixelOffset") else base.halfPixelOffset,
             triFilter = if (overrides.has("triFilter")) overrides.getInt("triFilter") else base.triFilter,

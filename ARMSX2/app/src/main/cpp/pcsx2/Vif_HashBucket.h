@@ -93,7 +93,11 @@ public:
 		memset(&m_bucket[b][size], 0, sizeof(nVifBlock));
 
 		if (size > 3)
+#ifndef __ANDROID__
 			DevCon.Warning("recVifUnpk: Bucket 0x%04x has %d micro-programs", b, size);
+#else
+			(void)b;
+#endif
 	}
 
 	u32 bucket_size(const nVifBlock& dataPtr)

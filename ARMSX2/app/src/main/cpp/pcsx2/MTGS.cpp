@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "GS.h"
+#include "AndroidPerfBuckets.h"
 #include "Gif_Unit.h"
 #include "MTGS.h"
 #include "MTVU.h"
@@ -468,12 +469,16 @@ void MTGS::MainLoop()
 					if (!vu1Thread.semaXGkick.TryWait())
 					{
 						mtvu_lock.unlock();
-						// Wait for MTVU to complete vu1 program. Adaptive
-						// spin-before-block: under heavy MTVU traffic, MTVU
-						// usually finishes within microseconds — skip the
-						// futex syscall when possible (perfape data showed
-						// ~27% MTVU thread time was in sem_wait→futex).
-						vu1Thread.semaXGkick.WaitWithSpin();
+#if defined(__ANDROID__)
+						const u64 diag_xgkick_wait_start_us = AndroidPerfBuckets::NowUs();
+#endif
+						vu1Thread.semaXGkick.Wait();
+#if defined(__ANDROID__)
+						AndroidPerfBuckets::Add(AndroidPerfBuckets::s_xgkick_wait_count);
+						AndroidPerfBuckets::Add(AndroidPerfBuckets::s_xgkick_wait_us,
+							AndroidPerfBuckets::NowUs() - diag_xgkick_wait_start_us);
+						AndroidPerfBuckets::MaybeReport("xgkick_wait");
+#endif
 						mtvu_lock.lock();
 					}
 					Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
@@ -703,6 +708,10 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	if (!IsOpen()) [[unlikely]]
 		return;
 
+#if defined(__ANDROID__)
+	const u64 diag_wait_start_us = AndroidPerfBuckets::NowUs();
+	u64 diag_weak_spin_iters = 0;
+#endif
 	Gif_Path& path = gifUnit.gifPath[GIF_PATH_1];
 
 	// Both m_ReadPos and m_WritePos can be relaxed as we only want to test if the queue is empty but
@@ -725,6 +734,9 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 				// m_mtx_RingBufferBusy2.Wait();
 				s_mtx_RingBufferBusy2.lock();
 				s_mtx_RingBufferBusy2.unlock();
+#if defined(__ANDROID__)
+				diag_weak_spin_iters++;
+#endif
 				if (path.GetPendingGSPackets() != startP1Packs)
 					break;
 			}
@@ -737,6 +749,15 @@ void MTGS::WaitGS(bool syncRegs, bool weakWait, bool isMTVU)
 	}
 
 	pxAssert(!(weakWait && syncRegs) && "No synchronization for this!");
+
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtgs_wait_count);
+	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtgs_wait_us,
+		AndroidPerfBuckets::NowUs() - diag_wait_start_us);
+	if (diag_weak_spin_iters)
+		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtgs_weak_spin_iters, diag_weak_spin_iters);
+	AndroidPerfBuckets::MaybeReport("mtgs_wait");
+#endif
 
 	if (syncRegs)
 	{

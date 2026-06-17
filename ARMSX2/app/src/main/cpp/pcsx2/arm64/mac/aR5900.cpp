@@ -14,10 +14,12 @@
 
 #include "arm64/mac/aR5900.h"
 
+#include "AndroidPerfBuckets.h"
 #include "Config.h"
 #include "Memory.h"
 #include "R5900.h"
 #include "R5900OpcodeTables.h"
+#include "VUmicro.h"
 #include "VMManager.h"
 #include "vtlb.h"
 
@@ -35,6 +37,20 @@
 
 #ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 #define ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS 0
+#endif
+
+// Temporary EE interpreter-fallback opcode histogram. The 2026-06-17 perf-bucket
+// run pinned the dominant EE cost on ee_interp_step / ee_interp_inline (ops with
+// no native ARM64 generator), but the aggregate buckets don't say *which* ops.
+// This records, per 5s window, the primary opcode + sub-op of every op that hits
+// the interpreter single-step (step) or in-block inline fallback (inline) path,
+// so we know exactly which generators to add. It is EE-thread-only (both thunks
+// run only on the EE thread) so the counters are plain non-atomic — one array
+// write per op, a steady_clock read only every 2^20 ops. Set to 1 (or build with
+// -DARMSX2_ANDROID_EE_OPHIST=1) for one confirmation run; default off. Marker:
+// @@ANDROID_EE_OPHIST@@. Remove once the hot fallback ops are known.
+#ifndef ARMSX2_ANDROID_EE_OPHIST
+#define ARMSX2_ANDROID_EE_OPHIST 0
 #endif
 
 namespace pcsx2_macrec {
@@ -380,6 +396,7 @@ enum : u32
 
 // Defined below (block-compile helpers) — used by recTranslateOp's COP2 inline path.
 static void recEmitInterpInline(u32 op);
+static void recEmitVU0FinishForCOP2();
 static bool recTranslateOp(u32 op);
 
 struct RecGprConstState
@@ -2037,8 +2054,26 @@ static bool recTranslateOp(u32 op)
 				case 0x19: armEmitMULTU(rd, rs, rt); return true;
 				case 0x1A: armEmitDIV(rs, rt); return true;
 				case 0x1B: armEmitDIVU(rs, rt); return true;
+				// SYNC — we emulate no EE pipeline and no data cache, so the interpreter's
+				// SYNC is a true no-op (R5900OpcodeImpl.cpp). Compile it as nothing: a loop
+				// body containing SYNC no longer breaks the block + single-steps (this was
+				// ~20M single-steps / 5s in GoW II, @@ANDROID_EE_OPHIST@@ special[0f]).
+				case 0x0F: return true;
 				default:   return false;
 			}
+
+		// REGIMM — branch/trap forms (BLTZ/BGEZ/.../TGEI..TNEI) are filtered out before
+		// recTranslateOp by recIsHandledBranch/recIsLikelyBranch (traps stay on single-step
+		// since they can throw). MTSAB/MTSAH are straight-line: they only write cpuRegs.sa
+		// (no GPR, no PC), so inline-interpret to keep them in-block instead of
+		// single-stepping (~5M/5s, @@ANDROID_EE_OPHIST@@ regimm[18]).
+		case 0x01:
+			if (rt == 0x18 || rt == 0x19) // MTSAB / MTSAH
+			{
+				recEmitInterpInline(op);
+				return true;
+			}
+			return false;
 
 		// MMI — second-pipeline multiply/divide (Phase 3.5). Other MMI ops (SIMD,
 		// MFHI1/MFLO1, ...) are not yet implemented and fall through to false.
@@ -2053,7 +2088,16 @@ static bool recTranslateOp(u32 op)
 				case 0x04: armEmitPLZCW(rd, rs); return true;
 				// MMI0/1/2/3 SIMD sub-groups (Phase 5.4); sub-op in `sa`.
 				case 0x08: return recTranslateMMI0(sa, rd, rs, rt);
-				case 0x28: return recTranslateMMI1(sa, rd, rs, rt);
+				// MMI1: native generators cover most sub-ops; QFSRV (sa 0x1b) funnel-shifts
+				// by the runtime SA register and has no native gen. Inline-interpret the
+				// uncovered sub-ops to keep them in-block (all MMI write rd, which the effect
+				// trackers already discard) instead of single-stepping QFSRV (~9.7M/5s,
+				// @@ANDROID_EE_OPHIST@@ mmi1[1b]).
+				case 0x28:
+					if (recTranslateMMI1(sa, rd, rs, rt))
+						return true;
+					recEmitInterpInline(op);
+					return true;
 				case 0x09: return recTranslateMMI2(sa, rd, rs, rt);
 				case 0x29: return recTranslateMMI3(sa, rd, rs, rt);
 				// PMFHL variant is in `sa`; PMTHL is only defined for sa==0.
@@ -2205,25 +2249,45 @@ static bool recTranslateOp(u32 op)
 					return false; // BC0 branches (rs==0x08) + COP0_Unknown
 			}
 
-		// COP2 — VU0 macro mode (Phase 5.3). On ARM64 CpuVU0 is the synchronous VU0
-		// interpreter, so unlike the x86 rec there is no deferred microVU program to
-		// finish/sync (mVUFinishVU0) before touching VU0 state. That makes running the
-		// interpreter's COP2 handler *inline* identical to single-stepping it — but it
-		// keeps the EE block intact instead of forcing a block-break + dispatcher
-		// round-trip per op. VU0-macro geometry (e.g. FFX) interleaves many COP2 ops
-		// with EE code, so this is the win: no fragmentation. The BC2 branches
+		// COP2 — VU0 macro mode (Phase 5.3). Keep the interpreter COP2 handler inline
+		// to avoid block fragmentation, but match x86's mVUFinishVU0 behavior before
+		// ops which can read VU0 state while a deferred microVU0 program is pending.
+		// VU0-macro geometry (e.g. FFX) interleaves many COP2 ops with EE code, so
+		// this still avoids the dispatcher round-trip per op. The BC2 branches
 		// (rs==0x08) write cpuRegs.pc, so they stay on the interpreter single-step path
 		// (handled by recRecompile ending the block before them).
 		case 0x12:
 			if (rs == 0x08)
 				return false; // BC2F/BC2T/BC2FL/BC2TL — single-step (writes PC)
+			// VU0-macro compute ops (rs>=0x10) inline-interpret through COP2() ->
+			// COP2_SPECIAL(), which already calls _vu0FinishMicro() itself (VU0.cpp). Emitting
+			// it here too is a redundant *second* finish per op — and this is the hottest EE
+			// path in GoW II (~46M COP2 macro ops / 5s, @@ANDROID_EE_OPHIST@@ cop2rs[10..1f]),
+			// each finish running CpuVU0->Execute + CpuVU1->ExecuteBlock. Only the
+			// non-interlocked transfers (QMFC2/QMTC2/CFC2/CTC2, whose handlers do vu0Sync()
+			// but not finish) still need the finish emitted here.
+			if (rs < 0x10 && !(cpuRegs.code & 1)) // non-interlocked transfer
+				recEmitVU0FinishForCOP2();
 			recEmitInterpInline(op);
 			return true;
 
 		// COP2 quadword load/store (VF[rt] ↔ memory). Straight-line, no PC write —
-		// inline the interpreter handler like the COP2 macro ops above.
-		case OP_LQC2: recEmitInterpInline(op); return true;
-		case OP_SQC2: recEmitInterpInline(op); return true;
+		// inline the interpreter handler like the COP2 macro ops above. These have no
+		// interlock bit (bit 0 is immediate data), and the handler only vu0Sync()s, so
+		// always force the finish: SQC2 reads a VF; LQC2 for symmetry, matching x86
+		// recLQC2/recSQC2 which sync/finish via the same analysis.
+		case OP_LQC2: recEmitVU0FinishForCOP2(); recEmitInterpInline(op); return true;
+		case OP_SQC2: recEmitVU0FinishForCOP2(); recEmitInterpInline(op); return true;
+
+		// CACHE — fully emulated (Cache.cpp doCacheHitOp) but straight-line and writes no
+		// GPR (only CP0.TagLo for the tag variants). Inline-interpret to keep it in-block;
+		// with EE cache emulation off (fastmem) each op is a cheap miss. Was ~12.6M
+		// single-steps / 5s (@@ANDROID_EE_OPHIST@@ step[2f]).
+		case 0x2F: recEmitInterpInline(op); return true;
+
+		// PREF — prefetch hint; the interpreter is a true no-op (R5900OpcodeImpl.cpp),
+		// so compile it as nothing.
+		case 0x33: return true;
 
 		default: return false;
 	}
@@ -2592,15 +2656,195 @@ static bool recBranchIsUnconditional(u32 op)
 	}
 }
 
+#if ARMSX2_ANDROID_EE_OPHIST
+namespace {
+// Per-window histogram of EE ops that hit the interpreter (no native ARM64 rec
+// generator). Plain counters — EE-thread-only. `step` = single-step one-shot
+// blocks (recInterpStepThunk); `inline` = in-block fallback (recInterpInlineThunk).
+// Sub-op arrays are shared across both paths (the primary-opcode split already
+// tells us which path dominates). All indices are the raw MIPS field values.
+struct EeOpHist
+{
+	u64 prim_step[64] = {};   // op>>26, single-step path
+	u64 prim_inline[64] = {}; // op>>26, inline path
+	u64 special[64] = {};     // op>>26==0x00, by funct
+	u64 regimm[32] = {};      // 0x01, by rt
+	u64 cop0_rs[32] = {};     // 0x10, by rs (0x00 MFC0 / 0x04 MTC0 / 0x08 BC0 / 0x10 C0)
+	u64 cop0_c0[64] = {};     // 0x10 & rs==0x10, by funct (0x18 ERET, 0x38 EI, 0x39 DI, 0x20 WAIT)
+	u64 cop1_rs[32] = {};     // 0x11, by rs
+	u64 cop1_s[64] = {};      // 0x11 & rs==0x10 (COP1_S), by funct
+	u64 cop2_rs[32] = {};     // 0x12, by rs
+	u64 mmi[64] = {};         // 0x1C, by funct
+	u64 mmi0[32] = {}, mmi1[32] = {}, mmi2[32] = {}, mmi3[32] = {}; // by sa
+	u64 total = 0;
+	u64 since_check = 0;
+	u64 window_start_us = 0;
+};
+EeOpHist s_ee_ophist;
+
+void EeOpHistAppend(char* buf, size_t bufsz, size_t& off, const char* label, const u64* arr, u32 n)
+{
+	bool any = false;
+	for (u32 i = 0; i < n; i++)
+	{
+		if (!arr[i])
+			continue;
+		if (off >= bufsz - 1)
+			return;
+		if (!any)
+		{
+			const int w = std::snprintf(buf + off, bufsz - off, " %s[", label);
+			if (w > 0)
+				off += static_cast<size_t>(w);
+			if (off >= bufsz)
+				off = bufsz - 1;
+			any = true;
+		}
+		if (off >= bufsz - 1)
+			return;
+		const int w = std::snprintf(buf + off, bufsz - off, "%02x=%llu ", i, static_cast<unsigned long long>(arr[i]));
+		if (w > 0)
+			off += static_cast<size_t>(w);
+		if (off >= bufsz)
+			off = bufsz - 1;
+	}
+	if (any && off < bufsz - 1)
+	{
+		const int w = std::snprintf(buf + off, bufsz - off, "]");
+		if (w > 0)
+			off += static_cast<size_t>(w);
+	}
+}
+
+void EeOpHistReport()
+{
+	using clock = std::chrono::steady_clock;
+	const u64 now = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
+		clock::now().time_since_epoch()).count());
+	if (s_ee_ophist.window_start_us == 0)
+	{
+		s_ee_ophist.window_start_us = now;
+		return;
+	}
+	if (now - s_ee_ophist.window_start_us < 5'000'000)
+		return;
+
+	const u64 win_ms = (now - s_ee_ophist.window_start_us) / 1000;
+	char buf[8192];
+	size_t off = static_cast<size_t>(std::snprintf(buf, sizeof(buf),
+		"@@ANDROID_EE_OPHIST@@ win_ms=%llu total=%llu",
+		static_cast<unsigned long long>(win_ms),
+		static_cast<unsigned long long>(s_ee_ophist.total)));
+	if (off >= sizeof(buf))
+		off = sizeof(buf) - 1;
+	EeOpHistAppend(buf, sizeof(buf), off, "step", s_ee_ophist.prim_step, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "inline", s_ee_ophist.prim_inline, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "special", s_ee_ophist.special, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "regimm", s_ee_ophist.regimm, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "cop0rs", s_ee_ophist.cop0_rs, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "cop0c0", s_ee_ophist.cop0_c0, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "cop1rs", s_ee_ophist.cop1_rs, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "cop1s", s_ee_ophist.cop1_s, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "cop2rs", s_ee_ophist.cop2_rs, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "mmi", s_ee_ophist.mmi, 64);
+	EeOpHistAppend(buf, sizeof(buf), off, "mmi0", s_ee_ophist.mmi0, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "mmi1", s_ee_ophist.mmi1, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "mmi2", s_ee_ophist.mmi2, 32);
+	EeOpHistAppend(buf, sizeof(buf), off, "mmi3", s_ee_ophist.mmi3, 32);
+	Console.WriteLnFmt("{}", static_cast<const char*>(buf));
+
+	s_ee_ophist = EeOpHist{};
+	s_ee_ophist.window_start_us = now;
+}
+
+inline void EeOpHistRecord(u32 op, bool step)
+{
+	const u32 prim = op >> 26;
+	const u32 rs = (op >> 21) & 0x1f, rt = (op >> 16) & 0x1f, funct = op & 0x3f, sa = (op >> 6) & 0x1f;
+	s_ee_ophist.total++;
+	if (step)
+		s_ee_ophist.prim_step[prim]++;
+	else
+		s_ee_ophist.prim_inline[prim]++;
+	switch (prim)
+	{
+		case 0x00: s_ee_ophist.special[funct]++; break;
+		case 0x01: s_ee_ophist.regimm[rt]++; break;
+		case 0x10:
+			s_ee_ophist.cop0_rs[rs]++;
+			if (rs == 0x10) s_ee_ophist.cop0_c0[funct]++;
+			break;
+		case 0x11:
+			s_ee_ophist.cop1_rs[rs]++;
+			if (rs == 0x10) s_ee_ophist.cop1_s[funct]++;
+			break;
+		case 0x12: s_ee_ophist.cop2_rs[rs]++; break;
+		case 0x1C:
+			s_ee_ophist.mmi[funct]++;
+			if (funct == 0x08) s_ee_ophist.mmi0[sa]++;
+			else if (funct == 0x28) s_ee_ophist.mmi1[sa]++;
+			else if (funct == 0x09) s_ee_ophist.mmi2[sa]++;
+			else if (funct == 0x29) s_ee_ophist.mmi3[sa]++;
+			break;
+		default: break;
+	}
+	if ((++s_ee_ophist.since_check & 0xFFFFFu) == 0)
+		EeOpHistReport();
+}
+} // namespace
+#endif // ARMSX2_ANDROID_EE_OPHIST
+
+static void recInterpInlineThunk(u32 op)
+{
+#if ARMSX2_ANDROID_EE_OPHIST
+	EeOpHistRecord(op, /*step=*/false);
+#endif
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::ScopedTimer timer(
+		AndroidPerfBuckets::s_ee_interp_inline_count,
+		AndroidPerfBuckets::s_ee_interp_inline_us,
+		"ee_interp_inline");
+#endif
+	cpuRegs.code = op;
+	R5900::GetInstruction(op).interpret();
+}
+
+#if ARMSX2_ANDROID_EE_OPHIST
+static void recInterpStepThunk(u32 op)
+#else
+static void recInterpStepThunk()
+#endif
+{
+#if ARMSX2_ANDROID_EE_OPHIST
+	EeOpHistRecord(op, /*step=*/true);
+#endif
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::ScopedTimer timer(
+		AndroidPerfBuckets::s_ee_interp_step_count,
+		AndroidPerfBuckets::s_ee_interp_step_us,
+		"ee_interp_step");
+#endif
+	intExecuteOneInst();
+}
+
 // Emit cpuRegs.code = op, then call the interpreter's handler for `op`. Used for a
 // delay-slot instruction the straight-line generators can't handle. Does NOT touch
 // cpuRegs.pc (the branch generator already committed the next PC, and a normal
 // delay-slot op never writes PC). RESTATEPTR(x19) is callee-saved across the call.
 static void recEmitInterpInline(u32 op)
 {
-	armAsm->Mov(RSCRATCHADDR.W(), op);
-	armAsm->Str(RSCRATCHADDR.W(), a64::MemOperand(RESTATEPTR, EE_CODE_OFFSET));
-	armEmitCall(reinterpret_cast<const void*>(R5900::GetInstruction(op).interpret));
+	armAsm->Mov(RWARG1, op);
+	armEmitCall(reinterpret_cast<const void*>(recInterpInlineThunk));
+}
+
+// VU0 micro/macro finish for COP2 ops — emit x86's mVUFinishVU0
+// (microVU_Macro.inl): with the VU0 recompiler enabled, a microVU0 program
+// started by VCALLMS runs deferred, so reading VU0 state mid-flight gives a
+// half-computed result. _vu0FinishMicro guards on VPU_STAT&1, so it is a cheap
+// no-op when no micro program is pending.
+static void recEmitVU0FinishForCOP2()
+{
+	armEmitCall(reinterpret_cast<const void*>(&::_vu0FinishMicro));
 }
 
 // Compile one straight-line or delay-slot instruction: const-folded/native generator
@@ -2923,6 +3167,9 @@ static void recEmitEventTestAndDispatch(u32 scaled_cycles, bool add_cycles, bool
 //     so the next dispatch resumes there.
 static void recRecompile(u32 startpc)
 {
+#if defined(__ANDROID__)
+	const u64 diag_recompile_start_us = AndroidPerfBuckets::NowUs();
+#endif
 #if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	static int s_recompile_log_count = 0;
 	int recompile_log_index = -1;
@@ -3123,7 +3370,10 @@ static void recRecompile(u32 startpc)
 			// runs exactly one guest instruction (handling its own PC, delay slot and
 			// cycle accounting), then re-dispatches via the tail. No compiled cycles to
 			// charge (intExecuteOneInst does that itself).
-			armEmitCall(reinterpret_cast<const void*>(intExecuteOneInst));
+#if ARMSX2_ANDROID_EE_OPHIST
+			armAsm->Mov(RWARG1, op); // pass the single-stepped op to the histogram thunk
+#endif
+			armEmitCall(reinterpret_cast<const void*>(recInterpStepThunk));
 			endpc = pc + 4;
 			interp_step = true;
 			break;
@@ -3165,6 +3415,15 @@ static void recRecompile(u32 startpc)
 	// Install the block so subsequent dispatches to startpc (and its address mirrors)
 	// branch straight into it instead of recompiling.
 	*recPtrToBlock(startpc) = reinterpret_cast<uptr>(block_entry);
+#if defined(__ANDROID__)
+	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_ee_recompile_count);
+	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_ee_recompile_us,
+		AndroidPerfBuckets::NowUs() - diag_recompile_start_us);
+	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_ee_recompile_ops, compiled);
+	if (interp_step)
+		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_ee_recompile_interp_blocks);
+	AndroidPerfBuckets::MaybeReport("ee_recompile");
+#endif
 #if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	if (recompile_log_index >= 0)
 	{

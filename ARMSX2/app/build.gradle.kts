@@ -15,8 +15,8 @@ android {
         applicationId = "com.armsx2"
         minSdk = 26
         targetSdk = 36
-        versionCode = 6
-        versionName = "1.0-biospath"
+        versionCode = 15
+        versionName = "1.0-overlay"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         ndk {
@@ -41,6 +41,7 @@ android {
                     arguments += "-DANDROID=true"
                     arguments += "-DANDROID_STL=c++_static"
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    arguments += "-DLTO_PCSX2_CORE=ON"
                     arguments += "-DCMAKE_C_FLAGS=-O3 -g"
                     arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
                 }

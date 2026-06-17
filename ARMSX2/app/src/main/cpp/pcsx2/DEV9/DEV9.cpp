@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "common/Assertions.h"
+#include "common/FileSystem.h"
 #include "common/Path.h"
 #include "common/StringUtil.h"
 
+#include "ATA/HddCreate.h"
 #include "IopDma.h"
 
 #ifdef _WIN32
@@ -92,6 +94,39 @@ std::string GetHDDPath()
 		hddPath = Path::Combine(EmuFolders::Settings, hddPath);
 
 	return hddPath;
+}
+
+static bool EnsureHDDImageExists(const std::string& hddPath)
+{
+	if (FileSystem::FileExists(hddPath.c_str()))
+		return true;
+
+	const std::string directory(Path::GetDirectory(hddPath));
+	if (!directory.empty() && !FileSystem::CreateDirectoryPath(directory.c_str(), true))
+	{
+		Console.Error("DEV9: Failed to create HDD directory '%s'", directory.c_str());
+		return false;
+	}
+
+	// Android has no desktop HDD creator dialog. Create a sparse 8 GiB image
+	// the first time the user enables DEV9 HDD so the toggle actually boots.
+	static constexpr u64 DEFAULT_ANDROID_HDD_SIZE =
+		static_cast<u64>(8) * 1024 * 1024 * 1024;
+
+	Console.WriteLn("DEV9: Creating default Android HDD image '%s' (8 GiB sparse)",
+		hddPath.c_str());
+	HddCreate hddCreator;
+	hddCreator.filePath = hddPath;
+	hddCreator.neededSize = DEFAULT_ANDROID_HDD_SIZE;
+	hddCreator.Start();
+
+	if (hddCreator.errored || !FileSystem::FileExists(hddPath.c_str()))
+	{
+		Console.Error("DEV9: Failed to create default HDD image '%s'", hddPath.c_str());
+		return false;
+	}
+
+	return true;
 }
 
 s32 DEV9init()
@@ -187,6 +222,9 @@ s32 DEV9open()
 
 	if (EmuConfig.DEV9.HddEnable)
 	{
+		if (!EnsureHDDImageExists(hddPath))
+			EmuConfig.DEV9.HddEnable = false;
+
 		if (dev9.ata->Open(hddPath) != 0)
 			EmuConfig.DEV9.HddEnable = false;
 	}

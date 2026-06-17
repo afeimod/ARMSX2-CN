@@ -509,6 +509,7 @@ void psxVBlankStart()
 	}
 
 	// Periodic 1-Hz log so we can see the auto-detected mode while tuning.
+#ifndef __ANDROID__
 	{
 		static u32 s_logCnt = 0;
 		if ((++s_logCnt % 60) == 1)
@@ -518,6 +519,7 @@ void psxVBlankStart()
 				PSX_VSYNC_IRQ_AUTO_FROM_GP1,
 				(unsigned)pgpu.stat.bits.VILAC, (unsigned)pgpu.stat.bits.VRES);
 	}
+#endif
 
 	// Deliver vsync IRQ + gate transitions to IOP only every Nth call.
 	static u32 s_vbCount = 0;

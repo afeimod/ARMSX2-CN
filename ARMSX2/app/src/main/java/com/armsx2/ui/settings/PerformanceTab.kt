@@ -69,6 +69,22 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(eeCycleSkip = it)) },
         )
         SettingsDivider()
+        // Speed Limit / Custom FPS — caps emulation speed as a % of native
+        // (100% ≈ 60fps NTSC / 50fps PAL). Only effective with the Frame
+        // Limiter on. Driven by a preset index; stores the actual percent.
+        run {
+            val speedPresets = listOf(25, 50, 75, 100, 150, 200, 300)
+            val idx = speedPresets.indexOf(s.nominalSpeedPercent).let { if (it < 0) 3 else it }
+            IntSliderRow(
+                label = "Speed Limit",
+                value = idx,
+                min = 0,
+                max = speedPresets.size - 1,
+                valueFormatter = { "${speedPresets[it]}%" },
+                onChange = { apply(s.copy(nominalSpeedPercent = speedPresets[it])) },
+            )
+        }
+        SettingsDivider()
         Spacer(Modifier.height(8.dp))
         // On/Off toggles as a 4-wide bubble grid, matching the Playing-Now
         // action grid in InGameOverlay. Two rows of four cells — last cell

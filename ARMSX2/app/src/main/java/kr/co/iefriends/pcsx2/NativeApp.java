@@ -146,6 +146,19 @@ public class NativeApp {
 	 *  init. Backs the in-game overlay's OSD pill. */
 	public static native void osdShowAll(boolean enabled);
 
+	/** Per-element OSD toggles (Performance Overlay tab). Apply live via
+	 *  EmuConfig.GS + MTGS::ApplySettings; persistence to base is done on
+	 *  the Kotlin side via setSetting. Disabling GPU also stops the GPU
+	 *  timing queries (real perf win), see GS.cpp. */
+	public static native void osdShowFPS(boolean enabled);
+	public static native void osdShowVPS(boolean enabled);
+	public static native void osdShowSpeed(boolean enabled);
+	public static native void osdShowCPU(boolean enabled);
+	public static native void osdShowGPU(boolean enabled);
+	public static native void osdShowResolution(boolean enabled);
+	public static native void osdShowGSStats(boolean enabled);
+	public static native void osdShowFrameTimes(boolean enabled);
+
 	/** Pin a custom Vulkan driver (e.g. Mesa Turnip) for the next VM
 	 *  start. Must be called BEFORE Main.start() — the first MTGS::Open
 	 *  triggers Vulkan::LoadVulkanLibrary which reads these paths. Pass
@@ -166,6 +179,20 @@ public class NativeApp {
 
 	public static native void setAspectRatio(int type);
 	public static native void speedhackLimitermode(int value);
+	/** Custom speed / FPS cap as a percent of native (100 = full speed).
+	 *  Applies live to the running VM's frame pacer. */
+	public static native void setNominalSpeed(int percent);
+	/** Cap presented frames per second (0 = uncapped). Throttles only the
+	 *  display swap, so emulation keeps running at 100% speed while the
+	 *  on-screen FPS is limited. Applies live. */
+	public static native void setFpsCap(int fps);
+	/** Frame skip: present 1 frame, skip the next N (0 = off). Display-only
+	 *  throttle; applies live. */
+	public static native void setFrameSkip(int skip);
+	/** SPU2 output volume, percent (0..200). Applies live + persists. */
+	public static native void setAudioVolume(int volume);
+	/** Mute/unmute SPU2 output. Applies live + persists. */
+	public static native void setAudioMuted(boolean muted);
 	public static native void speedhackEecyclerate(int value);
 	public static native void speedhackEecycleskip(int value);
 	public static native void setInstantVU1(boolean enabled);

@@ -2,6 +2,8 @@ package com.armsx2.ui
 
 import android.content.Context
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -67,6 +69,7 @@ import com.armsx2.Main
 import kr.co.iefriends.pcsx2.NativeApp
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
@@ -334,6 +337,31 @@ object GamesList {
         romsDirs: List<String>,
         romsKey: String,
     ) {
+        // Boot ELF picker. Copies the chosen .elf into a real file under the
+        // app data dir and boots it via the normal launch path — emucore's
+        // AutoDetectSource recognizes the .elf extension (s_elf_override,
+        // NoDisc), so homebrew / HDD-loader ELFs boot through the BIOS. We copy
+        // (rather than pass the content URI) so the .elf suffix and a plain
+        // file path are guaranteed regardless of the document provider.
+        val bootElfLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            val name = DocumentFile.fromSingleUri(context, uri)?.name
+                ?.takeIf { it.isNotEmpty() } ?: "boot.elf"
+            val outName = if (name.endsWith(".elf", ignoreCase = true)) name else "$name.elf"
+            val outFile = File(File(Main.assetCopyRoot(context), "elf").apply { mkdirs() }, outName)
+            val copied = runCatching {
+                context.contentResolver.openInputStream(uri)?.use { ins ->
+                    outFile.outputStream().use { outs -> ins.copyTo(outs) }
+                } != null
+            }.getOrDefault(false)
+            if (copied && outFile.length() > 0L) {
+                WindowImpl.showLibrary.value = false
+                Main.launchGame(outFile.absolutePath, null)
+            }
+        }
+
         Row(
             Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -350,6 +378,9 @@ object GamesList {
             ActionChip("BIOS") {
                 WindowImpl.showLibrary.value = false
                 Main.startBios()
+            }
+            ActionChip("ELF") {
+                bootElfLauncher.launch(arrayOf("*/*"))
             }
             ActionChip("Cards") {
                 MemoryCardManager.visible.value = true

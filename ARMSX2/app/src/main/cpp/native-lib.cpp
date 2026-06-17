@@ -38,6 +38,7 @@
 #include "ImGui/FullscreenUI.h"
 #include "SIO/Pad/PadDualshock2.h"
 #include "MTGS.h"
+#include "SPU2/spu2.h"
 #include "GS/Renderers/Vulkan/VKLoader.h"
 #include "SDL3/SDL.h"
 #include "ps2/BiosTools.h"
@@ -600,6 +601,69 @@ Java_kr_co_iefriends_pcsx2_NativeApp_speedhackLimitermode(JNIEnv *env, jclass cl
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setNominalSpeed(JNIEnv *env, jclass clazz,
+                                                     jint p_percent) {
+    // Custom speed / FPS cap. Mirrors speedhackLimitermode's direct-apply
+    // pattern: the "Framerate/NominalScalar" base-setting write (from
+    // Settings.applyTo) persists the value for cold starts, but the live VM's
+    // frame pacer only re-reads it on UpdateTargetSpeed — so push it straight
+    // into EmuConfig and re-pace here. Without this, dragging the Speed Limit
+    // slider in-game did nothing (the string round-trip through ApplySettings
+    // didn't re-pace reliably). Clamp matches EmulationSpeedOptions::SanityCheck.
+    const float scalar = std::clamp(static_cast<float>(p_percent) / 100.0f, 0.05f, 10.0f);
+    Host::SetBaseFloatSettingValue("Framerate", "NominalScalar", scalar);
+    EmuConfig.EmulationSpeed.NominalScalar = scalar;
+    if (VMManager::HasValidVM())
+        VMManager::UpdateTargetSpeed();
+    Console.WriteLnFmt("@@ANDROID_SPEED@@ nominal_scalar={}", scalar);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setFpsCap(JNIEnv *env, jclass clazz,
+                                               jint p_fps) {
+    // Deprecated. The previous Android-only FPS cap skipped GS rendering, which
+    // broke BIOS/game visuals in titles which depend on every GS update. Keep
+    // the JNI symbol so older settings/UI calls are harmless, but route users
+    // through PCSX2's normal frame limiter / NominalScalar pacing instead.
+    Console.WriteLnFmt("@@ANDROID_FPSCAP@@ ignored={}", p_fps);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setFrameSkip(JNIEnv *env, jclass clazz,
+                                                  jint p_skip) {
+    // Deprecated for the same reason as setFpsCap(). Kept as a no-op ABI shim.
+    Console.WriteLnFmt("@@ANDROID_FRAMESKIP@@ ignored={}", p_skip);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setAudioVolume(JNIEnv *env, jclass clazz,
+                                                    jint p_volume) {
+    // SPU2 output volume (percent). Persist to the base layer for cold starts,
+    // mirror into EmuConfig so a later ApplySettings diff doesn't fight it, and
+    // push live to the open audio stream (no-op when none is open).
+    const int vol = std::clamp(static_cast<int>(p_volume), 0, 200);
+    Host::SetBaseIntSettingValue("SPU2/Output", "StandardVolume", vol);
+    EmuConfig.SPU2.StandardVolume = vol;
+    SPU2::SetOutputVolume(static_cast<u32>(vol));
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setAudioMuted(JNIEnv *env, jclass clazz,
+                                                   jboolean p_muted) {
+    const bool muted = (p_muted == JNI_TRUE);
+    // Update EmuConfig BEFORE SetOutputMuted: its unmute path refuses to unmute
+    // while EmuConfig.SPU2.OutputMuted is still true.
+    EmuConfig.SPU2.OutputMuted = muted;
+    Host::SetBaseBoolSettingValue("SPU2/Output", "OutputMuted", muted);
+    SPU2::SetOutputMuted(muted);
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_speedhackEecyclerate(JNIEnv *env, jclass clazz,
                                                           jint p_value) {
 }
@@ -1139,6 +1203,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
     VMBootParameters boot_params;
     boot_params.filename = _szPath;
     boot_params.fast_boot = false;
+    Console.WriteLnFmt("@@ANDROID_RUNVM_PATH@@ empty={} path={}",
+        _szPath.empty() ? 1 : 0, _szPath);
     Console.Error("Loading %s", _szPath.c_str());
     if (!VMManager::Internal::CPUThreadInitialize()) {
         VMManager::Internal::CPUThreadShutdown();
@@ -1149,6 +1215,22 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
         usleep(10000);
 
     VMManager::ApplySettings();
+    Console.WriteLnFmt(
+        "@@ANDROID_CPU_CONFIG@@ ee={} iop={} vu0={} vu1={} fastmem={} mtvu={} "
+        "waitloop={} intc={} vuFlag={} vu1Instant={} fpuFull={} fpuOvf={} fpuExtraOvf={}",
+        +EmuConfig.Cpu.Recompiler.EnableEE,
+        +EmuConfig.Cpu.Recompiler.EnableIOP,
+        +EmuConfig.Cpu.Recompiler.EnableVU0,
+        +EmuConfig.Cpu.Recompiler.EnableVU1,
+        +EmuConfig.Cpu.Recompiler.EnableFastmem,
+        +EmuConfig.Speedhacks.vuThread,
+        +EmuConfig.Speedhacks.WaitLoop,
+        +EmuConfig.Speedhacks.IntcStat,
+        +EmuConfig.Speedhacks.vuFlagHack,
+        +EmuConfig.Speedhacks.vu1Instant,
+        +EmuConfig.Cpu.Recompiler.fpuFullMode,
+        +EmuConfig.Cpu.Recompiler.fpuOverflow,
+        +EmuConfig.Cpu.Recompiler.fpuExtraOverflow);
     GSDumpReplayer::SetIsDumpRunner(false);
 
     if (VMManager::Initialize(boot_params, nullptr) == VMBootResult::StartupSuccess)

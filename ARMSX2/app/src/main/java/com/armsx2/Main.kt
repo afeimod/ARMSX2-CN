@@ -425,6 +425,7 @@ class Main: ComponentActivity() {
             invoke {
                 try {
                     eState.value = EmuState.RUNNING
+                    println("@@ANDROID_START_VM@@ kind=game path=${m_szGamefile.take(240)}")
                     WindowImpl.showLibrary.value = false
                     WindowImpl.overlayVisible.value = false
                     WindowImpl.toolbarVisible.value = false
@@ -514,6 +515,15 @@ class Main: ComponentActivity() {
          * path that doesn't have a GameInfo (Change Disc file picker).
          */
         fun launchGame(uri: String, info: GameInfo? = null) {
+            if (uri.isBlank()) {
+                println("@@ANDROID_LAUNCH_REJECT@@ reason=blank_uri title=${info?.title ?: ""}")
+                return
+            }
+            println(
+                "@@ANDROID_LAUNCH_GAME@@ title=${info?.title ?: "<direct>"} " +
+                    "uri=${uri.take(240)} state=${eState.value} runLoop=$vmRunLoopActive " +
+                    "stopping=$vmStopInProgress nativeReady=${nativeReady.value}"
+            )
             currentGame.value = info
             m_szGamefile = uri
             synchronized(vmLifecycleLock) {
@@ -561,14 +571,23 @@ class Main: ComponentActivity() {
             invoke {
                 try {
                     eState.value = EmuState.RUNNING
+                    println("@@ANDROID_START_VM@@ kind=bios path=<empty>")
                     applyRendererPrefs()
                     NativeApp.runVMThread(m_szGamefile)
                 } finally {
                     eState.value = EmuState.STOPPED
-                    synchronized(vmLifecycleLock) {
+                    val restartNow = synchronized(vmLifecycleLock) {
                         vmRunLoopActive = false
                         vmStopInProgress = false
-                        vmRestartAfterStop = false
+                        if (vmRestartAfterStop) {
+                            vmRestartAfterStop = false
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    if (restartNow) {
+                        start()
                     }
                 }
             }

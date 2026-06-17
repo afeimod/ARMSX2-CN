@@ -20,6 +20,7 @@ private:
 	u32 m_dump_frames = 0;
 	u32 m_skipped_duplicate_frames = 0;
 
+private:
 	// Tracking draw counters for idle frame detection.
 	u64 m_last_draw_n = 0;
 	u64 m_last_transfer_n = 0;
