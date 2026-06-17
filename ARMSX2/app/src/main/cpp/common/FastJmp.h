@@ -11,7 +11,11 @@ struct fastjmp_buf
 #if defined(_WIN32)
 	static constexpr std::size_t BUF_SIZE = 240;
 #elif defined(ARCH_ARM64)
-	static constexpr std::size_t BUF_SIZE = 168;
+	// AArch64 fastjmp stores:
+	// x16/x30, x19-x28, x29, and d8-d15. The final stp d14,d15 at offset
+	// 160 writes through byte 175, so the buffer must be 176 bytes. 168
+	// corrupts the following object and breaks recompiler exits on Android.
+	static constexpr std::size_t BUF_SIZE = 176;
 #else
 	static constexpr std::size_t BUF_SIZE = 64;
 #endif

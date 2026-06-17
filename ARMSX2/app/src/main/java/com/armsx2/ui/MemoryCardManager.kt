@@ -1,6 +1,7 @@
 package com.armsx2.ui
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.documentfile.provider.DocumentFile
 import com.armsx2.Main
 import java.io.File
 import java.io.FileOutputStream
@@ -49,11 +51,19 @@ object MemoryCardManager {
     @Composable
     fun Render() {
         val context = LocalContext.current
-        val launcher = rememberLauncherForActivityResult(
+        val fileLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.GetContent()
         ) { uri: Uri? ->
             if (uri != null) {
                 importSlot1(context, uri)
+                refresh(context)
+            }
+        }
+        val folderLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocumentTree()
+        ) { uri: Uri? ->
+            if (uri != null) {
+                importFolderCardSlot1(context, uri)
                 refresh(context)
             }
         }
@@ -104,11 +114,18 @@ object MemoryCardManager {
 
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(
-                        onClick = { launcher.launch("*/*") },
+                        onClick = { fileLauncher.launch("*/*") },
                         colors = ps2ButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Import Slot 1")
+                        Text("Import File")
+                    }
+                    Button(
+                        onClick = { folderLauncher.launch(null) },
+                        colors = ps2ButtonColors(),
+                        shape = RoundedCornerShape(8.dp),
+                    ) {
+                        Text("Import Folder")
                     }
                     Button(
                         onClick = {
@@ -175,10 +192,28 @@ object MemoryCardManager {
                                 )
                                 Spacer(Modifier.width(8.dp))
                                 Text(
-                                    readableSize(file.length()),
+                                    if (file.isDirectory) "Folder" else readableSize(file.length()),
                                     color = Color(0xFFAAAAAA),
                                     fontSize = 11.sp,
                                 )
+                                Spacer(Modifier.width(8.dp))
+                                Button(
+                                    onClick = { assignSlot(context, 1, file) },
+                                    colors = darkButtonColors(),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Text("Slot 1", fontSize = 11.sp)
+                                }
+                                Spacer(Modifier.width(6.dp))
+                                Button(
+                                    onClick = { assignSlot(context, 2, file) },
+                                    colors = darkButtonColors(),
+                                    shape = RoundedCornerShape(6.dp),
+                                    modifier = Modifier.height(32.dp),
+                                ) {
+                                    Text("Slot 2", fontSize = 11.sp)
+                                }
                             }
                         }
                     }
@@ -186,7 +221,7 @@ object MemoryCardManager {
 
                 Spacer(Modifier.height(12.dp))
                 Text(
-                    "Slot 1 imports are copied to Mcd001.ps2. Default slots use Mcd001.ps2 and Mcd002.ps2.",
+                    "File imports are copied to Mcd001.ps2. Folder imports are copied as folder cards. Existing .ps2/.mcr files and folder cards can be assigned to either slot.",
                     color = Color(0xFF888888),
                     fontSize = 11.sp,
                 )
@@ -220,6 +255,35 @@ object MemoryCardManager {
         }
     }
 
+    private fun importFolderCardSlot1(context: Context, uri: Uri) {
+        val dir = memcardsDir(context).apply { mkdirs() }
+        try {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                )
+            }
+
+            val source = DocumentFile.fromTreeUri(context, uri)
+                ?: error("Could not open selected folder")
+            val dest = uniqueChild(dir, sanitizeFileName(source.name ?: "FolderCard"))
+            dest.mkdirs()
+
+            val copied = copyDocumentFolder(context, source, dest)
+            if (copied == 0)
+                error("Selected folder did not contain any files")
+
+            if (assignSlot(context, 1, dest)) {
+                status.value = "Imported folder card ${dest.name} to Slot 1."
+                Toast.makeText(context, "Folder memory card imported", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            status.value = "Folder import failed: ${e.message ?: "unknown error"}"
+            Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun ensureDefaultSlots(context: Context) {
         memcardsDir(context).mkdirs()
         try {
@@ -229,6 +293,28 @@ object MemoryCardManager {
         } catch (e: Exception) {
             status.value = "Could not update memory-card settings: ${e.message ?: "unknown error"}"
             Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun assignSlot(context: Context, slot: Int, file: File): Boolean {
+        if (!Main.nativeReady.value) {
+            status.value = "Core settings are still starting up."
+            Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
+            return false
+        }
+
+        try {
+            NativeApp.setSetting("MemoryCards", "Slot${slot}_Enable", "bool", "false")
+            NativeApp.setSetting("MemoryCards", "Slot${slot}_Filename", "string", file.name)
+            NativeApp.setSetting("MemoryCards", "Slot${slot}_Enable", "bool", "true")
+            NativeApp.commitSettings()
+            status.value = "${file.name} assigned to Slot $slot."
+            Toast.makeText(context, status.value, Toast.LENGTH_SHORT).show()
+            return true
+        } catch (e: Exception) {
+            status.value = "Could not assign card: ${e.message ?: "unknown error"}"
+            Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
+            return false
         }
     }
 
@@ -247,6 +333,39 @@ object MemoryCardManager {
 
     private fun memcardsDir(context: Context): File =
         File(Main.assetCopyRoot(context), "memcards")
+
+    private fun copyDocumentFolder(context: Context, source: DocumentFile, dest: File): Int {
+        var copied = 0
+        for (child in source.listFiles()) {
+            val name = sanitizeFileName(child.name ?: continue)
+            if (child.isDirectory) {
+                val childDest = File(dest, name).apply { mkdirs() }
+                copied += copyDocumentFolder(context, child, childDest)
+            } else if (child.isFile) {
+                context.contentResolver.openInputStream(child.uri)?.use { input ->
+                    FileOutputStream(File(dest, name)).use { output ->
+                        input.copyTo(output)
+                    }
+                }
+                copied++
+            }
+        }
+        return copied
+    }
+
+    private fun uniqueChild(parent: File, requestedName: String): File {
+        val base = requestedName.ifBlank { "FolderCard" }
+        var candidate = File(parent, base)
+        var suffix = 2
+        while (candidate.exists()) {
+            candidate = File(parent, "$base-$suffix")
+            suffix++
+        }
+        return candidate
+    }
+
+    private fun sanitizeFileName(name: String): String =
+        name.replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "FolderCard" }
 
     @Composable
     private fun ps2ButtonColors() = ButtonDefaults.buttonColors(

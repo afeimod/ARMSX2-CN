@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <setjmp.h>
 #include <vector>
 
 #ifndef ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
@@ -166,7 +167,7 @@ static bool eeRecExecuting = false;
 static bool eeRecNeedsReset = false;
 static bool eeRecExitRequested = false;
 static volatile u8 eeRecExitSignal = 0;
-static fastjmp_buf s_jmp_buf;
+static jmp_buf s_jmp_buf;
 
 static void recResetRaw();
 static void recGenDispatchers();
@@ -2764,7 +2765,7 @@ static void recExitUnmapped()
 {
 	Console.Error("ARM64 EE rec: jump to unmapped recLUT page (PC=0x%08x)", cpuRegs.pc);
 	eeRecExitRequested = true;
-	fastjmp_jmp(&s_jmp_buf, 1);
+	longjmp(s_jmp_buf, 1);
 }
 
 // Emit the four dispatcher stubs into one contiguous block at the head of the code
@@ -3179,6 +3180,26 @@ static void recRecompile(u32 startpc)
 
 static void recEventTest()
 {
+	const auto exit_execution = [](VMState st) {
+		if (st == VMState::Stopping || st == VMState::Shutdown)
+		{
+			static int s_n = 0;
+			if (s_n < 8)
+				Console.WriteLn("@@EE_STOP_EXIT@@ n=%d state=%d", s_n++, static_cast<int>(st));
+		}
+		eeRecExitRequested = false;
+		eeRecExitSignal = 0;
+		longjmp(s_jmp_buf, 1);
+	};
+
+	// A stop request can land while generated EE code is about to service its
+	// event path. Bail before _cpuEventTest_Shared() touches IOP counters/VU
+	// sync; otherwise Android close/reset can keep running PSX-vsync work after
+	// the VM has already entered Stopping.
+	VMState st = VMManager::GetState();
+	if (st == VMState::Stopping || st == VMState::Shutdown)
+		exit_execution(st);
+
 #if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS
 	static int s_event_log_count = 0;
 	if (s_event_log_count < 16)
@@ -3200,32 +3221,22 @@ static void recEventTest()
 	// overlay-pause path left it. Forcing an exit on Paused made the run loop
 	// enter its idle/pump branch on every gear tap and crashed in-game settings.
 	// Stop/Shutdown is the state that genuinely must unwind out of Execute().
-	const VMState st = VMManager::GetState();
+	st = VMManager::GetState();
 	if (eeRecExitRequested || st == VMState::Stopping || st == VMState::Shutdown)
-	{
-		if (st == VMState::Stopping || st == VMState::Shutdown)
-		{
-			static int s_n = 0;
-			if (s_n < 4)
-				Console.WriteLn("@@EE_STOP_EXIT@@ n=%d state=%d", s_n++, static_cast<int>(st));
-		}
-		eeRecExitRequested = false;
-		eeRecExitSignal = 0;
-		fastjmp_jmp(&s_jmp_buf, 1);
-	}
+		exit_execution(st);
 }
 
-// C entry point. Pins the exit fastjmp target, then jumps into the generated
+// C entry point. Pins the exit longjmp target, then jumps into the generated
 // EnterRecompiledCode stub, which establishes RESTATEPTR and runs blocks chained
 // entirely in host code (block -> DispatcherReg -> block ...). Control only returns
-// here via the fastjmp in recEventTest (state-check / exit request).
+// here via the longjmp in recEventTest (state-check / exit request).
 static void recExecute()
 {
 	if (eeRecNeedsReset || !EnterRecompiledCode)
 		recResetRaw();
 
 
-	if (fastjmp_set(&s_jmp_buf) != 0)
+	if (setjmp(s_jmp_buf) != 0)
 	{
 		eeRecExecuting = false;
 #if ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS

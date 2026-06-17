@@ -277,17 +277,23 @@ void VMManager::SetState(VMState state)
 	const VMState old_state = s_state.load(std::memory_order_acquire);
 	pxAssert(state != VMState::Initializing && state != VMState::Shutdown);
 
-	// Once a stop has been signalled, Stopping is terminal: ignore any reversion
-	// to a live state. On Android, pause/resume are dispatched asynchronously to
-	// the CPU thread, and when Exit is pressed from the (paused) in-game overlay
-	// those queued tasks race the shutdown and flip Stopping back to Running/
-	// Paused. That left the run loop re-entering Execute() forever — the
-	// exit-game hang (the EE *did* break out on Stopping, but state bounced back
-	// to Running before the loop could tear down). Stopping only ever advances to
-	// Shutdown, which VMManager::Shutdown sets via a direct store, not SetState —
-	// so this guard never blocks the real teardown, and a brand-new VM (old_state
-	// == Shutdown) is unaffected.
-	if (old_state == VMState::Stopping)
+	// Stopping and Shutdown are terminal for SetState: once a stop has been
+	// signalled, ignore any reversion to a live state. On Android, pause/resume
+	// and the queued RequestVMShutdown are dispatched asynchronously to the CPU
+	// thread; on Exit they race the teardown:
+	//  - Stopping->Running: a racing resume flipped state back while the run loop
+	//    was tearing down, so the loop re-entered Execute() forever (the exit-game
+	//    hang — the EE *did* break out on Stopping, state just bounced back).
+	//  - Shutdown->Stopping: a leftover RequestVMShutdown task runs in the final
+	//    PumpMessages *after* VMManager::Shutdown already stored Shutdown, knocking
+	//    state off Shutdown. The next VMManager::Initialize then fails its
+	//    `state == Shutdown` check, so you can't boot another game (or Reset /
+	//    Apply&Restart, which "just exit").
+	// The real transitions never go through here: VMManager::Shutdown stores the
+	// terminal Shutdown via a direct s_state.store, and a new VM's Initialize
+	// stores Initializing via a direct store — both bypass SetState. So a clean
+	// launch (old_state == Shutdown -> Initializing) is unaffected.
+	if (old_state == VMState::Stopping || old_state == VMState::Shutdown)
 		return;
 
 	SetTimerResolutionIncreased(state == VMState::Running);
@@ -2033,6 +2039,18 @@ void VMManager::ZipSaveState(std::unique_ptr<ArchiveEntryList> elist,
 		Host::AddIconOSDMessage(fmt::format("SaveStateSlot{}", slot_for_message), ICON_FA_FLOPPY_DISK,
 			fmt::format(TRANSLATE_FS("VMManager", "Saved state to slot {}."), slot_for_message),
 			Host::OSD_QUICK_DURATION);
+	}
+	else if (slot_for_message < 0)
+	{
+		// Autosave / resume slots (negative, e.g. SAVESTATE_SLOT_AUTOSAVE = -2)
+		// get no "Saved to slot N" toast, but SaveStateToSlot posted a keyed
+		// "Saving state to slot N..." progress message under this same key. The
+		// completion callback only fires on error, so on success that keyed
+		// message is never cleared — it lingers for its full 60s duration AND
+		// survives VM shutdown, so it reappears stuck in the corner the next time
+		// you boot a game (the "Save State And Exit then it's stuck saving on the
+		// next boot" symptom). Clear it explicitly here.
+		Host::RemoveKeyedOSDMessage(fmt::format("SaveStateSlot{}", slot_for_message));
 	}
 
 	DevCon.WriteLn("Zipping save state to '%s' took %.2f ms", filename, timer.GetTimeMilliseconds());

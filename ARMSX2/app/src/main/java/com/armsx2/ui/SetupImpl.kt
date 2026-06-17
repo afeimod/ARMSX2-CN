@@ -198,7 +198,12 @@ object SetupImpl {
 
         val bios = scannedBioses.getOrNull(idx) ?: return null
 
-        val biosDir = File(context.getExternalFilesDir(null), "bios").apply { mkdirs() }
+        // Write under the active data root (custom system folder when chosen,
+        // else app-private) so the BIOS lives alongside memcards/saves/configs
+        // instead of being pinned to app-private. assetCopyRoot resolves to the
+        // user's systemDir post-pick, which the setup already validated as
+        // writable; falls back to externalFilesDir otherwise.
+        val biosDir = File(Main.assetCopyRoot(context), "bios").apply { mkdirs() }
         val outFile = File(biosDir, bios.displayName)
 
         // Same-content fast-path: when the user re-entered setup and the

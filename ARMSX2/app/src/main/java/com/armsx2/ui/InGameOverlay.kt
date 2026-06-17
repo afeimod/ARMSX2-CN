@@ -252,10 +252,40 @@ object InGameOverlay {
     }
 
     private fun applySafeLiveDelta(previous: Settings, updated: Settings) {
+        // Keep this path light. Full Settings.applyTo() calls native
+        // commitSettings(), which parks the VM and can rebuild GS state; doing
+        // that from every in-game tap caused ANRs/crashes when users scrubbed
+        // display/renderer options. Only apply tiny runtime-safe deltas here.
+        // Everything else is persisted by ConfigStore.save() above and takes
+        // effect on restart / next launch.
         if (previous.frameLimitEnable != updated.frameLimitEnable) {
             NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", updated.frameLimitEnable.toString())
             NativeApp.speedhackLimitermode(if (updated.frameLimitEnable) 0 else 3)
         }
+
+        if (previous.aspectRatio != updated.aspectRatio) {
+            val ratio = updated.aspectRatio.coerceIn(0, 4)
+            val name = when (ratio) {
+                0 -> "Stretch"
+                2 -> "4:3"
+                3 -> "16:9"
+                4 -> "10:7"
+                else -> "Auto 4:3/3:2"
+            }
+            NativeApp.setSetting("EmuCore/GS", "AspectRatio", "string", name)
+            NativeApp.setAspectRatio(ratio)
+        }
+
+        if (previous.loadTextureReplacements != updated.loadTextureReplacements)
+            NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacements", "bool", updated.loadTextureReplacements.toString())
+        if (previous.loadTextureReplacementsAsync != updated.loadTextureReplacementsAsync)
+            NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacementsAsync", "bool", updated.loadTextureReplacementsAsync.toString())
+        if (previous.precacheTextureReplacements != updated.precacheTextureReplacements)
+            NativeApp.setSetting("EmuCore/GS", "PrecacheTextureReplacements", "bool", updated.precacheTextureReplacements.toString())
+        if (previous.dumpReplaceableTextures != updated.dumpReplaceableTextures)
+            NativeApp.setSetting("EmuCore/GS", "DumpReplaceableTextures", "bool", updated.dumpReplaceableTextures.toString())
+        if (previous.osdShowTextureReplacements != updated.osdShowTextureReplacements)
+            NativeApp.setSetting("EmuCore/GS", "OsdShowTextureReplacements", "bool", updated.osdShowTextureReplacements.toString())
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
@@ -330,7 +360,7 @@ object InGameOverlay {
         // bounced through closeKeepingState (e.g. entered edit mode then
         // re-opened pause): pausedByOverlay was cleared, so the next
         // Resume tap did nothing.
-        if (Main.eState.value == EmuState.PAUSED) Main.resume()
+        if (pausedByOverlay || Main.eState.value == EmuState.PAUSED) Main.resume()
         pausedByOverlay = false
     }
 

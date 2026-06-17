@@ -46,13 +46,23 @@ public class NativeApp {
 		if (externalFilesDir == null) {
 			externalFilesDir = context.getDataDir();
 		}
-		String biosFolder = externalFilesDir.getAbsolutePath() + java.io.File.separator + "bios";
 
 		// DataRoot: prefer the user-chosen system folder (SAF tree URI in
 		// the `systemDir` pref, resolved to POSIX by Main.systemDirPosix).
 		// Falls back to externalFilesDir when unset / unresolvable.
 		String chosen = Main.Companion.systemDirPosix();
 		String dataPath = (chosen != null) ? chosen : externalFilesDir.getAbsolutePath();
+
+		// BIOS folder: the directory that actually holds the configured BIOS
+		// file. The setup wizard (and the data-root migration in
+		// Main.kickoffEmucoreInit) place the BIOS under <dataRoot>/bios, so
+		// pointing EmuFolders::Bios at the file's own parent makes BIOS loading
+		// follow a custom system folder instead of being pinned to app-private.
+		// Falls back to <dataPath>/bios, then the app-private bios dir.
+		String biosFolder = Main.Companion.biosFolderPosix();
+		if (biosFolder == null || biosFolder.isEmpty()) {
+			biosFolder = dataPath + java.io.File.separator + "bios";
+		}
 
 		initialize(dataPath, biosFolder, android.os.Build.VERSION.SDK_INT);
 	}
@@ -254,6 +264,13 @@ public class NativeApp {
 
 	public static void vmSetPaused(boolean paused) {
 		new Handler(Looper.getMainLooper()).post(() -> {
+			// Pause/resume callbacks can arrive after the user has already
+			// requested Close Game / Reset. Do not let a stale resume flip the
+			// Compose state back to RUNNING while the native VM is unwinding.
+			if (Main.isVmStopInProgress())
+				return;
+			if (!paused && Main.eState.getValue() == EmuState.STOPPED)
+				return;
 			if (paused)
 				Main.eState.setValue(EmuState.PAUSED);
 			else

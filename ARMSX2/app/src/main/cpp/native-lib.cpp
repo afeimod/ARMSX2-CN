@@ -563,6 +563,15 @@ extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_setAspectRatio(JNIEnv *env, jclass clazz,
                                                     jint p_type) {
+    const int ratio = std::clamp(static_cast<int>(p_type), 0,
+        static_cast<int>(AspectRatioType::MaxCount) - 1);
+    const char* name = Pcsx2Config::GSOptions::AspectRatioNames[ratio];
+    if (!name)
+        return;
+
+    Host::SetBaseStringSettingValue("EmuCore/GS", "AspectRatio", name);
+    EmuConfig.GS.AspectRatio = static_cast<AspectRatioType>(ratio);
+    EmuConfig.CurrentAspectRatio = static_cast<AspectRatioType>(ratio);
 }
 
 extern "C"
@@ -635,7 +644,7 @@ public:
         m_parked = s_execute_exit.load(std::memory_order_acquire) || m_was_paused;
     }
     ~ScopedVMPause() {
-        if (m_was_running)
+        if (m_was_running && !s_stop_requested.load(std::memory_order_acquire))
             VMManager::SetPaused(false);
     }
     ScopedVMPause(const ScopedVMPause&) = delete;
@@ -648,6 +657,40 @@ private:
     bool m_was_paused = false;
     bool m_parked = false;
 };
+
+static void LogAndroidGSSettings(const char* reason)
+{
+    Console.WriteLnFmt(
+        "@@ANDROID_GS_SETTINGS@@ reason={} renderer={} ir={:.2f} "
+        "mipmap={} blend={} filter={} preloading={} af={} tri={} hpo={} atfl={}",
+        reason,
+        static_cast<int>(EmuConfig.GS.Renderer),
+        EmuConfig.GS.UpscaleMultiplier,
+        +EmuConfig.GS.HWMipmap,
+        static_cast<int>(EmuConfig.GS.AccurateBlendingUnit),
+        static_cast<int>(EmuConfig.GS.TextureFiltering),
+        static_cast<int>(EmuConfig.GS.TexturePreloading),
+        static_cast<unsigned>(EmuConfig.GS.MaxAnisotropy),
+        static_cast<int>(EmuConfig.GS.TriFilter),
+        static_cast<int>(EmuConfig.GS.UserHacks_HalfPixelOffset),
+        static_cast<int>(EmuConfig.GS.UserHacks_AutoFlush));
+}
+
+static void ApplyLiveGSSettingsIfOpen(const char* reason)
+{
+    if (MTGS::IsOpen())
+    {
+        ScopedVMPause vm_pause;
+        if (!vm_pause.parked())
+        {
+            Console.WriteLnFmt("@@ANDROID_GS_SETTINGS@@ reason={} skipped=cpu_not_parked", reason);
+            return;
+        }
+        MTGS::ApplySettings();
+    }
+
+    LogAndroidGSSettings(reason);
+}
 
 // Generic setting writer — mirror of pcsx2-qt's settings save path.
 // Writes flow into s_settings_interface (the MemorySettingsInterface
@@ -719,6 +762,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
     } else if (MTGS::IsOpen()) {
         MTGS::ApplySettings();
     }
+    LogAndroidGSSettings("commit");
 
     // Plumbing roundtrip verifier — once the UI starts pushing real
     // settings, watch logcat for these to confirm the write landed.
@@ -746,32 +790,39 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderUpscalemultiplier(JNIEnv *env, jclass
     // VM picks up the change without a settings file save round-trip.
     Host::SetBaseFloatSettingValue("EmuCore/GS", "upscale_multiplier", p_value);
     EmuConfig.GS.UpscaleMultiplier = p_value;
-    if (MTGS::IsOpen()) {
-        // The overlay pauses the VM before this can fire, but don't trust
-        // every caller: reconfiguring GS mid-frame while the EE feeds MTVU
-        // corrupts the GIF path (see ScopedVMPause comment). No-ops when
-        // the VM is already paused; restores the run state otherwise.
-        ScopedVMPause vm_pause;
-        MTGS::ApplySettings();
-    }
+    ApplyLiveGSSettingsIfOpen("upscale");
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderMipmap(JNIEnv *env, jclass clazz,
                                                   jint p_value) {
+    const bool enabled = (p_value != 0);
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "hw_mipmap", enabled);
+    EmuConfig.GS.HWMipmap = enabled;
+    ApplyLiveGSSettingsIfOpen("hw_mipmap");
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderHalfpixeloffset(JNIEnv *env, jclass clazz,
                                                            jint p_value) {
+    const int value = std::clamp(static_cast<int>(p_value), 0,
+        static_cast<int>(GSHalfPixelOffset::MaxCount) - 1);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "UserHacks_HalfPixelOffset", value);
+    EmuConfig.GS.UserHacks_HalfPixelOffset = static_cast<GSHalfPixelOffset>(value);
+    ApplyLiveGSSettingsIfOpen("half_pixel_offset");
 }
 
 extern "C"
 JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderPreloading(JNIEnv *env, jclass clazz,
                                                       jint p_value) {
+    const int value = std::clamp(static_cast<int>(p_value), 0,
+        static_cast<int>(TexturePreloadingLevel::Full));
+    Host::SetBaseIntSettingValue("EmuCore/GS", "texture_preloading", value);
+    EmuConfig.GS.TexturePreloading = static_cast<TexturePreloadingLevel>(value);
+    ApplyLiveGSSettingsIfOpen("texture_preloading");
 }
 
 extern "C"
@@ -1126,6 +1177,9 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
                 s_execute_exit = false;
                 VMManager::Execute();
                 s_execute_exit = true;
+                Console.WriteLn("@@ANDROID_EXEC_RETURN@@ state=%d stop=%d",
+                    static_cast<int>(VMManager::GetState()),
+                    s_stop_requested.load(std::memory_order_acquire) ? 1 : 0);
                 Host::PumpMessagesOnCPUThread();
             } else if (_vmState == VMState::Paused) {
                 VMManager::IdlePollUpdate();
@@ -1236,17 +1290,29 @@ Java_kr_co_iefriends_pcsx2_NativeApp_shutdown(JNIEnv *env, jclass clazz) {
         static_cast<int>(VMManager::GetState()),
         s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
 
-    for (int i = 0; i < 250; ++i)
+    for (int i = 0; i < 5000; ++i)
     {
         if (VMManager::GetState() == VMState::Shutdown)
         {
             Console.WriteLn("@@ANDROID_STOP_DONE@@ waited_ms=%d", i);
             return;
         }
+
+        // If the EE is still executing, keep nudging it out of Execute() so
+        // the run loop can observe the stop latch. This is intentionally
+        // rate-limited; ExitExecution is cheap, but spamming it makes logs and
+        // debugging harder.
+        if ((i % 16) == 0 && !s_execute_exit.load(std::memory_order_acquire) && Cpu)
+            Cpu->ExitExecution();
+
+        if (i > 0 && (i % 1000) == 0)
+            Console.WriteLn("@@ANDROID_STOP_WAIT@@ waited_ms=%d state=%d execute_exit=%d",
+                i, static_cast<int>(VMManager::GetState()),
+                s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
         usleep(1000);
     }
 
-    Console.WriteLn("@@ANDROID_STOP_ASYNC@@ state=%d execute_exit=%d",
+    Console.WriteLn("@@ANDROID_STOP_TIMEOUT@@ state=%d execute_exit=%d",
         static_cast<int>(VMManager::GetState()),
         s_execute_exit.load(std::memory_order_acquire) ? 1 : 0);
 }

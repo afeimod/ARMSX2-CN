@@ -60,6 +60,9 @@ data class Settings(
     // ---- EmuCore/GS — frame limiter ----
     /** EmuCore/GS/FrameLimitEnable. */
     val frameLimitEnable: Boolean = true,
+    /** EmuCore/GS/AspectRatio:
+     *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
+    val aspectRatio: Int = 1,
 
     // ---- DEV9 — PS2 HDD / Ethernet ----
     /** DEV9/Eth/EthEnable — PS2 network adapter. */
@@ -138,7 +141,17 @@ data class Settings(
     /** EmuCore/GS/texture_preloading — TexturePreloadingLevel:
      *  0 Off · 1 Partial · 2 Full. */
     val texturePreloading: Int = 2,
-    /** EmuCore/GS/UserHacks_AutoFlush — GSHWAutoFlushLevel:
+    /** EmuCore/GS/LoadTextureReplacements. */
+    val loadTextureReplacements: Boolean = false,
+    /** EmuCore/GS/LoadTextureReplacementsAsync. */
+    val loadTextureReplacementsAsync: Boolean = true,
+    /** EmuCore/GS/PrecacheTextureReplacements. */
+    val precacheTextureReplacements: Boolean = false,
+    /** EmuCore/GS/DumpReplaceableTextures. */
+    val dumpReplaceableTextures: Boolean = false,
+    /** EmuCore/GS/OsdShowTextureReplacements. */
+    val osdShowTextureReplacements: Boolean = false,
+    /** EmuCore/GS/UserHacks_AutoFlushLevel — GSHWAutoFlushLevel:
      *  0 Disabled · 1 SpritesOnly · 2 Enabled. */
     val autoFlush: Int = 0,
     /** EmuCore/GS/UserHacks_HalfPixelOffset — GSHalfPixelOffset:
@@ -175,6 +188,15 @@ data class Settings(
         // 3 = Unlimited.
         NativeApp.setSetting("EmuCore/GS", "FrameLimitEnable", "bool", frameLimitEnable.toString())
         NativeApp.speedhackLimitermode(if (frameLimitEnable) 0 else 3)
+        val aspectRatioName = when (aspectRatio.coerceIn(0, 4)) {
+            0 -> "Stretch"
+            2 -> "4:3"
+            3 -> "16:9"
+            4 -> "10:7"
+            else -> "Auto 4:3/3:2"
+        }
+        NativeApp.setSetting("EmuCore/GS", "AspectRatio", "string", aspectRatioName)
+        NativeApp.setAspectRatio(aspectRatio.coerceIn(0, 4))
         // DEV9. Networking/HDD are initialized with the VM, so changes
         // made from the in-game overlay are persisted for the next boot.
         NativeApp.setSetting("DEV9/Eth", "EthEnable", "bool", dev9EthEnable.toString())
@@ -206,7 +228,12 @@ data class Settings(
         NativeApp.setSetting("EmuCore/GS", "accurate_blending_unit", "int", accurateBlendingUnit.toString())
         NativeApp.setSetting("EmuCore/GS", "filter", "int", textureFiltering.toString())
         NativeApp.setSetting("EmuCore/GS", "texture_preloading", "int", texturePreloading.toString())
-        NativeApp.setSetting("EmuCore/GS", "UserHacks_AutoFlush", "int", autoFlush.toString())
+        NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacements", "bool", loadTextureReplacements.toString())
+        NativeApp.setSetting("EmuCore/GS", "LoadTextureReplacementsAsync", "bool", loadTextureReplacementsAsync.toString())
+        NativeApp.setSetting("EmuCore/GS", "PrecacheTextureReplacements", "bool", precacheTextureReplacements.toString())
+        NativeApp.setSetting("EmuCore/GS", "DumpReplaceableTextures", "bool", dumpReplaceableTextures.toString())
+        NativeApp.setSetting("EmuCore/GS", "OsdShowTextureReplacements", "bool", osdShowTextureReplacements.toString())
+        NativeApp.setSetting("EmuCore/GS", "UserHacks_AutoFlushLevel", "int", autoFlush.toString())
         NativeApp.setSetting("EmuCore/GS", "UserHacks_HalfPixelOffset", "int", halfPixelOffset.toString())
         NativeApp.setSetting("EmuCore/GS", "TriFilter", "int", triFilter.toString())
         NativeApp.setSetting("EmuCore/GS", "MaxAnisotropy", "int", maxAnisotropy.toString())
@@ -233,6 +260,7 @@ data class Settings(
         put("vuDeferredWrites", vuDeferredWrites)
         put("vuSkipStallSim", vuSkipStallSim)
         put("frameLimitEnable", frameLimitEnable)
+        put("aspectRatio", aspectRatio)
         put("dev9EthEnable", dev9EthEnable)
         put("dev9EthApi", dev9EthApi)
         put("dev9EthDevice", dev9EthDevice)
@@ -251,6 +279,11 @@ data class Settings(
         put("accurateBlendingUnit", accurateBlendingUnit)
         put("textureFiltering", textureFiltering)
         put("texturePreloading", texturePreloading)
+        put("loadTextureReplacements", loadTextureReplacements)
+        put("loadTextureReplacementsAsync", loadTextureReplacementsAsync)
+        put("precacheTextureReplacements", precacheTextureReplacements)
+        put("dumpReplaceableTextures", dumpReplaceableTextures)
+        put("osdShowTextureReplacements", osdShowTextureReplacements)
         put("autoFlush", autoFlush)
         put("halfPixelOffset", halfPixelOffset)
         put("triFilter", triFilter)
@@ -276,6 +309,7 @@ data class Settings(
                 vuDeferredWrites = json.optBoolean("vuDeferredWrites", def.vuDeferredWrites),
                 vuSkipStallSim = json.optBoolean("vuSkipStallSim", def.vuSkipStallSim),
                 frameLimitEnable = json.optBoolean("frameLimitEnable", def.frameLimitEnable),
+                aspectRatio = json.optInt("aspectRatio", def.aspectRatio),
                 dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
                 dev9EthApi = json.optString("dev9EthApi", def.dev9EthApi).ifEmpty { def.dev9EthApi },
                 dev9EthDevice = json.optString("dev9EthDevice", def.dev9EthDevice).ifEmpty { def.dev9EthDevice },
@@ -298,6 +332,11 @@ data class Settings(
                 accurateBlendingUnit = json.optInt("accurateBlendingUnit", def.accurateBlendingUnit),
                 textureFiltering = json.optInt("textureFiltering", def.textureFiltering),
                 texturePreloading = json.optInt("texturePreloading", def.texturePreloading),
+                loadTextureReplacements = json.optBoolean("loadTextureReplacements", def.loadTextureReplacements),
+                loadTextureReplacementsAsync = json.optBoolean("loadTextureReplacementsAsync", def.loadTextureReplacementsAsync),
+                precacheTextureReplacements = json.optBoolean("precacheTextureReplacements", def.precacheTextureReplacements),
+                dumpReplaceableTextures = json.optBoolean("dumpReplaceableTextures", def.dumpReplaceableTextures),
+                osdShowTextureReplacements = json.optBoolean("osdShowTextureReplacements", def.osdShowTextureReplacements),
                 autoFlush = json.optInt("autoFlush", def.autoFlush),
                 halfPixelOffset = json.optInt("halfPixelOffset", def.halfPixelOffset),
                 triFilter = json.optInt("triFilter", def.triFilter),
@@ -328,6 +367,7 @@ data class Settings(
             if (current.vuDeferredWrites    != base.vuDeferredWrites)    j.put("vuDeferredWrites", current.vuDeferredWrites)
             if (current.vuSkipStallSim      != base.vuSkipStallSim)      j.put("vuSkipStallSim", current.vuSkipStallSim)
             if (current.frameLimitEnable    != base.frameLimitEnable)    j.put("frameLimitEnable", current.frameLimitEnable)
+            if (current.aspectRatio         != base.aspectRatio)         j.put("aspectRatio", current.aspectRatio)
             if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
             if (current.dev9EthApi          != base.dev9EthApi)          j.put("dev9EthApi", current.dev9EthApi)
             if (current.dev9EthDevice       != base.dev9EthDevice)       j.put("dev9EthDevice", current.dev9EthDevice)
@@ -346,6 +386,11 @@ data class Settings(
             if (current.accurateBlendingUnit!= base.accurateBlendingUnit)j.put("accurateBlendingUnit", current.accurateBlendingUnit)
             if (current.textureFiltering    != base.textureFiltering)    j.put("textureFiltering", current.textureFiltering)
             if (current.texturePreloading   != base.texturePreloading)   j.put("texturePreloading", current.texturePreloading)
+            if (current.loadTextureReplacements != base.loadTextureReplacements) j.put("loadTextureReplacements", current.loadTextureReplacements)
+            if (current.loadTextureReplacementsAsync != base.loadTextureReplacementsAsync) j.put("loadTextureReplacementsAsync", current.loadTextureReplacementsAsync)
+            if (current.precacheTextureReplacements != base.precacheTextureReplacements) j.put("precacheTextureReplacements", current.precacheTextureReplacements)
+            if (current.dumpReplaceableTextures != base.dumpReplaceableTextures) j.put("dumpReplaceableTextures", current.dumpReplaceableTextures)
+            if (current.osdShowTextureReplacements != base.osdShowTextureReplacements) j.put("osdShowTextureReplacements", current.osdShowTextureReplacements)
             if (current.autoFlush           != base.autoFlush)           j.put("autoFlush", current.autoFlush)
             if (current.halfPixelOffset     != base.halfPixelOffset)     j.put("halfPixelOffset", current.halfPixelOffset)
             if (current.triFilter           != base.triFilter)           j.put("triFilter", current.triFilter)
@@ -367,6 +412,7 @@ data class Settings(
             vuDeferredWrites = if (overrides.has("vuDeferredWrites")) overrides.getBoolean("vuDeferredWrites") else base.vuDeferredWrites,
             vuSkipStallSim = if (overrides.has("vuSkipStallSim")) overrides.getBoolean("vuSkipStallSim") else base.vuSkipStallSim,
             frameLimitEnable = if (overrides.has("frameLimitEnable")) overrides.getBoolean("frameLimitEnable") else base.frameLimitEnable,
+            aspectRatio = if (overrides.has("aspectRatio")) overrides.getInt("aspectRatio") else base.aspectRatio,
             dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,
             dev9EthApi = if (overrides.has("dev9EthApi")) overrides.getString("dev9EthApi").ifEmpty { base.dev9EthApi } else base.dev9EthApi,
             dev9EthDevice = if (overrides.has("dev9EthDevice")) overrides.getString("dev9EthDevice").ifEmpty { base.dev9EthDevice } else base.dev9EthDevice,
@@ -389,6 +435,11 @@ data class Settings(
             accurateBlendingUnit = if (overrides.has("accurateBlendingUnit")) overrides.getInt("accurateBlendingUnit") else base.accurateBlendingUnit,
             textureFiltering = if (overrides.has("textureFiltering")) overrides.getInt("textureFiltering") else base.textureFiltering,
             texturePreloading = if (overrides.has("texturePreloading")) overrides.getInt("texturePreloading") else base.texturePreloading,
+            loadTextureReplacements = if (overrides.has("loadTextureReplacements")) overrides.getBoolean("loadTextureReplacements") else base.loadTextureReplacements,
+            loadTextureReplacementsAsync = if (overrides.has("loadTextureReplacementsAsync")) overrides.getBoolean("loadTextureReplacementsAsync") else base.loadTextureReplacementsAsync,
+            precacheTextureReplacements = if (overrides.has("precacheTextureReplacements")) overrides.getBoolean("precacheTextureReplacements") else base.precacheTextureReplacements,
+            dumpReplaceableTextures = if (overrides.has("dumpReplaceableTextures")) overrides.getBoolean("dumpReplaceableTextures") else base.dumpReplaceableTextures,
+            osdShowTextureReplacements = if (overrides.has("osdShowTextureReplacements")) overrides.getBoolean("osdShowTextureReplacements") else base.osdShowTextureReplacements,
             autoFlush = if (overrides.has("autoFlush")) overrides.getInt("autoFlush") else base.autoFlush,
             halfPixelOffset = if (overrides.has("halfPixelOffset")) overrides.getInt("halfPixelOffset") else base.halfPixelOffset,
             triFilter = if (overrides.has("triFilter")) overrides.getInt("triFilter") else base.triFilter,

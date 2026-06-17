@@ -313,6 +313,14 @@ class Main: ComponentActivity() {
          */
         fun systemDirPosix(): String? = resolveTreeUriToPosix(systemDir.value)
 
+        /** Directory holding the configured BIOS file, used by
+         *  NativeApp.initializeOnce to point EmuFolders::Bios at the real
+         *  BIOS location (which tracks the chosen data root). Null when no
+         *  BIOS is configured yet — initializeOnce then falls back to
+         *  <dataRoot>/bios. */
+        fun biosFolderPosix(): String? =
+            bios.value?.takeIf { it.isNotEmpty() }?.let { File(it).parent }
+
         /** URI-string-independent POSIX resolver. Pulled out of
          *  systemDirPosix so the setup wizard can probe a freshly-picked
          *  URI for writability before persisting it. Returns null if the
@@ -377,6 +385,7 @@ class Main: ComponentActivity() {
         val focusRequester = FocusRequester()
 
         private var m_szGamefile = ""
+        private val pendingExternalLaunch = mutableStateOf<String?>(null)
 
         fun onTestResults(result: TestResult) {
             when (result.name) {
@@ -400,6 +409,9 @@ class Main: ComponentActivity() {
         @Volatile private var vmStopInProgress = false
         @Volatile private var vmRestartAfterStop = false
         @Volatile private var vmRunLoopActive = false
+
+        @JvmStatic
+        fun isVmStopInProgress(): Boolean = vmStopInProgress
 
         fun start() {
             synchronized(vmLifecycleLock) {
@@ -515,6 +527,15 @@ class Main: ComponentActivity() {
                 stop(restartAfterStop = true)
         }
 
+        private fun launchPendingExternalGameIfReady() {
+            val queued = pendingExternalLaunch.value
+            if (queued.isNullOrEmpty() || !setupComplete.value || !nativeReady.value)
+                return
+
+            pendingExternalLaunch.value = null
+            launchGame(queued, null)
+        }
+
         /**
          * Boot to BIOS (no game disc). Unlike `start()` this does NOT
          * hide the toolbar — the BIOS card in GamesList wants the
@@ -557,8 +578,8 @@ class Main: ComponentActivity() {
         // thread. The native side queues the real pause/resume onto the CPU
         // thread, so a fast open→close still lands in the right order without
         // making the Android UI wait for MTVU/MTGS to park.
-        // eState is set eagerly for instant UI feedback — the authoritative
-        // value is re-asserted by Host::OnVMPaused/Resumed → vmSetPaused.
+        // eState is updated by Host::OnVMPaused/Resumed → vmSetPaused, so the
+        // UI never claims PAUSED before the VM actually parked.
         private val vmControl = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "VMControl")
         }
@@ -566,7 +587,6 @@ class Main: ComponentActivity() {
         fun pause() {
             if (vmStopInProgress)
                 return
-            eState.value = EmuState.PAUSED
             vmControl.execute {
                 if (!vmStopInProgress)
                     NativeApp.pause()
@@ -576,7 +596,6 @@ class Main: ComponentActivity() {
         fun resume() {
             if (vmStopInProgress)
                 return
-            eState.value = EmuState.RUNNING
             vmControl.execute {
                 if (!vmStopInProgress)
                     NativeApp.resume()
@@ -605,9 +624,11 @@ class Main: ComponentActivity() {
             WindowImpl.overlayVisible.value = false
             WindowImpl.showLibrary.value = false
             vmControl.execute {
+                println("@@ANDROID_STOP_JAVA@@ begin saveAutosave=$saveAutosave restart=$restartAfterStop")
                 if (saveAutosave)
                     NativeApp.saveAutosaveState()
                 NativeApp.shutdown()
+                println("@@ANDROID_STOP_JAVA@@ shutdown_return active=${NativeApp.hasActiveVM()} runLoop=$vmRunLoopActive state=${eState.value}")
                 if (!vmRunLoopActive && (eState.value == EmuState.STOPPED || !NativeApp.hasActiveVM())) {
                     eState.value = EmuState.STOPPED
                     val restartNow = synchronized(vmLifecycleLock) {
@@ -782,6 +803,24 @@ class Main: ComponentActivity() {
         copyAssetAll(applicationContext, "bios")
         copyAssetAll(applicationContext, "resources")
 
+        // Move the configured BIOS under the active data root so it tracks a
+        // custom system folder instead of staying app-private (older builds
+        // pinned BIOS to externalFilesDir/bios). No-op when no BIOS is set or
+        // it's already there; on copy failure we leave the pref untouched, and
+        // biosFolderPosix still points emucore at the old (working) location.
+        bios.value?.takeIf { it.isNotEmpty() }?.let { current ->
+            val src = File(current)
+            val target = File(File(assetCopyRoot(applicationContext), "bios").apply { mkdirs() }, src.name)
+            if (target.absolutePath != src.absolutePath) {
+                val present = target.exists() ||
+                    (src.exists() && runCatching { src.copyTo(target, overwrite = true) }.isSuccess)
+                if (present) {
+                    bios.value = target.absolutePath
+                    prefs.edit().putString("bios", target.absolutePath).apply()
+                }
+            }
+        }
+
         invoke {
             NativeApp.initializeOnce(applicationContext)
             nativeReady.value = true
@@ -927,6 +966,7 @@ class Main: ComponentActivity() {
             eState.value = EmuState.EMULATOR_UNSUPPORTED
             println("DEVICE_UNSUPPORTED")
         }
+        handleExternalLaunchIntent(intent)
         setContent {
             val ctx = androidx.compose.ui.platform.LocalContext.current
 
@@ -940,6 +980,14 @@ class Main: ComponentActivity() {
                 if (setupComplete.value) {
                     kickoffEmucoreInit()
                 }
+            }
+
+            androidx.compose.runtime.LaunchedEffect(
+                setupComplete.value,
+                nativeReady.value,
+                pendingExternalLaunch.value,
+            ) {
+                launchPendingExternalGameIfReady()
             }
 
             // Setup wizard runs once. After it persists prefs and flips
@@ -1126,7 +1174,7 @@ class Main: ComponentActivity() {
 
     override fun onPause() {
         if (eState.value == EmuState.RUNNING)
-            NativeApp.pause()
+            pause()
         // Persist Vulkan pipeline cache before Android can reap the process.
         // ~VKShaderCache only fires on a clean device teardown, but swipe-kill
         // / OOM-kill skip that path — every cold launch would otherwise
@@ -1135,9 +1183,13 @@ class Main: ComponentActivity() {
         super.onPause()
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleExternalLaunchIntent(intent)
+    }
+
     override fun onResume() {
-        if (eState.value == EmuState.PAUSED)
-            NativeApp.resume()
         // Refresh the All-Files-Access state — the user may have just
         // returned from Settings after granting (or revoking) the
         // MANAGE_EXTERNAL_STORAGE toggle. The setContent block reads
@@ -1152,5 +1204,54 @@ class Main: ComponentActivity() {
 
         val appPid = Process.myPid()
         Process.killProcess(appPid)
+    }
+
+    private fun handleExternalLaunchIntent(intent: Intent?) {
+        val uri = extractLaunchUri(intent) ?: return
+        persistReadGrant(intent, uri)
+        currentGame.value = null
+        pendingExternalLaunch.value = uri.toString()
+        launchPendingExternalGameIfReady()
+    }
+
+    private fun extractLaunchUri(intent: Intent?): Uri? {
+        if (intent == null)
+            return null
+
+        intent.data?.let { return it }
+
+        val stream: Uri? = if (Build.VERSION.SDK_INT >= 33) {
+            intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
+        }
+        stream?.let { return it }
+
+        intent.clipData?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.uri?.let { return it }
+
+        for (key in listOf("path", "game", "rom", "uri", "android.intent.extra.STREAM")) {
+            val value = intent.getStringExtra(key)?.takeIf { it.isNotBlank() } ?: continue
+            return Uri.parse(value)
+        }
+
+        return null
+    }
+
+    private fun persistReadGrant(intent: Intent?, uri: Uri) {
+        if (uri.scheme != "content" || intent == null)
+            return
+
+        val flags = intent.flags
+        if ((flags and Intent.FLAG_GRANT_READ_URI_PERMISSION) == 0 ||
+            (flags and Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) == 0)
+            return
+
+        runCatching {
+            contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+            )
+        }
     }
 }
