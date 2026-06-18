@@ -28,9 +28,9 @@
 // When on, scalar loads decode the vmap entry inline and do a direct host access for
 // RAM pages, falling back to the existing vtlb_memRead C call only for handler/MMIO
 // pages — no signal handler, no backpatch (unlike the SIGSEGV-fastmem in arm64/).
-// Default OFF until validated on-device. Marker: @@MAC_FASTMEM@@.
+// Enabled after initial on-device validation. Marker: @@MAC_FASTMEM@@.
 #ifndef ARMSX2_MAC_FASTMEM
-#define ARMSX2_MAC_FASTMEM 0
+#define ARMSX2_MAC_FASTMEM 1
 #endif
 
 namespace pcsx2_macrec {
