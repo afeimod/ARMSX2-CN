@@ -12,6 +12,10 @@ private struct PadSkinKey: EnvironmentKey {
     static let defaultValue: VirtualPadSkin = .armsx2Refresh
 }
 
+private struct PadSkinDescriptorKey: EnvironmentKey {
+    static let defaultValue: VPadSkinDescriptor = VPadSkinLibraryStore.defaultDescriptor
+}
+
 private struct PadUsesFullSkinKey: EnvironmentKey {
     static let defaultValue = false
 }
@@ -25,6 +29,11 @@ extension EnvironmentValues {
     var padSkin: VirtualPadSkin {
         get { self[PadSkinKey.self] }
         set { self[PadSkinKey.self] = newValue }
+    }
+
+    var padSkinDescriptor: VPadSkinDescriptor {
+        get { self[PadSkinDescriptorKey.self] }
+        set { self[PadSkinDescriptorKey.self] = newValue }
     }
 
     var padUsesFullSkin: Bool {
@@ -50,6 +59,15 @@ enum HapticManager {
 
 enum ControllerAsset {
     private static let edgeToEdgePortraitAspectRatio: CGFloat = 1.55
+    private static let analogBaseCommonFileName = "ic_controller_analog_base.png"
+    private static let analogBaseLeftFileName = "ic_controller_analog_base_left.png"
+    private static let analogBaseRightFileName = "ic_controller_analog_base_right.png"
+    private static let analogStickCurrentFileName = "ic_controller_analog_stick.png"
+    private static let legacyAnalogStickFileName = "ic_controller_analog_button.png"
+    private static let analogStickLeftFileName = "ic_controller_analog_stick_left.png"
+    private static let analogStickRightFileName = "ic_controller_analog_stick_right.png"
+    private static let legacyAnalogStickLeftFileName = "ic_controller_analog_button_left.png"
+    private static let legacyAnalogStickRightFileName = "ic_controller_analog_button_right.png"
 
     static func fileName(for button: ARMSX2PadButton) -> String {
         switch button {
@@ -72,6 +90,53 @@ enum ControllerAsset {
         @unknown default:
             return ""
         }
+    }
+
+    static func analogBaseFileName(isLeft: Bool, exists: (String) -> Bool) -> String {
+        let sideFileName = isLeft ? analogBaseLeftFileName : analogBaseRightFileName
+        return exists(sideFileName) ? sideFileName : analogBaseCommonFileName
+    }
+
+    static func analogBaseFileName(isLeft: Bool, skin: VirtualPadSkin) -> String {
+        analogBaseFileName(isLeft: isLeft) { image(named: $0, skin: skin) != nil }
+    }
+
+    static func analogBaseFileName(
+        isLeft: Bool,
+        descriptor: VPadSkinDescriptor,
+        skinLibrary: VPadSkinLibraryStore = .shared
+    ) -> String {
+        analogBaseFileName(isLeft: isLeft) { image(named: $0, descriptor: descriptor, skinLibrary: skinLibrary) != nil }
+    }
+
+    static func analogStickFileName(isLeft: Bool, exists: (String) -> Bool) -> String {
+        let sideFileName = isLeft ? analogStickLeftFileName : analogStickRightFileName
+        let legacySideFileName = isLeft ? legacyAnalogStickLeftFileName : legacyAnalogStickRightFileName
+        if exists(sideFileName) {
+            return sideFileName
+        }
+        if exists(legacySideFileName) {
+            return legacySideFileName
+        }
+        if exists(analogStickCurrentFileName) {
+            return analogStickCurrentFileName
+        }
+        if exists(legacyAnalogStickFileName) {
+            return legacyAnalogStickFileName
+        }
+        return analogStickCurrentFileName
+    }
+
+    static func analogStickFileName(isLeft: Bool, skin: VirtualPadSkin) -> String {
+        analogStickFileName(isLeft: isLeft) { skinContainsExactAsset(named: $0, skin: skin) }
+    }
+
+    static func analogStickFileName(
+        isLeft: Bool,
+        descriptor: VPadSkinDescriptor,
+        skinLibrary: VPadSkinLibraryStore = .shared
+    ) -> String {
+        analogStickFileName(isLeft: isLeft) { skinContainsExactAsset(named: $0, descriptor: descriptor, skinLibrary: skinLibrary) }
     }
 
     static func image(named fileName: String, skin: VirtualPadSkin) -> UIImage? {
@@ -100,6 +165,81 @@ enum ControllerAsset {
         return UIImage(contentsOfFile: path)
     }
 
+    static func image(
+        named fileName: String,
+        descriptor: VPadSkinDescriptor,
+        skinLibrary: VPadSkinLibraryStore = .shared
+    ) -> UIImage? {
+        guard !fileName.isEmpty else { return nil }
+
+        let skin = descriptor.virtualPadSkin
+        let baseName = (fileName as NSString).deletingPathExtension
+        if descriptor.source == .imported,
+           let directory = skinLibrary.importedAssetsDirectory(for: descriptor),
+           let customImage = customImage(named: fileName, baseName: baseName, directory: directory) {
+            return customImage
+        }
+
+        if isLegacyCustomDescriptor(descriptor),
+           let directory = VirtualPadSkin.legacyCustomSkinDirectory(),
+           let customImage = customImage(named: fileName, baseName: baseName, directory: directory) {
+            return customImage
+        }
+
+        if let directoryName = skin.bundledDirectoryName,
+           let bundledImage = bundledSkinImage(named: baseName, directoryName: directoryName) {
+            return bundledImage
+        }
+
+        if let image = UIImage(named: baseName) ?? UIImage(named: fileName) {
+            return image
+        }
+
+        guard let path = Bundle.main.path(forResource: baseName, ofType: "png") else {
+            return nil
+        }
+
+        return UIImage(contentsOfFile: path)
+    }
+
+    private static func skinContainsExactAsset(named fileName: String, skin: VirtualPadSkin) -> Bool {
+        let baseName = (fileName as NSString).deletingPathExtension
+        if skin == .custom,
+           let directory = VirtualPadSkin.customSkinDirectory() {
+            return FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+        }
+
+        if let directoryName = skin.bundledDirectoryName {
+            return Bundle.main.url(forResource: baseName, withExtension: "png", subdirectory: "controller_skins/\(directoryName)") != nil
+        }
+
+        return UIImage(named: baseName) != nil || UIImage(named: fileName) != nil || Bundle.main.path(forResource: baseName, ofType: "png") != nil
+    }
+
+    private static func skinContainsExactAsset(
+        named fileName: String,
+        descriptor: VPadSkinDescriptor,
+        skinLibrary: VPadSkinLibraryStore
+    ) -> Bool {
+        let baseName = (fileName as NSString).deletingPathExtension
+        let skin = descriptor.virtualPadSkin
+        if descriptor.source == .imported,
+           let directory = skinLibrary.importedAssetsDirectory(for: descriptor) {
+            return FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+        }
+
+        if isLegacyCustomDescriptor(descriptor),
+           let directory = VirtualPadSkin.legacyCustomSkinDirectory() {
+            return FileManager.default.fileExists(atPath: directory.appendingPathComponent(fileName).path)
+        }
+
+        if let directoryName = skin.bundledDirectoryName {
+            return Bundle.main.url(forResource: baseName, withExtension: "png", subdirectory: "controller_skins/\(directoryName)") != nil
+        }
+
+        return UIImage(named: baseName) != nil || UIImage(named: fileName) != nil || Bundle.main.path(forResource: baseName, ofType: "png") != nil
+    }
+
     private static func bundledSkinImage(named baseName: String, directoryName: String) -> UIImage? {
         let subdirectory = "controller_skins/\(directoryName)"
         guard let url = Bundle.main.url(forResource: baseName, withExtension: "png", subdirectory: subdirectory) else {
@@ -111,6 +251,38 @@ enum ControllerAsset {
 
     static func fullSkinImage(skin: VirtualPadSkin, isLandscape: Bool) -> UIImage? {
         guard skin == .custom, let directory = VirtualPadSkin.customSkinDirectory() else {
+            return nil
+        }
+
+        let orientationCandidates = isLandscape
+            ? ["controller_edgetoedge_landscape", "iphone_edgetoedge_landscape", "controller_landscape", "iphone_landscape", "skin_landscape", "background_landscape", "gamepad_landscape", "landscape"]
+            : ["controller_edgetoedge_portrait", "iphone_edgetoedge_portrait", "controller_portrait", "iphone_portrait", "skin_portrait", "background_portrait", "gamepad_portrait", "portrait"]
+        let sharedCandidates = ["controller", "skin", "background", "gamepad", "full", "layout"]
+
+        for baseName in orientationCandidates + sharedCandidates {
+            if let image = customImage(named: "\(baseName).png", baseName: baseName, directory: directory) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    static func fullSkinImage(
+        descriptor: VPadSkinDescriptor,
+        isLandscape: Bool,
+        skinLibrary: VPadSkinLibraryStore = .shared
+    ) -> UIImage? {
+        let skin = descriptor.virtualPadSkin
+        let directory: URL?
+        if descriptor.source == .imported {
+            directory = skinLibrary.importedAssetsDirectory(for: descriptor)
+        } else if isLegacyCustomDescriptor(descriptor) {
+            directory = VirtualPadSkin.legacyCustomSkinDirectory()
+        } else {
+            directory = nil
+        }
+        guard let directory else {
             return nil
         }
 
@@ -165,6 +337,56 @@ enum ControllerAsset {
         return nil
     }
 
+    static func gameplayFullSkinImage(
+        descriptor: VPadSkinDescriptor,
+        isLandscape: Bool,
+        skinLibrary: VPadSkinLibraryStore = .shared
+    ) -> UIImage? {
+        let skin = descriptor.virtualPadSkin
+        let directory: URL?
+        if descriptor.source == .imported {
+            directory = skinLibrary.importedAssetsDirectory(for: descriptor)
+        } else if isLegacyCustomDescriptor(descriptor) {
+            directory = VirtualPadSkin.legacyCustomSkinDirectory()
+        } else {
+            directory = nil
+        }
+        guard let directory else {
+            return nil
+        }
+
+        guard !isLandscape else {
+            return nil
+        }
+
+        let portraitCandidates = [
+            "controller_portrait",
+            "skin_portrait",
+            "background_portrait",
+            "gamepad_portrait",
+            "portrait",
+            "controller",
+            "skin",
+            "background",
+            "gamepad",
+            "full",
+            "layout"
+        ]
+
+        for baseName in portraitCandidates {
+            if let image = customImage(named: "\(baseName).png", baseName: baseName, directory: directory),
+               !looksLikeEdgeToEdgePortrait(image) {
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    private static func isLegacyCustomDescriptor(_ descriptor: VPadSkinDescriptor) -> Bool {
+        descriptor.source != .imported && descriptor.id == VirtualPadSkin.custom.descriptorID
+    }
+
     static func edgeToEdgePortraitSkinImage(skin: VirtualPadSkin) -> UIImage? {
         guard let image = fullSkinImage(skin: skin, isLandscape: false) else {
             return nil
@@ -205,6 +427,7 @@ private struct ControllerAssetImage: View {
     let fallbackColor: Color
     let fallbackFontSize: CGFloat
     let skin: VirtualPadSkin
+    var descriptor: VPadSkinDescriptor? = nil
 
     var body: some View {
         if skin == .crispVector {
@@ -214,7 +437,15 @@ private struct ControllerAssetImage: View {
                 fallbackColor: fallbackColor,
                 fallbackFontSize: fallbackFontSize
             )
-        } else if let image = ControllerAsset.image(named: fileName, skin: skin) {
+        } else if let descriptor,
+                  let image = ControllerAsset.image(named: fileName, descriptor: descriptor) {
+            Image(uiImage: image)
+                .resizable()
+                .interpolation(.high)
+                .antialiased(true)
+                .scaledToFit()
+        } else if descriptor == nil,
+                  let image = ControllerAsset.image(named: fileName, skin: skin) {
             Image(uiImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -540,12 +771,19 @@ private struct TriangleShape: Shape {
 
 struct VirtualControllerView: View {
     @State private var settings = SettingsStore.shared
+    @State private var skinLibrary = VPadSkinLibraryStore.shared
     @State private var layout = PadLayoutStore.shared
     var isLandscape: Bool = false
     var drawFullSkinBackground: Bool = true
+    var layoutSnapshot: PadLayoutSnapshot? = nil
+    var skinDescriptor: VPadSkinDescriptor? = nil
 
     private var analogStickScale: CGFloat {
         min(max(CGFloat(settings.analogStickScale), 0.8), 1.6)
+    }
+
+    private var effectiveSkinDescriptor: VPadSkinDescriptor {
+        skinDescriptor ?? skinLibrary.selectedDescriptor
     }
 
     // A004: Scale buttons based on screen width (baseline: iPhone 15 = 393pt width)
@@ -557,38 +795,95 @@ struct VirtualControllerView: View {
 
     var body: some View {
         GeometryReader { geo in
-            let skin = settings.virtualPadSkin
-            let usesFullSkin = ControllerAsset.gameplayFullSkinImage(skin: skin, isLandscape: isLandscape) != nil
+            let descriptor = effectiveSkinDescriptor
+            let skin = descriptor.virtualPadSkin
+            let usesFullSkin = ControllerAsset.gameplayFullSkinImage(descriptor: descriptor, isLandscape: isLandscape) != nil
 
             if isLandscape {
                 landscapeLayout(w: geo.size.width, h: geo.size.height)
                     .environment(\.padOpacity, Double(settings.padOpacity))
                     .environment(\.padSkin, skin)
+                    .environment(\.padSkinDescriptor, descriptor)
                     .environment(\.padUsesFullSkin, usesFullSkin)
             } else {
                 portraitLayout(w: geo.size.width, h: geo.size.height)
                     .environment(\.padOpacity, Double(settings.padOpacity))
                     .environment(\.padSkin, skin)
+                    .environment(\.padSkinDescriptor, descriptor)
                     .environment(\.padUsesFullSkin, usesFullSkin)
             }
         }
         // ARMSX2_MASK_PREWARM_V4
         // Prepare mask images before gameplay input so the first press cannot decode/scan on the hot path.
         .onAppear {
-            ARMSX2VirtualPadMaskImageCache.prewarm(skin: settings.virtualPadSkin)
+            ARMSX2VirtualPadMaskImageCache.prewarm(descriptor: effectiveSkinDescriptor)
         }
-        .onChange(of: settings.virtualPadSkin) { _, newSkin in
-            ARMSX2VirtualPadMaskImageCache.prewarm(skin: newSkin)
+        .onChange(of: skinLibrary.selectedSkinID) { _, _ in
+            ARMSX2VirtualPadMaskImageCache.prewarm(descriptor: effectiveSkinDescriptor)
+        }
+        .onChange(of: skinDescriptor) { _, _ in
+            ARMSX2VirtualPadMaskImageCache.prewarm(descriptor: effectiveSkinDescriptor)
         }
 
     }
 
     private func pos(_ id: String, landscape: Bool) -> PadGroupPosition {
-        layout.position(for: id, landscape: landscape)
+        layoutSnapshot?.position(for: id, landscape: landscape) ?? layout.position(for: id, landscape: landscape)
     }
 
     private func perButtonPos(_ id: String, landscape: Bool, w: CGFloat, h: CGFloat) -> PadGroupPosition {
-        layout.perButtonPosition(for: id, landscape: landscape, areaW: w, areaH: h)
+        layoutSnapshot?.perButtonPosition(for: id, landscape: landscape, areaW: w, areaH: h)
+            ?? layout.perButtonPosition(for: id, landscape: landscape, areaW: w, areaH: h)
+    }
+
+    private func isVisible(_ id: String) -> Bool {
+        layoutSnapshot?.isControlVisible(id) ?? layout.isControlVisible(id)
+    }
+
+    @ViewBuilder
+    private func placedPadButton(
+        id: String,
+        label: String,
+        w: CGFloat,
+        h: CGFloat,
+        btn: ARMSX2PadButton,
+        landscape: Bool,
+        areaW: CGFloat,
+        areaH: CGFloat,
+        perButton: Bool = false
+    ) -> some View {
+        let p = perButton ? perButtonPos(id, landscape: landscape, w: areaW, h: areaH) : pos(id, landscape: landscape)
+        PadBtn(label: label, w: w, h: h, btn: btn, visibleScaleX: p.scaleX, visibleScaleY: p.scaleY, hitScaleX: p.hitScaleX, hitScaleY: p.hitScaleY)
+            .position(x: p.x * areaW, y: p.y * areaH)
+    }
+
+    @ViewBuilder
+    private func placedPSButton(
+        id: String,
+        sym: String,
+        clr: Color,
+        sz: CGFloat,
+        btn: ARMSX2PadButton,
+        landscape: Bool,
+        areaW: CGFloat,
+        areaH: CGFloat
+    ) -> some View {
+        let p = perButtonPos(id, landscape: landscape, w: areaW, h: areaH)
+        PSBtn(sym: sym, clr: clr, sz: sz, btn: btn, visibleScaleX: p.scaleX, visibleScaleY: p.scaleY, hitScaleX: p.hitScaleX, hitScaleY: p.hitScaleY)
+            .position(x: p.x * areaW, y: p.y * areaH)
+    }
+
+    @ViewBuilder
+    private func placedStick(
+        id: String,
+        isLeft: Bool,
+        landscape: Bool,
+        areaW: CGFloat,
+        areaH: CGFloat
+    ) -> some View {
+        let p = pos(id, landscape: landscape)
+        StickView(isLeft: isLeft, sizeScale: analogStickScale, layoutScale: p.scale)
+            .position(x: p.x * areaW, y: p.y * areaH)
     }
 
     // MARK: - Landscape: overlay on game screen
@@ -596,7 +891,7 @@ struct VirtualControllerView: View {
     func landscapeLayout(w: CGFloat, h: CGFloat) -> some View {
         ZStack {
             if drawFullSkinBackground,
-               let fullSkin = ControllerAsset.gameplayFullSkinImage(skin: settings.virtualPadSkin, isLandscape: true) {
+               let fullSkin = ControllerAsset.gameplayFullSkinImage(descriptor: effectiveSkinDescriptor, isLandscape: true) {
                 Image(uiImage: fullSkin)
                     .resizable()
                     .interpolation(.high)
@@ -608,84 +903,52 @@ struct VirtualControllerView: View {
             }
 
             // D-pad buttons (individual placement)
-            if layout.isControlVisible("dpad") {
+            if isVisible("dpad") {
                 let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: true)
-                PadBtn(label: "▲", w: dpadW, h: dpadW, btn: .up)
-                    .scaleEffect(perButtonPos("up", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("up", landscape: true, w: w, h: h).x * w, y: perButtonPos("up", landscape: true, w: w, h: h).y * h)
-                PadBtn(label: "▼", w: dpadW, h: dpadW, btn: .down)
-                    .scaleEffect(perButtonPos("down", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("down", landscape: true, w: w, h: h).x * w, y: perButtonPos("down", landscape: true, w: w, h: h).y * h)
-                PadBtn(label: "◀", w: dpadW, h: dpadW, btn: .left)
-                    .scaleEffect(perButtonPos("left", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("left", landscape: true, w: w, h: h).x * w, y: perButtonPos("left", landscape: true, w: w, h: h).y * h)
-                PadBtn(label: "▶", w: dpadW, h: dpadW, btn: .right)
-                    .scaleEffect(perButtonPos("right", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("right", landscape: true, w: w, h: h).x * w, y: perButtonPos("right", landscape: true, w: w, h: h).y * h)
+                placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: true, areaW: w, areaH: h, perButton: true)
+                placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: true, areaW: w, areaH: h, perButton: true)
+                placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: true, areaW: w, areaH: h, perButton: true)
+                placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: true, areaW: w, areaH: h, perButton: true)
             }
 
             // Action buttons (individual placement)
             let actionSz = VirtualPadButtonOffset.actionButtonSize
-            if layout.isControlVisible("triangle") {
-                PSBtn(sym: "△", clr: .green, sz: actionSz, btn: .triangle)
-                    .scaleEffect(perButtonPos("triangle", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("triangle", landscape: true, w: w, h: h).x * w, y: perButtonPos("triangle", landscape: true, w: w, h: h).y * h)
+            if isVisible("triangle") {
+                placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("cross") {
-                PSBtn(sym: "✕", clr: .blue, sz: actionSz, btn: .cross)
-                    .scaleEffect(perButtonPos("cross", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("cross", landscape: true, w: w, h: h).x * w, y: perButtonPos("cross", landscape: true, w: w, h: h).y * h)
+            if isVisible("cross") {
+                placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("square") {
-                PSBtn(sym: "□", clr: .pink, sz: actionSz, btn: .square)
-                    .scaleEffect(perButtonPos("square", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("square", landscape: true, w: w, h: h).x * w, y: perButtonPos("square", landscape: true, w: w, h: h).y * h)
+            if isVisible("square") {
+                placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("circle") {
-                PSBtn(sym: "○", clr: .red, sz: actionSz, btn: .circle)
-                    .scaleEffect(perButtonPos("circle", landscape: true, w: w, h: h).scale)
-                    .position(x: perButtonPos("circle", landscape: true, w: w, h: h).x * w, y: perButtonPos("circle", landscape: true, w: w, h: h).y * h)
+            if isVisible("circle") {
+                placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: true, areaW: w, areaH: h)
             }
 
-            if layout.isControlVisible("l2") {
-                PadBtn(label: "L2", w: 130, h: 44, btn: .L2)
-                    .scaleEffect(pos("l2", landscape: true).scale)
-                    .position(x: pos("l2", landscape: true).x * w, y: pos("l2", landscape: true).y * h)
+            if isVisible("l2") {
+                placedPadButton(id: "l2", label: "L2", w: 130, h: 44, btn: .L2, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("l1") {
-                PadBtn(label: "L1", w: 120, h: 32, btn: .L1)
-                    .scaleEffect(pos("l1", landscape: true).scale)
-                    .position(x: pos("l1", landscape: true).x * w, y: pos("l1", landscape: true).y * h)
+            if isVisible("l1") {
+                placedPadButton(id: "l1", label: "L1", w: 120, h: 32, btn: .L1, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("r2") {
-                PadBtn(label: "R2", w: 130, h: 44, btn: .R2)
-                    .scaleEffect(pos("r2", landscape: true).scale)
-                    .position(x: pos("r2", landscape: true).x * w, y: pos("r2", landscape: true).y * h)
+            if isVisible("r2") {
+                placedPadButton(id: "r2", label: "R2", w: 130, h: 44, btn: .R2, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("r1") {
-                PadBtn(label: "R1", w: 120, h: 32, btn: .R1)
-                    .scaleEffect(pos("r1", landscape: true).scale)
-                    .position(x: pos("r1", landscape: true).x * w, y: pos("r1", landscape: true).y * h)
+            if isVisible("r1") {
+                placedPadButton(id: "r1", label: "R1", w: 120, h: 32, btn: .R1, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("select") {
-                PadBtn(label: "SEL", w: 40, h: 22, btn: .select)
-                    .scaleEffect(pos("select", landscape: true).scale)
-                    .position(x: pos("select", landscape: true).x * w, y: pos("select", landscape: true).y * h)
+            if isVisible("select") {
+                placedPadButton(id: "select", label: "SEL", w: 40, h: 22, btn: .select, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("start") {
-                PadBtn(label: "START", w: 48, h: 22, btn: .start)
-                    .scaleEffect(pos("start", landscape: true).scale)
-                    .position(x: pos("start", landscape: true).x * w, y: pos("start", landscape: true).y * h)
+            if isVisible("start") {
+                placedPadButton(id: "start", label: "START", w: 48, h: 22, btn: .start, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("lstick") {
-                StickView(isLeft: true, sizeScale: analogStickScale)
-                    .scaleEffect(pos("lstick", landscape: true).scale)
-                    .position(x: pos("lstick", landscape: true).x * w, y: pos("lstick", landscape: true).y * h)
+            if isVisible("lstick") {
+                placedStick(id: "lstick", isLeft: true, landscape: true, areaW: w, areaH: h)
             }
-            if layout.isControlVisible("rstick") {
-                StickView(isLeft: false, sizeScale: analogStickScale)
-                    .scaleEffect(pos("rstick", landscape: true).scale)
-                    .position(x: pos("rstick", landscape: true).x * w, y: pos("rstick", landscape: true).y * h)
+            if isVisible("rstick") {
+                placedStick(id: "rstick", isLeft: false, landscape: true, areaW: w, areaH: h)
             }
         }
     }
@@ -695,7 +958,7 @@ struct VirtualControllerView: View {
     func portraitLayout(w: CGFloat, h: CGFloat) -> some View {
         ZStack {
             if drawFullSkinBackground,
-               let fullSkin = ControllerAsset.gameplayFullSkinImage(skin: settings.virtualPadSkin, isLandscape: false) {
+               let fullSkin = ControllerAsset.gameplayFullSkinImage(descriptor: effectiveSkinDescriptor, isLandscape: false) {
                 Image(uiImage: fullSkin)
                     .resizable()
                     .interpolation(.high)
@@ -710,86 +973,54 @@ struct VirtualControllerView: View {
                 let cW = cGeo.size.width
                 let cH = cGeo.size.height
 
-                if layout.isControlVisible("l2") {
-                    PadBtn(label: "L2", w: 110, h: 40, btn: .L2)
-                        .scaleEffect(pos("l2", landscape: false).scale)
-                        .position(x: pos("l2", landscape: false).x * cW, y: pos("l2", landscape: false).y * cH)
+                if isVisible("l2") {
+                    placedPadButton(id: "l2", label: "L2", w: 110, h: 40, btn: .L2, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("l1") {
-                    PadBtn(label: "L1", w: 100, h: 30, btn: .L1)
-                        .scaleEffect(pos("l1", landscape: false).scale)
-                        .position(x: pos("l1", landscape: false).x * cW, y: pos("l1", landscape: false).y * cH)
+                if isVisible("l1") {
+                    placedPadButton(id: "l1", label: "L1", w: 100, h: 30, btn: .L1, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("r2") {
-                    PadBtn(label: "R2", w: 110, h: 40, btn: .R2)
-                        .scaleEffect(pos("r2", landscape: false).scale)
-                        .position(x: pos("r2", landscape: false).x * cW, y: pos("r2", landscape: false).y * cH)
+                if isVisible("r2") {
+                    placedPadButton(id: "r2", label: "R2", w: 110, h: 40, btn: .R2, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("r1") {
-                    PadBtn(label: "R1", w: 100, h: 30, btn: .R1)
-                        .scaleEffect(pos("r1", landscape: false).scale)
-                        .position(x: pos("r1", landscape: false).x * cW, y: pos("r1", landscape: false).y * cH)
+                if isVisible("r1") {
+                    placedPadButton(id: "r1", label: "R1", w: 100, h: 30, btn: .R1, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("select") {
-                    PadBtn(label: "SEL", w: 42, h: 22, btn: .select)
-                        .scaleEffect(pos("select", landscape: false).scale)
-                        .position(x: pos("select", landscape: false).x * cW, y: pos("select", landscape: false).y * cH)
+                if isVisible("select") {
+                    placedPadButton(id: "select", label: "SEL", w: 42, h: 22, btn: .select, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("start") {
-                    PadBtn(label: "START", w: 48, h: 22, btn: .start)
-                        .scaleEffect(pos("start", landscape: false).scale)
-                        .position(x: pos("start", landscape: false).x * cW, y: pos("start", landscape: false).y * cH)
+                if isVisible("start") {
+                    placedPadButton(id: "start", label: "START", w: 48, h: 22, btn: .start, landscape: false, areaW: cW, areaH: cH)
                 }
 
                 // D-pad buttons (individual placement)
-                if layout.isControlVisible("dpad") {
+                if isVisible("dpad") {
                     let dpadW = VirtualPadButtonOffset.dpadButtonWidth(isLandscape: false)
-                    PadBtn(label: "▲", w: dpadW, h: dpadW, btn: .up)
-                        .scaleEffect(perButtonPos("up", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("up", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("up", landscape: false, w: cW, h: cH).y * cH)
-                    PadBtn(label: "▼", w: dpadW, h: dpadW, btn: .down)
-                        .scaleEffect(perButtonPos("down", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("down", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("down", landscape: false, w: cW, h: cH).y * cH)
-                    PadBtn(label: "◀", w: dpadW, h: dpadW, btn: .left)
-                        .scaleEffect(perButtonPos("left", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("left", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("left", landscape: false, w: cW, h: cH).y * cH)
-                    PadBtn(label: "▶", w: dpadW, h: dpadW, btn: .right)
-                        .scaleEffect(perButtonPos("right", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("right", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("right", landscape: false, w: cW, h: cH).y * cH)
+                    placedPadButton(id: "up", label: "▲", w: dpadW, h: dpadW, btn: .up, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                    placedPadButton(id: "down", label: "▼", w: dpadW, h: dpadW, btn: .down, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                    placedPadButton(id: "left", label: "◀", w: dpadW, h: dpadW, btn: .left, landscape: false, areaW: cW, areaH: cH, perButton: true)
+                    placedPadButton(id: "right", label: "▶", w: dpadW, h: dpadW, btn: .right, landscape: false, areaW: cW, areaH: cH, perButton: true)
                 }
 
                 // Action buttons (individual placement)
                 let actionSz = VirtualPadButtonOffset.actionButtonSize
-                if layout.isControlVisible("triangle") {
-                    PSBtn(sym: "△", clr: .green, sz: actionSz, btn: .triangle)
-                        .scaleEffect(perButtonPos("triangle", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("triangle", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("triangle", landscape: false, w: cW, h: cH).y * cH)
+                if isVisible("triangle") {
+                    placedPSButton(id: "triangle", sym: "△", clr: .green, sz: actionSz, btn: .triangle, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("cross") {
-                    PSBtn(sym: "✕", clr: .blue, sz: actionSz, btn: .cross)
-                        .scaleEffect(perButtonPos("cross", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("cross", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("cross", landscape: false, w: cW, h: cH).y * cH)
+                if isVisible("cross") {
+                    placedPSButton(id: "cross", sym: "✕", clr: .blue, sz: actionSz, btn: .cross, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("square") {
-                    PSBtn(sym: "□", clr: .pink, sz: actionSz, btn: .square)
-                        .scaleEffect(perButtonPos("square", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("square", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("square", landscape: false, w: cW, h: cH).y * cH)
+                if isVisible("square") {
+                    placedPSButton(id: "square", sym: "□", clr: .pink, sz: actionSz, btn: .square, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("circle") {
-                    PSBtn(sym: "○", clr: .red, sz: actionSz, btn: .circle)
-                        .scaleEffect(perButtonPos("circle", landscape: false, w: cW, h: cH).scale)
-                        .position(x: perButtonPos("circle", landscape: false, w: cW, h: cH).x * cW, y: perButtonPos("circle", landscape: false, w: cW, h: cH).y * cH)
+                if isVisible("circle") {
+                    placedPSButton(id: "circle", sym: "○", clr: .red, sz: actionSz, btn: .circle, landscape: false, areaW: cW, areaH: cH)
                 }
 
-                if layout.isControlVisible("lstick") {
-                    StickView(isLeft: true, sizeScale: analogStickScale)
-                        .scaleEffect(pos("lstick", landscape: false).scale)
-                        .position(x: pos("lstick", landscape: false).x * cW, y: pos("lstick", landscape: false).y * cH)
+                if isVisible("lstick") {
+                    placedStick(id: "lstick", isLeft: true, landscape: false, areaW: cW, areaH: cH)
                 }
-                if layout.isControlVisible("rstick") {
-                    StickView(isLeft: false, sizeScale: analogStickScale)
-                        .scaleEffect(pos("rstick", landscape: false).scale)
-                        .position(x: pos("rstick", landscape: false).x * cW, y: pos("rstick", landscape: false).y * cH)
+                if isVisible("rstick") {
+                    placedStick(id: "rstick", isLeft: false, landscape: false, areaW: cW, areaH: cH)
                 }
             }
         }
@@ -834,122 +1065,18 @@ struct ActionButtonsView: View {
 
 
 
-// [ARMSX2] Dynamic per-skin PNG masks applied to real virtual buttons.
-//
-// Buttons-only version: this does NOT touch PadLayoutEditView.swift.
-// The real virtual-pad buttons use the alpha channel of the currently selected
-// controller skin asset as their interaction geometry:
-//
-//   app/src/main/assets/app_icons/controller_skins/<selected_skin>/*.png
-//
-// The selected layout still controls position/scale/size. The selected skin now
-// controls the actual hit geometry and the press effect silhouette. This means
-// Legacy Refresh, Black, Xbox, White DS, Liquid Glass, Custom per-button PNGs,
-// etc. can each have their own button shapes without hardcoded Circle or
-// RoundedRectangle approximations.
-private final class ARMSX2SkinAlphaBitmap {
-    let width: Int
-    let height: Int
-    let alpha: [UInt8]
-
-    init?(image: UIImage) {
-        guard let cgImage = image.cgImage else { return nil }
-        width = cgImage.width
-        height = cgImage.height
-        guard width > 0, height > 0 else { return nil }
-
-        var rgba = [UInt8](repeating: 0, count: width * height * 4)
-        guard let context = CGContext(
-            data: &rgba,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else {
-            return nil
-        }
-
-        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        var a = [UInt8](repeating: 0, count: width * height)
-        for i in 0..<(width * height) {
-            a[i] = rgba[i * 4 + 3]
-        }
-        alpha = a
-    }
-
-    func containsUnitPoint(x unitX: CGFloat, y unitY: CGFloat, threshold: UInt8 = 18) -> Bool {
-        guard unitX >= 0, unitX <= 1, unitY >= 0, unitY <= 1 else { return false }
-        let px = min(max(Int(unitX * CGFloat(width)), 0), width - 1)
-        let py = min(max(Int(unitY * CGFloat(height)), 0), height - 1)
-        return alpha[py * width + px] > threshold
-    }
-}
-
-private final class ARMSX2SkinMaskedButton: UIButton {
-    var maskButton: ARMSX2PadButton = .select {
-        didSet {
-            if oldValue != maskButton {
-                alphaBitmap = nil
-                cachedImage = nil
-            }
-        }
-    }
-
-    var maskSkin: VirtualPadSkin = .armsx2Refresh {
-        didSet {
-            if oldValue != maskSkin {
-                alphaBitmap = nil
-                cachedImage = nil
-            }
-        }
-    }
-
-    // The visible button can sit inside a larger SwiftUI frame. The hit-test must
-    // use the visible button size, not the expanded frame. Example: SELECT remains
-    // 40x22 even if the container is wider/taller.
-    var maskVisualSize: CGSize = .zero
-
-    private var alphaBitmap: ARMSX2SkinAlphaBitmap?
-    private var cachedImage: UIImage?
-
-    private func resolvedMaskImage() -> UIImage? {
-        let fileName = ControllerAsset.fileName(for: maskButton)
-        if let image = ControllerAsset.image(named: fileName, skin: maskSkin) {
-            return image
-        }
-
-        // Stable fallback: if a skin has no per-button PNG, use the known-good
-        // legacy_refresh geometry instead of a generic rectangle.
-        if maskSkin != .legacyRefresh,
-           let fallback = ControllerAsset.image(named: fileName, skin: .legacyRefresh) {
-            return fallback
-        }
-
-        return nil
-    }
-
-    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-        // ARMSX2_LARGE_TOUCH_TARGET_V4:
-        // Alpha masks are visual feedback only. They must not reject touches,
-        // otherwise small controls like SELECT/START lose the existing expanded hit target.
-        return super.point(inside: point, with: event)
-    }
-}
-
+// MARK: - Visual-only alpha-mask press feedback
 private struct ARMSX2SkinMaskPressEffect: View {
     let button: ARMSX2PadButton
     let skin: VirtualPadSkin
+    let descriptor: VPadSkinDescriptor
     let color: Color
     let isPressed: Bool
     let opacity: Double
 
     private var maskImage: UIImage? {
         let fileName = ControllerAsset.fileName(for: button)
-        if let image = ControllerAsset.image(named: fileName, skin: skin) {
+        if let image = ControllerAsset.image(named: fileName, descriptor: descriptor) {
             return image
         }
         if skin != .legacyRefresh,
@@ -980,14 +1107,12 @@ private struct ARMSX2SkinMaskPressEffect: View {
                 }
                 .shadow(color: color.opacity(0.42 * opacity), radius: 9)
                 .scaleEffect(0.92)
+                .allowsHitTesting(false)
                 .animation(.easeOut(duration: 0.06), value: isPressed)
         }
     }
 }
-// [/ARMSX2] Dynamic per-skin PNG masks applied to real virtual buttons.
 
-
-// MARK: - Visual-only alpha-mask press feedback
 @MainActor
 private enum ARMSX2VirtualPadMaskImageCache {
     private static var cachedImages: [String: UIImage] = [:]
@@ -998,18 +1123,19 @@ private enum ARMSX2VirtualPadMaskImageCache {
         .start, .select, .L3, .R3
     ]
 
-    private static func key(button: ARMSX2PadButton, skin: VirtualPadSkin) -> String {
-        "\(skin.rawValue):\(ControllerAsset.fileName(for: button))"
+    private static func key(button: ARMSX2PadButton, descriptor: VPadSkinDescriptor) -> String {
+        let skinKey = descriptor.id
+        return "\(skinKey):\(ControllerAsset.fileName(for: button))"
     }
 
-    static func image(for button: ARMSX2PadButton, skin: VirtualPadSkin) -> UIImage? {
-        let cacheKey = key(button: button, skin: skin)
+    static func image(for button: ARMSX2PadButton, descriptor: VPadSkinDescriptor) -> UIImage? {
+        let cacheKey = key(button: button, descriptor: descriptor)
         if let cached = cachedImages[cacheKey] {
             return cached
         }
 
         let fileName = ControllerAsset.fileName(for: button)
-        let image = ControllerAsset.image(named: fileName, skin: skin)
+        let image = ControllerAsset.image(named: fileName, descriptor: descriptor)
             ?? ControllerAsset.image(named: fileName, skin: .legacyRefresh)
         guard let image else {
             return nil
@@ -1021,61 +1147,9 @@ private enum ARMSX2VirtualPadMaskImageCache {
         return prepared
     }
 
-    static func prewarm(skin: VirtualPadSkin) {
+    static func prewarm(descriptor: VPadSkinDescriptor) {
         for button in buttons {
-            _ = image(for: button, skin: skin)
-        }
-    }
-}
-
-private struct ARMSX2VisualMaskedPressEffect<S: InsettableShape>: View {
-    let fallbackShape: S
-    let button: ARMSX2PadButton
-    let skin: VirtualPadSkin
-    let color: Color
-    let isPressed: Bool
-    let opacity: Double
-
-    var body: some View {
-        if isPressed {
-            GeometryReader { geo in
-                if let image = ARMSX2VirtualPadMaskImageCache.image(for: button, skin: skin) {
-                    ZStack {
-                        color.opacity(0.34 * opacity)
-                            .mask {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .antialiased(true)
-                                    .scaledToFit()
-                            }
-
-                        color.opacity(0.72 * opacity)
-                            .mask {
-                                Image(uiImage: image)
-                                    .resizable()
-                                    .interpolation(.high)
-                                    .antialiased(true)
-                                    .scaledToFit()
-                            }
-                            .blur(radius: max(0.8, min(geo.size.width, geo.size.height) * 0.015))
-                    }
-                    .shadow(color: color.opacity(0.42 * opacity), radius: 9)
-                    .scaleEffect(0.92)
-                } else {
-                    fallbackShape
-                        .inset(by: 1)
-                        .fill(color.opacity(0.34 * opacity))
-                        .overlay {
-                            fallbackShape
-                                .inset(by: 1)
-                                .stroke(color.opacity(0.72 * opacity), lineWidth: 2.2)
-                        }
-                        .shadow(color: color.opacity(0.42 * opacity), radius: 9)
-                        .scaleEffect(0.92)
-                }
-            }
-            .animation(.easeOut(duration: 0.06), value: isPressed)
+            _ = image(for: button, descriptor: descriptor)
         }
     }
 }
@@ -1103,28 +1177,27 @@ private struct ControllerPressEffect<S: InsettableShape>: View {
     }
 }
 
+enum VirtualPadPressSurfacePolicy {
+    static func usesUIKitPressSurface(osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) -> Bool {
+        osMajorVersion >= 27
+    }
+}
+
 private func ARMSX2UsesUIKitPadPressSurface() -> Bool {
-    // ARMSX2_LARGE_TOUCH_TARGET_V4:
-    // Keep PSBtn/PadBtn on the same SwiftUI DragGesture(minimumDistance: 0) path used by L3/R3.
-    // This preserves the existing rectangular expanded touch target and prevents alpha masks/UIButton
-    // hit testing from shrinking input. Alpha masks are only visual feedback.
-    return false
+    VirtualPadPressSurfacePolicy.usesUIKitPressSurface()
 }
 
 @MainActor
 private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     let content: Content
     let onPress: (Bool) -> Void
-    let maskButton: ARMSX2PadButton
-    let maskSkin: VirtualPadSkin
-    let maskVisualSize: CGSize
 
-    init(onPress: @escaping (Bool) -> Void, maskButton: ARMSX2PadButton, maskSkin: VirtualPadSkin, maskVisualSize: CGSize, @ViewBuilder content: () -> Content) {
+    init(
+        onPress: @escaping (Bool) -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
         self.content = content()
         self.onPress = onPress
-        self.maskButton = maskButton
-        self.maskSkin = maskSkin
-        self.maskVisualSize = maskVisualSize
     }
 
     func makeCoordinator() -> Coordinator {
@@ -1132,10 +1205,7 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func makeUIView(context: Context) -> UIButton {
-        let button = ARMSX2SkinMaskedButton(type: .custom)
-        button.maskButton = maskButton
-        button.maskSkin = maskSkin
-        button.maskVisualSize = maskVisualSize
+        let button = UIButton(type: .custom)
         button.backgroundColor = .clear
         button.isExclusiveTouch = false
 
@@ -1158,11 +1228,6 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: UIButton, context: Context) {
-        if let masked = uiView as? ARMSX2SkinMaskedButton {
-            masked.maskButton = maskButton
-            masked.maskSkin = maskSkin
-            masked.maskVisualSize = maskVisualSize
-        }
         context.coordinator.onPress = onPress
         context.coordinator.hostingController.rootView = content
     }
@@ -1200,31 +1265,46 @@ private struct UIKitPadPressSurface<Content: View>: UIViewRepresentable {
 
 struct PSBtn: View {
     let sym: String; let clr: Color; let sz: CGFloat; let btn: ARMSX2PadButton
+    var visibleScaleX: CGFloat = 1.0
+    var visibleScaleY: CGFloat = 1.0
+    var hitScaleX: CGFloat = 1.0
+    var hitScaleY: CGFloat = 1.0
     @State private var on = false
     @Environment(\.padOpacity) private var padOpacity
     @Environment(\.padSkin) private var padSkin
+    @Environment(\.padSkinDescriptor) private var padSkinDescriptor
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
-    private var touchTarget: CGFloat { max(sz, 55) }
+    private var visibleW: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: sz, visibleScale: visibleScaleX)
+    }
+
+    private var visibleH: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: sz, visibleScale: visibleScaleY)
+    }
+
+    private var touchW: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: sz, hitScale: hitScaleX)
+    }
+
+    private var touchH: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: sz, hitScale: hitScaleY)
+    }
 
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskSkin: padSkin, maskVisualSize: CGSize(width: sz, height: sz)) {
-                    buttonFace
-                        .frame(width: sz, height: sz)
+                UIKitPadPressSurface(onPress: updatePressed) {
+                    centeredButtonFace
                 }
-                .frame(width: touchTarget, height: touchTarget)
+                .frame(width: touchW, height: touchH)
             }
-            .frame(width: touchTarget, height: touchTarget)
+            .frame(width: touchW, height: touchH)
             .opacity(padUsesFullSkin ? 1.0 : padOpacity)
             .animation(.easeOut(duration: 0.06), value: on)
         } else {
-            ZStack {
-                buttonFace
-                    .frame(width: sz, height: sz)
-            }
-            .frame(width: touchTarget, height: touchTarget)
+            centeredButtonFace
+            .frame(width: touchW, height: touchH)
             .contentShape(Rectangle())
             .opacity(padUsesFullSkin ? 1.0 : padOpacity)
             .animation(.easeOut(duration: 0.06), value: on)
@@ -1234,13 +1314,27 @@ struct PSBtn: View {
         }
     }
 
+    private var centeredButtonFace: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(width: touchW, height: touchH)
+
+            buttonFace
+                .frame(width: visibleW, height: visibleH)
+                .position(x: touchW / 2, y: touchH / 2)
+        }
+        .frame(width: touchW, height: touchH)
+    }
+
     private var buttonFace: some View {
         ZStack {
-            Circle()
+            // Ellipse (not Circle) so the press-mask shape matches a non-uniform
+            // visible frame; degenerates to a circle when the axes are equal.
+            Ellipse()
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, descriptor: padSkinDescriptor, color: clr, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
@@ -1248,10 +1342,11 @@ struct PSBtn: View {
                     fileName: ControllerAsset.fileName(for: btn),
                     fallback: sym,
                     fallbackColor: on ? .white : clr,
-                    fallbackFontSize: sz * 0.42,
-                    skin: padSkin
+                    fallbackFontSize: min(visibleW, visibleH) * 0.42,
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
                 )
-                    .padding(padSkin == .crispVector ? 0 : max(1, sz * 0.03))
+                    .padding(padSkin == .crispVector ? 0 : max(1, min(visibleW, visibleH) * 0.03))
                     .brightness(on ? 0.18 : 0)
                     .saturation(on ? 1.16 : 1.0)
                     .scaleEffect(on ? 0.90 : 1.0)
@@ -1274,20 +1369,37 @@ struct PSBtn: View {
 
 struct PadBtn: View {
     let label: String; let w: CGFloat; let h: CGFloat; let btn: ARMSX2PadButton
+    var visibleScaleX: CGFloat = 1.0
+    var visibleScaleY: CGFloat = 1.0
+    var hitScaleX: CGFloat = 1.0
+    var hitScaleY: CGFloat = 1.0
     @State private var on = false
     @Environment(\.padOpacity) private var padOpacity
     @Environment(\.padSkin) private var padSkin
+    @Environment(\.padSkinDescriptor) private var padSkinDescriptor
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
-    private var touchW: CGFloat { max(w, 55) }
-    private var touchH: CGFloat { max(h, 55) }
+    private var visibleW: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: w, visibleScale: visibleScaleX)
+    }
+
+    private var visibleH: CGFloat {
+        PadLayoutMetrics.visibleLength(baseLength: h, visibleScale: visibleScaleY)
+    }
+
+    private var touchW: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: w, hitScale: hitScaleX)
+    }
+
+    private var touchH: CGFloat {
+        PadLayoutMetrics.touchLength(baseLength: h, hitScale: hitScaleY)
+    }
 
     var body: some View {
         if ARMSX2UsesUIKitPadPressSurface() {
             ZStack {
-                UIKitPadPressSurface(onPress: updatePressed, maskButton: btn, maskSkin: padSkin, maskVisualSize: CGSize(width: w, height: h)) {
-                    buttonFace
-                        .frame(width: w, height: h)
+                UIKitPadPressSurface(onPress: updatePressed) {
+                    centeredButtonFace
                 }
                 .frame(width: touchW, height: touchH)
             }
@@ -1295,10 +1407,7 @@ struct PadBtn: View {
             .opacity(padUsesFullSkin ? 1.0 : padOpacity)
             .animation(.easeOut(duration: 0.06), value: on)
         } else {
-            ZStack {
-                buttonFace
-                    .frame(width: w, height: h)
-            }
+            centeredButtonFace
             .frame(width: touchW, height: touchH)
             .contentShape(Rectangle())
             .opacity(padUsesFullSkin ? 1.0 : padOpacity)
@@ -1309,14 +1418,26 @@ struct PadBtn: View {
         }
     }
 
+    private var centeredButtonFace: some View {
+        ZStack(alignment: .topLeading) {
+            Color.clear
+                .frame(width: touchW, height: touchH)
+
+            buttonFace
+                .frame(width: visibleW, height: visibleH)
+                .position(x: touchW / 2, y: touchH / 2)
+        }
+        .frame(width: touchW, height: touchH)
+    }
+
     private var buttonFace: some View {
-        let shape = RoundedRectangle(cornerRadius: min(w, h) * 0.28, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: min(visibleW, visibleH) * 0.28, style: .continuous)
         return ZStack {
             shape
                 .fill(.clear)
 
             if !padUsesFullSkin || on {
-                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
+                ARMSX2SkinMaskPressEffect(button: btn, skin: padSkin, descriptor: padSkinDescriptor, color: .white, isPressed: on, opacity: padUsesFullSkin ? padOpacity * 0.75 : padOpacity)
             }
 
             if !padUsesFullSkin {
@@ -1324,10 +1445,11 @@ struct PadBtn: View {
                     fileName: ControllerAsset.fileName(for: btn),
                     fallback: label,
                     fallbackColor: on ? .black : .white,
-                    fallbackFontSize: min(w, h) * 0.38,
-                    skin: padSkin
+                    fallbackFontSize: min(visibleW, visibleH) * 0.38,
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
                 )
-                    .padding(padSkin == .crispVector ? 0 : max(1, min(w, h) * 0.03))
+                    .padding(padSkin == .crispVector ? 0 : max(1, min(visibleW, visibleH) * 0.03))
                     .brightness(on ? 0.18 : 0)
                     .scaleEffect(on ? 0.91 : 1.0)
             }
@@ -1351,21 +1473,26 @@ struct PadBtn: View {
 struct StickView: View {
     let isLeft: Bool
     let sizeScale: CGFloat
+    var layoutScale: CGFloat = 1.0
 
     private var clampedScale: CGFloat {
         min(max(sizeScale, 0.8), 1.6)
     }
+    private var effectiveScale: CGFloat {
+        clampedScale * PadLayoutMetrics.clampedScale(layoutScale)
+    }
     private var sz: CGFloat {
-        68 * clampedScale
+        68 * effectiveScale
     }
     private var knob: CGFloat {
-        30 * clampedScale
+        30 * effectiveScale
     }
 
     @State private var off: CGSize = .zero
     @State private var isDragging = false
     @Environment(\.padOpacity) private var padOpacity
     @Environment(\.padSkin) private var padSkin
+    @Environment(\.padSkinDescriptor) private var padSkinDescriptor
     @Environment(\.padUsesFullSkin) private var padUsesFullSkin
 
     var body: some View {
@@ -1384,20 +1511,22 @@ struct StickView: View {
 
             if !padUsesFullSkin {
                 ControllerAssetImage(
-                    fileName: "ic_controller_analog_base.png",
+                    fileName: ControllerAsset.analogBaseFileName(isLeft: isLeft, descriptor: padSkinDescriptor),
                     fallback: "",
                     fallbackColor: .white,
                     fallbackFontSize: 1,
-                    skin: padSkin
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
                 )
                     .frame(width: sz, height: sz)
                     .opacity(padOpacity)
                 ControllerAssetImage(
-                    fileName: "ic_controller_analog_stick.png",
+                    fileName: ControllerAsset.analogStickFileName(isLeft: isLeft, descriptor: padSkinDescriptor),
                     fallback: "",
                     fallbackColor: .white,
                     fallbackFontSize: 1,
-                    skin: padSkin
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
                 )
                     .frame(width: knob, height: knob)
                     .opacity(padOpacity)
@@ -1409,7 +1538,8 @@ struct StickView: View {
                     fallback: isLeft ? "L3" : "R3",
                     fallbackColor: .white.opacity(0.35),
                     fallbackFontSize: 9,
-                    skin: padSkin
+                    skin: padSkin,
+                    descriptor: padSkinDescriptor
                 )
                     .frame(width: 18, height: 18)
                     .opacity(0.45 * padOpacity)

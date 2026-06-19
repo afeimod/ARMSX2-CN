@@ -7,21 +7,34 @@ import UniformTypeIdentifiers
 
 struct VirtualPadSettingsView: View {
     @State private var settings = SettingsStore.shared
+    @State private var layoutPresets = PadLayoutPresetStore.shared
+    @State private var skinLibrary = VPadSkinLibraryStore.shared
     @State private var showLayoutEditor = false
     @State private var showSkinImporter = false
     @State private var showSkinImportAlert = false
+    @State private var lastSkinImportResult: VPadSkinImportResult?
     @State private var skinImportMessage = ""
+    @State private var showLayoutImporter = false
+    @State private var showLayoutImportAlert = false
+    @State private var layoutImportMessage = ""
+    @State private var layoutExportItem: ShareSheetItem?
+    @State private var skinPendingDelete: VPadSkinDescriptor?
+    @State private var skinPendingRename: VPadSkinDescriptor?
+    @State private var skinRenameDraft = ""
 
     var body: some View {
         Form {
             Section(settings.localized("Appearance")) {
-                Picker(settings.localized("Button Skin"), selection: $settings.virtualPadSkin) {
-                    ForEach(VirtualPadSkin.allCases) { skin in
-                        Text(settings.localized(skin.label)).tag(skin)
+                Picker(settings.localized("Button Skin"), selection: Binding<String>(
+                    get: { skinLibrary.selectedSkinID },
+                    set: { selectSkin(id: $0) }
+                )) {
+                    ForEach(skinLibrary.allDescriptors) { skin in
+                        Text(settings.localized(skin.displayName)).tag(skin.id)
                     }
                 }
 
-                Text(settings.localized(settings.virtualPadSkin.detail))
+                Text(settings.localized(selectedSkinDetail))
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -66,12 +79,48 @@ struct VirtualPadSettingsView: View {
                 Button {
                     showSkinImporter = true
                 } label: {
-                    Label(settings.localized("Import Button Images"), systemImage: "paintpalette")
+                    Label(settings.localized("Import Skin"), systemImage: "paintpalette")
                 }
 
                 Text("Import loose PNG/JPG/WebP button images, a full portrait/landscape controller image, or a zipped skin pack. Button files can be named cross, circle, square, triangle, up, down, left, right, L1, R1, L2, R2, start, select, analog_base, or analog_stick.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                if !skinLibrary.importedDescriptors.isEmpty {
+                    ForEach(skinLibrary.importedDescriptors) { skin in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(skin.displayName)
+                                if skin.linkedLayoutPresetID != nil {
+                                    Text("Includes recommended layout")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Menu {
+                                Button {
+                                    selectSkin(id: skin.id)
+                                } label: {
+                                    Label("Set as Global Default", systemImage: "checkmark.circle")
+                                }
+                                Button {
+                                    skinPendingRename = skin
+                                    skinRenameDraft = skin.displayName
+                                } label: {
+                                    Label("Rename Skin", systemImage: "pencil")
+                                }
+                                Button(role: .destructive) {
+                                    skinPendingDelete = skin
+                                } label: {
+                                    Label("Delete Skin", systemImage: "trash")
+                                }
+                            } label: {
+                                Image(systemName: "ellipsis.circle")
+                            }
+                        }
+                    }
+                }
             }
 
             Section(settings.localized("Feedback")) {
@@ -79,6 +128,16 @@ struct VirtualPadSettingsView: View {
             }
 
             Section(settings.localized("Layout")) {
+                Picker("Default VPad Layout", selection: Binding<String?>(
+                    get: { layoutPresets.globalPresetID },
+                    set: { layoutPresets.globalPresetID = $0 }
+                )) {
+                    Text("Current Layout").tag(nil as String?)
+                    ForEach(layoutPresets.presets) { preset in
+                        Text(preset.displayName).tag(Optional(preset.id))
+                    }
+                }
+
                 Button {
                     showLayoutEditor = true
                 } label: {
@@ -90,10 +149,55 @@ struct VirtualPadSettingsView: View {
                 Text("Simple custom pad skins are shown behind the blue hit boxes in Edit Layout. Full-phone Manic skins need layout metadata support before they can be used in gameplay.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
+                Button {
+                    showLayoutImporter = true
+                } label: {
+                    Label("Import Layout", systemImage: "square.and.arrow.down")
+                }
+
+                if !layoutPresets.presets.isEmpty {
+                    ForEach(layoutPresets.presets) { preset in
+                        HStack {
+                            Text(preset.displayName)
+                                .lineLimit(1)
+                            Spacer()
+                            Button {
+                                exportLayout(preset)
+                            } label: {
+                                Image(systemName: "square.and.arrow.up")
+                            }
+                            .buttonStyle(.borderless)
+                            .accessibilityLabel("Export \(preset.displayName)")
+                        }
+                    }
+                }
             }
         }
         .navigationTitle(settings.localized("Virtual Pad"))
         .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showLayoutImporter) {
+            ImportDocumentPicker(
+                allowedContentTypes: [.json, .data],
+                allowsMultipleSelection: true
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    layoutImportMessage = importLayouts(urls)
+                case .failure(let error):
+                    layoutImportMessage = "Layout import failed: \(error.localizedDescription)"
+                }
+                showLayoutImportAlert = true
+            }
+        }
+        .sheet(item: $layoutExportItem) { item in
+            ActivityShareSheet(activityItems: [item.url])
+        }
+        .alert("Layout Import", isPresented: $showLayoutImportAlert) {
+            Button(settings.localized("OK"), role: .cancel) {}
+        } message: {
+            Text(layoutImportMessage)
+        }
         .sheet(isPresented: $showSkinImporter) {
             ImportDocumentPicker(
                 allowedContentTypes: [
@@ -107,40 +211,112 @@ struct VirtualPadSettingsView: View {
             ) { result in
                 switch result {
                 case .success(let urls):
-                    skinImportMessage = importCustomSkinImages(urls)
+                    let result = importCustomSkins(urls)
+                    lastSkinImportResult = result.importResult
+                    skinImportMessage = result.message
                 case .failure(let error):
+                    lastSkinImportResult = nil
                     skinImportMessage = "Skin import failed: \(error.localizedDescription)"
                 }
                 showSkinImportAlert = true
             }
         }
         .alert(settings.localized("Custom Skin"), isPresented: $showSkinImportAlert) {
-            Button(settings.localized("OK"), role: .cancel) {}
+            if let result = lastSkinImportResult {
+                if result.includesLinkedLayout {
+                    Button("Apply Skin Only Globally") {
+                        selectSkin(id: result.descriptor.id)
+                    }
+                    Button("Apply Skin + Layout Globally") {
+                        selectSkin(id: result.descriptor.id)
+                        layoutPresets.globalPresetID = result.descriptor.linkedLayoutPresetID
+                    }
+                    Button("Apply Layout Only Globally") {
+                        layoutPresets.globalPresetID = result.descriptor.linkedLayoutPresetID
+                    }
+                    Button("Later", role: .cancel) {}
+                } else {
+                    Button("Apply Skin Only Globally") {
+                        selectSkin(id: result.descriptor.id)
+                    }
+                    Button("Later", role: .cancel) {}
+                }
+            } else {
+                Button(settings.localized("OK"), role: .cancel) {}
+            }
         } message: {
             Text(skinImportMessage)
         }
+        .alert("Rename Skin", isPresented: Binding<Bool>(
+            get: { skinPendingRename != nil },
+            set: { if !$0 { skinPendingRename = nil } }
+        )) {
+            TextField("Name", text: $skinRenameDraft)
+            Button("Save") {
+                if let skin = skinPendingRename {
+                    try? skinLibrary.renameImportedSkin(id: skin.id, to: skinRenameDraft)
+                }
+                skinPendingRename = nil
+            }
+            Button("Cancel", role: .cancel) {
+                skinPendingRename = nil
+            }
+        } message: {
+            Text("Choose a display name for this imported skin.")
+        }
+        .confirmationDialog(
+            "Delete Skin?",
+            isPresented: Binding<Bool>(
+                get: { skinPendingDelete != nil },
+                set: { if !$0 { skinPendingDelete = nil } }
+            ),
+            presenting: skinPendingDelete
+        ) { skin in
+            Button("Delete \(skin.displayName)", role: .destructive) {
+                try? skinLibrary.deleteImportedSkin(id: skin.id, layoutPresets: layoutPresets)
+                syncSettingsSkinFromLibrarySelection()
+                skinPendingDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                skinPendingDelete = nil
+            }
+        } message: { skin in
+            Text("This removes the imported skin. Linked layout presets are kept.")
+        }
         .fullScreenCover(isPresented: $showLayoutEditor) {
-            PadLayoutEditView(onDismiss: { showLayoutEditor = false })
+            PadLayoutEditView(
+                onDismiss: { showLayoutEditor = false },
+                context: PadLayoutEditorContext(
+                    presetID: layoutPresets.globalPresetID,
+                    gameIdentity: nil,
+                    initialSnapshot: layoutPresets.effectiveSnapshot(for: nil)
+                )
+            )
         }
     }
 
-    private func importCustomSkinImages(_ urls: [URL]) -> String {
-        guard let directory = VirtualPadSkin.customSkinDirectory(create: true) else {
-            return "Could not create the custom skin folder."
+    private var selectedSkinDetail: String {
+        let descriptor = skinLibrary.selectedDescriptor
+        if descriptor.source == .imported {
+            if descriptor.linkedLayoutPresetID != nil {
+                return "Uses imported controller art. A recommended layout is saved separately and only applies when selected."
+            }
+            return "Uses imported controller art without changing the active layout."
         }
+        return descriptor.virtualPadSkin.detail
+    }
 
-        let stagingDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ARMSX2SkinImport-\(UUID().uuidString)", isDirectory: true)
-        try? FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
-        defer {
-            try? FileManager.default.removeItem(at: stagingDirectory)
-        }
+    private func selectSkin(id: String) {
+        skinLibrary.selectSkin(id: id)
+        syncSettingsSkinFromLibrarySelection()
+    }
 
-        var importedButtons: [String] = []
-        var importedFullSkins: [String] = []
-        var extractedImageCount = 0
-        var skipped: [String] = []
+    private func syncSettingsSkinFromLibrarySelection() {
+        settings.virtualPadSkin = skinLibrary.selectedDescriptor.virtualPadSkin
+    }
 
+    private func importLayouts(_ urls: [URL]) -> String {
+        var messages: [String] = []
         for sourceURL in urls {
             let accessGranted = sourceURL.startAccessingSecurityScopedResource()
             defer {
@@ -148,95 +324,102 @@ struct VirtualPadSettingsView: View {
                     sourceURL.stopAccessingSecurityScopedResource()
                 }
             }
-
-            let candidates = expandedSkinImportSources(from: sourceURL, stagingDirectory: stagingDirectory)
-            extractedImageCount += max(0, candidates.count - 1)
-            if candidates.isEmpty {
-                skipped.append(sourceURL.lastPathComponent)
-                continue
-            }
-
-            for candidate in candidates {
-                importSkinImage(
-                    candidate,
-                    to: directory,
-                    importedButtons: &importedButtons,
-                    importedFullSkins: &importedFullSkins,
-                    skipped: &skipped
-                )
+            do {
+                let data = try Data(contentsOf: sourceURL)
+                let preset = try layoutPresets.importLayout(data: data, fallbackName: sourceURL.lastPathComponent)
+                messages.append("Imported layout '\(preset.displayName)'.")
+            } catch {
+                messages.append("Layout import failed for \(sourceURL.lastPathComponent): \(error.localizedDescription)")
             }
         }
-
-        if !importedButtons.isEmpty || !importedFullSkins.isEmpty {
-            settings.virtualPadSkin = .custom
-        }
-
-        var lines: [String] = []
-        if extractedImageCount > 0 {
-            lines.append("Extracted \(extractedImageCount) image(s) from skin archive(s).")
-        }
-        if !importedButtons.isEmpty {
-            lines.append(importedButtons.count == 1 ? "Imported \(importedButtons[0])." : "Imported \(importedButtons.count) button images.")
-        }
-        if !importedFullSkins.isEmpty {
-            lines.append(importedFullSkins.count == 1 ? "Imported full skin image: \(importedFullSkins[0])." : "Imported \(importedFullSkins.count) full skin images.")
-            lines.append("Simple pad skins are drawn behind transparent touch zones. Full-phone Manic skins are imported but kept inactive until their layout metadata is supported.")
-        }
-        if !skipped.isEmpty {
-            lines.append("Skipped: \(skipped.joined(separator: ", "))")
-        }
-        if lines.isEmpty {
-            return "No usable skin images were imported. Use loose button PNGs/JPGs/WebPs, a portrait/landscape controller image, or a zip skin pack containing image files."
-        }
-        return lines.joined(separator: "\n")
+        return messages.isEmpty ? "No layout files were selected." : messages.joined(separator: "\n\n")
     }
 
-    private func expandedSkinImportSources(from sourceURL: URL, stagingDirectory: URL) -> [URL] {
-        if isSkinArchive(sourceURL) {
+    private func exportLayout(_ preset: PadLayoutPreset) {
+        do {
+            let data = try PadLayoutImportExport.exportData(for: preset)
+            let url = FileManager.default.temporaryDirectory
+                .appendingPathComponent(PadLayoutImportExport.exportedFileName(for: preset.displayName))
+            try data.write(to: url, options: .atomic)
+            layoutExportItem = ShareSheetItem(url: url)
+        } catch {
+            layoutImportMessage = "Layout export failed: \(error.localizedDescription)"
+            showLayoutImportAlert = true
+        }
+    }
+
+    private func importCustomSkins(_ urls: [URL]) -> (message: String, importResult: VPadSkinImportResult?) {
+        let stagingDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ARMSX2SkinImport-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: stagingDirectory)
+        }
+
+        var messages: [String] = []
+        var latestResult: VPadSkinImportResult?
+        let looseFiles = urls.filter { !isSkinArchive($0) }
+        let archiveFiles = urls.filter { isSkinArchive($0) }
+
+        if !looseFiles.isEmpty {
+            let looseDirectory = stagingDirectory.appendingPathComponent("LooseSkin", isDirectory: true)
+            try? FileManager.default.createDirectory(at: looseDirectory, withIntermediateDirectories: true)
+            for sourceURL in looseFiles {
+                let accessGranted = sourceURL.startAccessingSecurityScopedResource()
+                defer {
+                    if accessGranted {
+                        sourceURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+                let destination = looseDirectory.appendingPathComponent(sourceURL.lastPathComponent)
+                try? FileManager.default.removeItem(at: destination)
+                try? FileManager.default.copyItem(at: sourceURL, to: destination)
+            }
+            do {
+                let result = try skinLibrary.importSkin(
+                    from: looseDirectory,
+                    originalImportName: looseFiles.first?.lastPathComponent,
+                    layoutPresets: layoutPresets
+                )
+                latestResult = result
+                messages.append(result.message)
+            } catch {
+                messages.append("Skin import failed: \(error.localizedDescription)")
+            }
+        }
+
+        for sourceURL in archiveFiles {
+            let accessGranted = sourceURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessGranted {
+                    sourceURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
             let archiveDirectory = stagingDirectory
                 .appendingPathComponent(sourceURL.deletingPathExtension().lastPathComponent, isDirectory: true)
             let extracted = ARMSX2Bridge.extractControllerSkinArchive(at: sourceURL, to: archiveDirectory)
-            if !extracted.isEmpty {
-                return extracted
+            if extracted.isEmpty {
+                messages.append("No usable skin files were imported from \(sourceURL.lastPathComponent).")
+                continue
+            }
+            do {
+                let result = try skinLibrary.importSkin(
+                    from: archiveDirectory,
+                    originalImportName: sourceURL.lastPathComponent,
+                    layoutPresets: layoutPresets
+                )
+                latestResult = result
+                messages.append(result.message)
+            } catch {
+                messages.append("Skin import failed: \(error.localizedDescription)")
             }
         }
 
-        return [sourceURL]
-    }
-
-    private func importSkinImage(
-        _ sourceURL: URL,
-        to directory: URL,
-        importedButtons: inout [String],
-        importedFullSkins: inout [String],
-        skipped: inout [String]
-    ) {
-        guard let image = UIImage(contentsOfFile: sourceURL.path),
-              let data = image.pngData() else {
-            skipped.append(sourceURL.lastPathComponent)
-            return
-        }
-
-        let destinationName: String
-        let isFullSkin: Bool
-        if let canonicalName = canonicalSkinFileName(for: sourceURL) {
-            destinationName = canonicalName
-            isFullSkin = false
-        } else {
-            destinationName = fullSkinFileName(for: sourceURL, image: image)
-            isFullSkin = true
-        }
-
-        do {
-            try data.write(to: directory.appendingPathComponent(destinationName), options: .atomic)
-            if isFullSkin {
-                importedFullSkins.append(destinationName)
-            } else {
-                importedButtons.append(destinationName)
-            }
-        } catch {
-            skipped.append(sourceURL.lastPathComponent)
-        }
+        let message = messages.isEmpty
+            ? "No usable skin images were imported. Use loose button PNGs/JPGs/WebPs, a portrait/landscape controller image, or a zip skin pack containing image files."
+            : messages.joined(separator: "\n\n")
+        return (message, latestResult)
     }
 
     private func isSkinArchive(_ url: URL) -> Bool {
@@ -244,83 +427,7 @@ struct VirtualPadSettingsView: View {
         return ext == "zip" || ext == "skin" || ext == "manic"
     }
 
-    private func fullSkinFileName(for url: URL, image: UIImage) -> String {
-        let stem = url.deletingPathExtension().lastPathComponent
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: "_", options: .regularExpression)
-        let looksLikeDeviceSkin = stem.contains("edge") || stem.contains("iphone") || stem.contains("ipad")
-
-        if stem.contains("landscape") || stem.contains("horizontal") {
-            if looksLikeDeviceSkin {
-                return "controller_edgetoedge_landscape.png"
-            }
-            return "controller_landscape.png"
-        }
-        if stem.contains("portrait") || stem.contains("vertical") {
-            if looksLikeDeviceSkin {
-                return "controller_edgetoedge_portrait.png"
-            }
-            return "controller_portrait.png"
-        }
-
-        return image.size.width > image.size.height ? "controller_landscape.png" : "controller_portrait.png"
-    }
-
-    private func canonicalSkinFileName(for url: URL) -> String? {
-        let exact = url.lastPathComponent.lowercased()
-        let expected = Set([
-            "ic_controller_up_button.png",
-            "ic_controller_down_button.png",
-            "ic_controller_left_button.png",
-            "ic_controller_right_button.png",
-            "ic_controller_cross_button.png",
-            "ic_controller_circle_button.png",
-            "ic_controller_square_button.png",
-            "ic_controller_triangle_button.png",
-            "ic_controller_l1_button.png",
-            "ic_controller_r1_button.png",
-            "ic_controller_l2_button.png",
-            "ic_controller_r2_button.png",
-            "ic_controller_start_button.png",
-            "ic_controller_select_button.png",
-            "ic_controller_l3_button.png",
-            "ic_controller_r3_button.png",
-            "ic_controller_analog_base.png",
-            "ic_controller_analog_stick.png",
-            "ic_controller_analog_button.png"
-        ])
-        if expected.contains(exact) {
-            return exact
-        }
-
-        let stem = url.deletingPathExtension().lastPathComponent
-            .lowercased()
-            .replacingOccurrences(of: "[^a-z0-9]+", with: "_", options: .regularExpression)
-
-        let pairs: [(String, String)] = [
-            ("analog_base", "ic_controller_analog_base.png"),
-            ("analog_stick", "ic_controller_analog_stick.png"),
-            ("analog_button", "ic_controller_analog_button.png"),
-            ("stick", "ic_controller_analog_stick.png"),
-            ("base", "ic_controller_analog_base.png"),
-            ("l1", "ic_controller_l1_button.png"),
-            ("r1", "ic_controller_r1_button.png"),
-            ("l2", "ic_controller_l2_button.png"),
-            ("r2", "ic_controller_r2_button.png"),
-            ("l3", "ic_controller_l3_button.png"),
-            ("r3", "ic_controller_r3_button.png"),
-            ("start", "ic_controller_start_button.png"),
-            ("select", "ic_controller_select_button.png"),
-            ("triangle", "ic_controller_triangle_button.png"),
-            ("circle", "ic_controller_circle_button.png"),
-            ("square", "ic_controller_square_button.png"),
-            ("cross", "ic_controller_cross_button.png"),
-            ("up", "ic_controller_up_button.png"),
-            ("down", "ic_controller_down_button.png"),
-            ("left", "ic_controller_left_button.png"),
-            ("right", "ic_controller_right_button.png")
-        ]
-
-        return pairs.first { stem.contains($0.0) }?.1
+    static func canonicalSkinFileName(forImportPath path: String) -> String? {
+        VPadSkinLibraryStore.canonicalSkinFileName(forImportPath: path)
     }
 }
