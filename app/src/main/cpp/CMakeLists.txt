@@ -159,6 +159,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/VirtualPadSettingsView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Views/Settings/PadLayoutEditView.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/PadLayoutStore.swift
+		${CMAKE_SOURCE_DIR}/../swift/Models/PadLayoutPresetStore.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/EmulatorBridge.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/SwiftUIHost.swift
 		${CMAKE_SOURCE_DIR}/../swift/Models/AppState.swift
