@@ -718,6 +718,7 @@ final class SettingsStore: @unchecked Sendable {
         let savedDim = UserDefaults.standard.object(forKey: "ARMSX2iOSLibraryBackgroundDim") as? Double
         libraryBackgroundDim = Self.clampedLibraryBackgroundDim(savedDim ?? 0.35)
         normalizeDEV9Settings()
+        VPadSkinLibraryStore.shared.adoptLegacySelection(virtualPadSkin)
         ARMSX2Bridge.setINIString("EmuCore/GS", key: "AspectRatio", value: Self.aspectRatioName(for: aspectRatio))
         // Apply OSD preset
         ARMSX2Bridge.applyOsdPreset(Int32(osdPreset.rawValue))
@@ -843,6 +844,7 @@ final class SettingsStore: @unchecked Sendable {
         let savedDimReload = UserDefaults.standard.object(forKey: "ARMSX2iOSLibraryBackgroundDim") as? Double
         libraryBackgroundDim = Self.clampedLibraryBackgroundDim(savedDimReload ?? 0.35)
         normalizeDEV9Settings()
+        VPadSkinLibraryStore.shared.adoptLegacySelection(virtualPadSkin)
     }
 
     private static func frameLimiterEnabled(fromNominalScalar scalar: Float) -> Bool {

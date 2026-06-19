@@ -20,6 +20,19 @@ enum VirtualPadSkin: Int, CaseIterable, Identifiable {
 
     var id: Int { rawValue }
 
+    static var builtInCases: [VirtualPadSkin] {
+        allCases.filter { $0 != .custom }
+    }
+
+    var descriptorID: String {
+        switch self {
+        case .custom:
+            return "legacy-custom"
+        default:
+            return "built-in-\(rawValue)"
+        }
+    }
+
     var label: String {
         switch self {
         case .armsx2Refresh:
@@ -94,6 +107,17 @@ enum VirtualPadSkin: Int, CaseIterable, Identifiable {
     }
 
     static func customSkinDirectory(create: Bool = false) -> URL? {
+        if let selectedDirectory = VPadSkinLibraryStore.shared.selectedImportedAssetsDirectory() {
+            if create {
+                try? FileManager.default.createDirectory(at: selectedDirectory, withIntermediateDirectories: true)
+            }
+            return selectedDirectory
+        }
+
+        return legacyCustomSkinDirectory(create: create)
+    }
+
+    static func legacyCustomSkinDirectory(create: Bool = false) -> URL? {
         guard let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
             return nil
         }
