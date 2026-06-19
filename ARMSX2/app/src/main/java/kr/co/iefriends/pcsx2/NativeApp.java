@@ -90,7 +90,26 @@ public class NativeApp {
 	 * the UI layer should flag those.
 	 */
 	public static native void commitSettings();
+
+	/**
+	 * Live GS-only reconfigure for a running VM. Reloads the whole EmuCore/GS
+	 * section from the base settings layer and pushes it to the GS thread via
+	 * MTGS::ApplySettings WITHOUT the heavier VMManager::ApplySettings (no
+	 * CPU/JIT rebuild). Call after pushing EmuCore/GS keys via setSetting() so
+	 * renderer / hardware-fix / upscaling-fix changes apply mid-game. No-op
+	 * when the GS is closed — the keys still take effect on next launch.
+	 */
+	public static native void applyGSSettingsLive();
 	public static native int reloadPatches();
+
+	/**
+	 * Set which named patches/cheats are enabled (the [Patches]/[Cheats]
+	 * "Enable" list PCSX2 actually applies). Pass ALL of the game's entry names
+	 * for that category plus the selected subset; persisted, then call
+	 * {@link #reloadPatches()} to apply. Writing the .pnach file alone is NOT
+	 * enough — a patch is inert unless its name is enabled here.
+	 */
+	public static native void setEnabledPatches(boolean cheats, String[] allNames, String[] enabledNames);
 	public static native String getGameTitle(String path);
 	public static native String getGameSerial();
 	public static native String getGameCRC();
@@ -202,6 +221,8 @@ public class NativeApp {
 	public static native void renderUpscalemultiplier(float value);
 	public static native void renderMipmap(int value);
 	public static native void renderHalfpixeloffset(int value);
+	public static native void renderTvShader(int value);
+	public static native void renderShadeBoost(boolean enabled, int brightness, int contrast, int saturation, int gamma);
 	public static native void renderSoftware();
 	public static native void renderOpenGL();
 	public static native void renderVulkan();

@@ -28,6 +28,7 @@
 #include "ImGui/ImGuiManager.h"
 #include "common/Path.h"
 #include "common/MemorySettingsInterface.h"
+#include "common/SettingsWrapper.h"
 #include "pcsx2/INISettingsInterface.h"
 #include "SIO/Pad/Pad.h"
 #include "Input/InputManager.h"
@@ -116,14 +117,18 @@ static std::mutex s_window_mutex;
 // (but live) window fails cleanly instead of crashing.
 static ANativeWindow* s_acquired_window = nullptr;
 
-static MemorySettingsInterface s_settings_interface;
+// File-backed base settings store. V7 used MemorySettingsInterface here, which
+// made UI writes such as memory card slots, OSD toggles, and DEV9 options vanish
+// after a cold restart unless Kotlin also happened to mirror them.
+static std::unique_ptr<INISettingsInterface> s_settings_interface;
+static std::string s_settings_interface_path;
 // File-backed RetroAchievements credentials store. Holds Token (written by
 // rcheevos at Achievements.cpp:2018) AND Username (mirrored from BASE on
-// login so it survives restart — BASE itself is the in-memory
-// `s_settings_interface` and resets every launch). Path resolved in
-// Java_..._initialize once EmuFolders::DataRoot is known. Lazy-constructed
-// std::unique_ptr because INISettingsInterface needs a path at construction.
+// login so it survives restart). Path resolved in Java_..._initialize once
+// EmuFolders::DataRoot is known. Lazy-constructed std::unique_ptr because
+// INISettingsInterface needs a path at construction.
 static std::unique_ptr<INISettingsInterface> s_secrets_settings_interface;
+static std::string s_secrets_settings_interface_path;
 
 static JNIEnv env_main;
 
@@ -168,42 +173,37 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
     Log::SetConsoleOutputLevel(LOGLEVEL_DEBUG);
     // Font loading is handled by ImGuiManager::LoadFontData() using s_font_path fallback
 
-    bool _SettingsIsEmpty = s_settings_interface.IsEmpty();
-    if(_SettingsIsEmpty) {
-        // don't provide an ini path, or bother loading. we'll store everything in memory.
-        MemorySettingsInterface &si = s_settings_interface;
-        Host::Internal::SetBaseSettingsLayer(&si);
+    const std::string settings_path =
+        Path::Combine(EmuFolders::DataRoot, "PCSX2-Android.ini");
+    if (!s_settings_interface || s_settings_interface_path != settings_path)
+    {
+        s_settings_interface_path = settings_path;
+        s_settings_interface = std::make_unique<INISettingsInterface>(settings_path);
+        s_settings_interface->Load();
+        Host::Internal::SetBaseSettingsLayer(s_settings_interface.get());
+    }
 
+    const std::string secrets_path =
+        Path::Combine(EmuFolders::DataRoot, "achievements.ini");
+    if (!s_secrets_settings_interface || s_secrets_settings_interface_path != secrets_path)
+    {
         // Build the secrets layer file-backed at <DataRoot>/achievements.ini.
         // Persists the RetroAchievements auth token across app launches so
         // the user doesn't have to log in every cold start. Path::Combine
         // handles the trailing-slash form for both system and app-private
         // DataRoot. Load() returns false when the file doesn't exist yet
-        // (first launch) — that's fine, the file gets created on first
-        // Save() inside ClientLoginWithPasswordCallback.
-        const std::string secrets_path =
-            Path::Combine(EmuFolders::DataRoot, "achievements.ini");
+        // (first launch) — that's fine, the file gets created on first Save().
+        s_secrets_settings_interface_path = secrets_path;
         s_secrets_settings_interface =
             std::make_unique<INISettingsInterface>(secrets_path);
         s_secrets_settings_interface->Load();
         Host::Internal::SetSecretsSettingsLayer(s_secrets_settings_interface.get());
+    }
 
+    INISettingsInterface& si = *s_settings_interface;
+    const bool _SettingsIsEmpty = si.IsEmpty();
+    if(_SettingsIsEmpty) {
         VMManager::SetDefaultSettings(si, true, true, true, true, true);
-
-        // Mirror Username from secrets → BASE so Achievements::Initialize's
-        // GetBaseStringSettingValue("Achievements","Username") finds it on
-        // a returning user. We co-store Username in achievements.ini at
-        // login time (see Java_..._loginAchievements below) — without this
-        // re-push, Initialize would have a Token but no Username, fail the
-        // username.empty() guard at Achievements.cpp:608, and skip the
-        // token-relogin path. User would still be "logged in" per the
-        // overlay panel (which falls back to settings layer reads), but
-        // s_client wouldn't be bound and game-side achievement loading
-        // wouldn't fire.
-        const std::string saved_user = s_secrets_settings_interface->GetStringValue(
-            "Achievements", "Username", "");
-        if (!saved_user.empty())
-            Host::SetBaseStringSettingValue("Achievements", "Username", saved_user.c_str());
 
         // FrameLimitEnable is inert in this fork (no read site outside a
         // commented MTGS check). Frame pacing is driven by SetLimiterMode at
@@ -295,6 +295,20 @@ Java_kr_co_iefriends_pcsx2_NativeApp_initialize(JNIEnv *env, jclass clazz,
 //            si.SetStringValue("MemoryCards", fmt::format("Slot{}_Filename", i + 1).c_str(), "");
 //        }
     }
+
+    if (!_szBiosFolder.empty())
+        si.SetStringValue("Folders", "Bios", _szBiosFolder.c_str());
+
+    // Mirror Username from secrets → BASE so Achievements::Initialize's
+    // GetBaseStringSettingValue("Achievements","Username") finds it on a
+    // returning user even after the base settings layer is loaded from disk.
+    const std::string saved_user = s_secrets_settings_interface->GetStringValue(
+        "Achievements", "Username", "");
+    if (!saved_user.empty())
+        si.SetStringValue("Achievements", "Username", saved_user.c_str());
+
+    if (si.IsDirty())
+        si.Save();
 
     VMManager::Internal::LoadStartupSettings();
 
@@ -743,7 +757,9 @@ static void LogAndroidGSSettings(const char* reason)
 {
     Console.WriteLnFmt(
         "@@ANDROID_GS_SETTINGS@@ reason={} renderer={} ir={:.2f} "
-        "mipmap={} blend={} filter={} preloading={} af={} tri={} hpo={} atfl={}",
+        "mipmap={} blend={} filter={} preloading={} tv={} shade={} "
+        "sb={}/{}/{}/{} userhacks={} af={} tri={} hpo={} atfl={} "
+        "limit24={} texrt={} native_scaling={} bilinear={}",
         reason,
         static_cast<int>(EmuConfig.GS.Renderer),
         EmuConfig.GS.UpscaleMultiplier,
@@ -751,10 +767,21 @@ static void LogAndroidGSSettings(const char* reason)
         static_cast<int>(EmuConfig.GS.AccurateBlendingUnit),
         static_cast<int>(EmuConfig.GS.TextureFiltering),
         static_cast<int>(EmuConfig.GS.TexturePreloading),
+        +EmuConfig.GS.TVShader,
+        +EmuConfig.GS.ShadeBoost,
+        +EmuConfig.GS.ShadeBoost_Brightness,
+        +EmuConfig.GS.ShadeBoost_Contrast,
+        +EmuConfig.GS.ShadeBoost_Saturation,
+        +EmuConfig.GS.ShadeBoost_Gamma,
+        +EmuConfig.GS.ManualUserHacks,
         static_cast<unsigned>(EmuConfig.GS.MaxAnisotropy),
         static_cast<int>(EmuConfig.GS.TriFilter),
         static_cast<int>(EmuConfig.GS.UserHacks_HalfPixelOffset),
-        static_cast<int>(EmuConfig.GS.UserHacks_AutoFlush));
+        static_cast<int>(EmuConfig.GS.UserHacks_AutoFlush),
+        static_cast<int>(EmuConfig.GS.UserHacks_Limit24BitDepth),
+        static_cast<int>(EmuConfig.GS.UserHacks_TextureInsideRt),
+        static_cast<int>(EmuConfig.GS.UserHacks_NativeScaling),
+        static_cast<int>(EmuConfig.GS.UserHacks_BilinearHack));
 }
 
 static void ApplyLiveGSSettingsIfOpen(const char* reason)
@@ -843,6 +870,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
     } else if (MTGS::IsOpen()) {
         MTGS::ApplySettings();
     }
+    if (s_settings_interface && s_settings_interface->IsDirty())
+        s_settings_interface->Save();
     LogAndroidGSSettings("commit");
 
     // Plumbing roundtrip verifier — once the UI starts pushing real
@@ -858,6 +887,83 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
         +EmuConfig.Speedhacks.vu1Instant,
         +EmuConfig.Speedhacks.fastCDVD,
         +EmuConfig.Speedhacks.vuFlagHack);
+}
+
+// Generic live GS reconfigure. Reloads the whole EmuCore/GS section from the
+// base settings layer into EmuConfig.GS, re-applies the user-hack masks the
+// core applies on load, then pushes the change to the GS thread — WITHOUT the
+// full VMManager::ApplySettings() CPU/JIT rebuild that commitSettings() does
+// (that heavy path is what caused ANRs when settings were scrubbed live). This
+// lets every renderer / hardware-fix / upscaling-fix setting apply mid-game,
+// the same way the desktop pause menu's GS settings do. The UI writes the
+// changed keys via setSetting() first, then calls this.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass clazz) {
+    // CRITICAL (Android stability): reloading the WHOLE EmuCore/GS section pulls
+    // the device-identity fields (Renderer/Adapter/…) from the base layer too —
+    // e.g. base "Auto" vs the already-resolved OpenGL the VM is running on. Any
+    // mismatch makes GSUpdateConfig take the full device teardown/recreate path
+    // (GSreopen(true,true), gated by GSOptions::RestartOptionsAreEqual), which is
+    // the one GS operation that crashes mid-game here. The narrow live setters
+    // (renderTvShader, …) are safe precisely because they never touch these.
+    // So snapshot the live device fields, reload, then restore them — only the
+    // safe in-place render / hardware-fix / upscaling-fix options end up changing.
+    const auto saved_renderer        = EmuConfig.GS.Renderer;
+    const auto saved_adapter         = EmuConfig.GS.Adapter;
+    const auto saved_debug_device    = EmuConfig.GS.UseDebugDevice;
+    const auto saved_blit_swap       = EmuConfig.GS.UseBlitSwapChain;
+    const auto saved_no_shader_cache = EmuConfig.GS.DisableShaderCache;
+    const auto saved_no_fb_fetch     = EmuConfig.GS.DisableFramebufferFetch;
+    const auto saved_no_vs_expand    = EmuConfig.GS.DisableVertexShaderExpand;
+    const auto saved_tex_barriers    = EmuConfig.GS.OverrideTextureBarriers;
+    const auto saved_depth_feedback  = EmuConfig.GS.DepthFeedbackMode;
+    const auto saved_hwaa1           = EmuConfig.GS.HWAA1;
+    const auto saved_exclusive_fs    = EmuConfig.GS.ExclusiveFullscreenControl;
+    const auto saved_sw_threads      = EmuConfig.GS.SWExtraThreads;
+    const auto saved_sw_threads_h    = EmuConfig.GS.SWExtraThreadsHeight;
+
+    {
+        auto lock = Host::GetSettingsLock();
+        SettingsInterface* si = Host::GetSettingsInterface();
+        if (!si)
+            return;
+        SettingsLoadWrapper slw(*si);
+        EmuConfig.GS.LoadSave(slw);
+    }
+
+    // Restore everything RestartOptionsAreEqual() compares (+ the SW-thread quick-
+    // reopen pair) so a live apply can NEVER trigger a device/renderer recreate.
+    EmuConfig.GS.Renderer                   = saved_renderer;
+    EmuConfig.GS.Adapter                    = saved_adapter;
+    EmuConfig.GS.UseDebugDevice             = saved_debug_device;
+    EmuConfig.GS.UseBlitSwapChain           = saved_blit_swap;
+    EmuConfig.GS.DisableShaderCache         = saved_no_shader_cache;
+    EmuConfig.GS.DisableFramebufferFetch    = saved_no_fb_fetch;
+    EmuConfig.GS.DisableVertexShaderExpand  = saved_no_vs_expand;
+    EmuConfig.GS.OverrideTextureBarriers    = saved_tex_barriers;
+    EmuConfig.GS.DepthFeedbackMode          = saved_depth_feedback;
+    EmuConfig.GS.HWAA1                       = saved_hwaa1;
+    EmuConfig.GS.ExclusiveFullscreenControl = saved_exclusive_fs;
+    EmuConfig.GS.SWExtraThreads             = saved_sw_threads;
+    EmuConfig.GS.SWExtraThreadsHeight       = saved_sw_threads_h;
+
+    // Mirror VMManager::LoadCoreSettings: strip user/upscaling hacks when their
+    // master toggles are off so stale keys can't leak through into the renderer.
+    EmuConfig.GS.MaskUserHacks();
+    EmuConfig.GS.MaskUpscalingHacks();
+
+    // Re-apply the active game's GameDB GS hardware fixes. LoadSave above only
+    // restored the user/base layer; per-game fixes (e.g. True Crime's
+    // textureInsideRT) apply on TOP of it in VMManager::ApplyGameFixes. Without
+    // this, a live GS settings change would wipe them and the game would break
+    // until the next launch. Mirrors ApplyGameFixes' GS portion.
+    if (const GameDatabaseSchema::GameEntry* game = GameDatabase::findGame(VMManager::GetDiscSerial()))
+    {
+        game->applyGSHardwareFixes(EmuConfig.GS);
+        EmuConfig.GS.MaskUpscalingHacks();
+    }
+    ApplyLiveGSSettingsIfOpen("ui_render_live");
 }
 
 extern "C"
@@ -877,6 +983,48 @@ Java_kr_co_iefriends_pcsx2_NativeApp_reloadPatches(JNIEnv *env, jclass clazz) {
     const u32 active_cheats = Patch::GetActiveCheatsCount();
     Console.WriteLnFmt("@@ANDROID_PNACH@@ reload active_cheats={}", active_cheats);
     return static_cast<jint>(active_cheats);
+}
+
+// jobjectArray<String> -> std::vector<std::string>.
+static std::vector<std::string> jStringArrayToVector(JNIEnv* env, jobjectArray arr) {
+    std::vector<std::string> out;
+    if (!arr)
+        return out;
+    const jsize n = env->GetArrayLength(arr);
+    out.reserve(static_cast<size_t>(n));
+    for (jsize i = 0; i < n; i++) {
+        jstring s = static_cast<jstring>(env->GetObjectArrayElement(arr, i));
+        out.push_back(GetJavaString(env, s));
+        if (s)
+            env->DeleteLocalRef(s);
+    }
+    return out;
+}
+
+// Set which named patches/cheats are ENABLED. PCSX2 only applies a patch whose
+// name is in the base [Patches]/[Cheats] "Enable" string list (Patch.cpp reads
+// it via Host::GetStringListSetting); writing the .pnach file alone does nothing.
+// The browser passes ALL of the current game's entry names plus the user's
+// selected subset: drop the game's names from the list then re-add the selected
+// ones (exact per-game state without disturbing other games), and Save so it
+// persists across reset/relaunch. Call reloadPatches() afterward to apply.
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_setEnabledPatches(
+    JNIEnv* env, jclass, jboolean cheats, jobjectArray allNames, jobjectArray enabledNames) {
+    const std::vector<std::string> all = jStringArrayToVector(env, allNames);
+    const std::vector<std::string> enabled = jStringArrayToVector(env, enabledNames);
+    const char* section = (cheats == JNI_TRUE) ? "Cheats" : "Patches";
+
+    auto lock = Host::GetSettingsLock();
+    SettingsInterface* si = Host::Internal::GetBaseSettingsLayer();
+    if (!si)
+        return;
+    for (const auto& n : all)
+        si->RemoveFromStringList(section, "Enable", n.c_str());
+    for (const auto& n : enabled)
+        si->AddToStringList(section, "Enable", n.c_str());
+    si->Save();
 }
 
 extern "C"
@@ -916,6 +1064,44 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderHalfpixeloffset(JNIEnv *env, jclass c
 
 extern "C"
 JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_renderTvShader(JNIEnv *env, jclass clazz,
+                                                    jint p_value) {
+    const int value = std::clamp(static_cast<int>(p_value), 0, 7);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "TVShader", value);
+    EmuConfig.GS.TVShader = static_cast<u8>(value);
+    ApplyLiveGSSettingsIfOpen("tv_shader");
+}
+
+extern "C"
+JNIEXPORT void JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_renderShadeBoost(JNIEnv *env, jclass clazz,
+                                                      jboolean p_enabled,
+                                                      jint p_brightness,
+                                                      jint p_contrast,
+                                                      jint p_saturation,
+                                                      jint p_gamma) {
+    const bool enabled = (p_enabled == JNI_TRUE);
+    const int brightness = std::clamp(static_cast<int>(p_brightness), 1, 100);
+    const int contrast = std::clamp(static_cast<int>(p_contrast), 1, 100);
+    const int saturation = std::clamp(static_cast<int>(p_saturation), 1, 100);
+    const int gamma = std::clamp(static_cast<int>(p_gamma), 1, 100);
+
+    Host::SetBaseBoolSettingValue("EmuCore/GS", "ShadeBoost", enabled);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "ShadeBoost_Brightness", brightness);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "ShadeBoost_Contrast", contrast);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "ShadeBoost_Saturation", saturation);
+    Host::SetBaseIntSettingValue("EmuCore/GS", "ShadeBoost_Gamma", gamma);
+
+    EmuConfig.GS.ShadeBoost = enabled;
+    EmuConfig.GS.ShadeBoost_Brightness = static_cast<u8>(brightness);
+    EmuConfig.GS.ShadeBoost_Contrast = static_cast<u8>(contrast);
+    EmuConfig.GS.ShadeBoost_Saturation = static_cast<u8>(saturation);
+    EmuConfig.GS.ShadeBoost_Gamma = static_cast<u8>(gamma);
+    ApplyLiveGSSettingsIfOpen("shadeboost");
+}
+
+extern "C"
+JNIEXPORT void JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_renderPreloading(JNIEnv *env, jclass clazz,
                                                       jint p_value) {
     const int value = std::clamp(static_cast<int>(p_value), 0,
@@ -938,6 +1124,13 @@ Java_kr_co_iefriends_pcsx2_NativeApp_renderSoftware(JNIEnv *env, jclass clazz) {
     // SetSoftwareRendering preserves the existing GSDevice (VK stays VK, OGL stays
     // OGL) and only swaps the renderer to SW. The picked backend remains the host
     // display device.
+    //
+    // Persist SW to the base layer too (like renderOpenGL/renderAuto) so the
+    // choice survives a cold boot — VMManager::ApplySettings reloads Renderer
+    // from the base SettingsInterface at VM init, so without this a selected
+    // "Software" would silently boot back into hardware.
+    Host::SetBaseIntSettingValue("EmuCore/GS", "Renderer",
+        static_cast<int>(GSRendererType::SW));
     EmuConfig.GS.Renderer = GSRendererType::SW;
     if(MTGS::IsOpen()) {
         MTGS::SetSoftwareRendering(true, EmuConfig.GS.InterlaceMode, false);
@@ -1229,7 +1422,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
     // fast_boot : (false:bios->game, true:game)
     VMBootParameters boot_params;
     boot_params.filename = _szPath;
-    boot_params.fast_boot = false;
+    boot_params.fast_boot = Host::GetBaseBoolSettingValue("EmuCore", "EnableFastBoot", false);
     Console.WriteLnFmt("@@ANDROID_RUNVM_PATH@@ empty={} path={}",
         _szPath.empty() ? 1 : 0, _szPath);
     Console.Error("Loading %s", _szPath.c_str());
@@ -2044,6 +2237,8 @@ Java_kr_co_iefriends_pcsx2_NativeApp_osdShowAll(JNIEnv*, jclass, jboolean enable
     Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowVersion", e);
     Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowSettings", e);
     Host::SetBaseBoolSettingValue("EmuCore/GS", "OsdShowInputs", e);
+    if (s_settings_interface && s_settings_interface->IsDirty())
+        s_settings_interface->Save();
 
     applyOsdSetting();
 }

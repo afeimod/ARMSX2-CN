@@ -91,6 +91,7 @@ fun RendererTab(state: MutableState<Settings>) {
             options = UPSCALE_OPTIONS.map { it.label },
             selectedIndex = upscaleIndex,
             columns = 4,
+            description = "Internal resolution. Higher values are sharper but can expose game-specific bloom or alignment artifacts.",
             onChange = { index ->
                 val mult = UPSCALE_OPTIONS[index].value
                 if (abs(Main.upscale.value - mult) >= 0.01f) {
@@ -105,6 +106,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Display Mode",
             options = listOf("Stretch", "Auto", "4:3", "16:9", "10:7"),
             selectedIndex = s.aspectRatio.coerceIn(0, 4),
+            description = "Controls how the PS2 image fits the screen.",
             onChange = { apply(s.copy(aspectRatio = it)) },
         )
         SettingsDivider()
@@ -116,6 +118,7 @@ fun RendererTab(state: MutableState<Settings>) {
             ),
             selectedIndex = s.deinterlaceMode.coerceIn(0, 9),
             columns = 5,
+            description = "Changes how interlaced video is displayed. Auto is safest.",
             onChange = { apply(s.copy(deinterlaceMode = it)) },
         )
         SettingsDivider()
@@ -123,6 +126,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Texture Filtering",
             options = listOf("Nearest", "Forced", "PS2", "Sprite"),
             selectedIndex = s.textureFiltering.coerceIn(0, 3),
+            description = "Controls texture smoothing. PS2 is safest; Forced can soften or brighten some games.",
             onChange = { apply(s.copy(textureFiltering = it)) },
         )
         SettingsDivider()
@@ -130,6 +134,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Texture Preloading",
             options = listOf("Off", "Partial", "Full"),
             selectedIndex = s.texturePreloading.coerceIn(0, 2),
+            description = "Preloads textures to avoid missing or late texture uploads. Full is the safe default.",
             onChange = { apply(s.copy(texturePreloading = it)) },
         )
         SettingsDivider()
@@ -138,28 +143,108 @@ fun RendererTab(state: MutableState<Settings>) {
             options = listOf("Accurate", "Force Full", "No Readbacks", "Unsync", "Disabled"),
             selectedIndex = s.hardwareDownloadMode.coerceIn(0, 4),
             columns = 3,
+            description = "Readback accuracy for effects that need GPU data. Faster modes may break effects.",
             onChange = { apply(s.copy(hardwareDownloadMode = it)) },
         )
         SettingsDivider()
-        ToggleRow("Load Texture Packs", s.loadTextureReplacements) {
+        SegmentedGridRow(
+            label = "CRT / TV Shader",
+            options = listOf("Off", "Scanline", "Diagonal", "Tri", "Wave", "Lottes", "4xRGSS", "NxAGSS"),
+            selectedIndex = s.tvShader.coerceIn(0, 7),
+            columns = 4,
+            description = "Post-process CRT/TV filters. Applies live on supported renderers.",
+            onChange = { apply(s.copy(tvShader = it)) },
+        )
+        SettingsDivider()
+        ToggleRow(
+            "Shadeboost",
+            s.shadeBoost,
+            description = "Post-process colour controls for brightness, contrast, saturation, and gamma.",
+        ) {
+            apply(s.copy(shadeBoost = it))
+        }
+        if (s.shadeBoost) {
+            SettingsDivider()
+            IntSliderRow(
+                label = "Brightness",
+                value = s.shadeBoostBrightness.coerceIn(1, 100),
+                min = 1,
+                max = 100,
+                description = "50 is normal.",
+                valueFormatter = { "$it%" },
+                onChange = { apply(s.copy(shadeBoostBrightness = it)) },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Contrast",
+                value = s.shadeBoostContrast.coerceIn(1, 100),
+                min = 1,
+                max = 100,
+                description = "50 is normal.",
+                valueFormatter = { "$it%" },
+                onChange = { apply(s.copy(shadeBoostContrast = it)) },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Saturation",
+                value = s.shadeBoostSaturation.coerceIn(1, 100),
+                min = 1,
+                max = 100,
+                description = "50 is normal.",
+                valueFormatter = { "$it%" },
+                onChange = { apply(s.copy(shadeBoostSaturation = it)) },
+            )
+            SettingsDivider()
+            IntSliderRow(
+                label = "Gamma",
+                value = s.shadeBoostGamma.coerceIn(1, 100),
+                min = 1,
+                max = 100,
+                description = "50 is normal.",
+                valueFormatter = { "$it%" },
+                onChange = { apply(s.copy(shadeBoostGamma = it)) },
+            )
+        }
+        SettingsDivider()
+        ToggleRow(
+            "Load Texture Packs",
+            s.loadTextureReplacements,
+            description = "Loads replacement textures from the active game's texture folder.",
+        ) {
             apply(s.copy(loadTextureReplacements = it))
         }
         SettingsDivider()
-        ToggleRow("Async Texture Loading", s.loadTextureReplacementsAsync) {
+        ToggleRow(
+            "Async Texture Loading",
+            s.loadTextureReplacementsAsync,
+            description = "Loads replacements in the background to reduce stalls.",
+        ) {
             apply(s.copy(loadTextureReplacementsAsync = it))
         }
         SettingsDivider()
-        ToggleRow("Precache Texture Packs", s.precacheTextureReplacements) {
+        ToggleRow(
+            "Precache Texture Packs",
+            s.precacheTextureReplacements,
+            description = "Scans replacements at boot. Slower startup, fewer in-game hitches.",
+        ) {
             apply(s.copy(precacheTextureReplacements = it))
         }
         SettingsDivider()
         TexturePackImportRow()
         SettingsDivider()
-        ToggleRow("Dump Replaceable Textures", s.dumpReplaceableTextures) {
+        ToggleRow(
+            "Dump Replaceable Textures",
+            s.dumpReplaceableTextures,
+            description = "Writes textures used by the game to disk for pack creation.",
+        ) {
             apply(s.copy(dumpReplaceableTextures = it))
         }
         SettingsDivider()
-        ToggleRow("Texture Pack OSD", s.osdShowTextureReplacements) {
+        ToggleRow(
+            "Texture Pack OSD",
+            s.osdShowTextureReplacements,
+            description = "Shows texture replacement status messages in-game.",
+        ) {
             apply(s.copy(osdShowTextureReplacements = it))
         }
         SettingsDivider()
@@ -167,24 +252,17 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Blending Accuracy",
             options = listOf("Min", "Basic", "Med", "High", "Full", "Max"),
             selectedIndex = s.accurateBlendingUnit.coerceIn(0, 5),
+            description = "Controls alpha/blending precision. Basic is faster; higher can fix effects.",
             onChange = { apply(s.copy(accurateBlendingUnit = it)) },
         )
+        // Hardware & upscaling compatibility fixes now live in the dedicated
+        // "Fixes" tab (FixesTab) to keep Render focused on quality/display.
         SettingsDivider()
-        SegmentedRow(
-            label = "Auto Flush",
-            options = listOf("Off", "Sprites", "On"),
-            selectedIndex = s.autoFlush.coerceIn(0, 2),
-            onChange = { apply(s.copy(autoFlush = it)) },
-        )
-        SettingsDivider()
-        SegmentedRow(
-            label = "Half-Pixel Offset",
-            options = listOf("Off", "Normal", "Special", "Aggr.", "Native", "NW-Tex"),
-            selectedIndex = s.halfPixelOffset.coerceIn(0, 5),
-            onChange = { apply(s.copy(halfPixelOffset = it)) },
-        )
-        SettingsDivider()
-        ToggleRow("HW Mipmapping", s.hwMipmap) {
+        ToggleRow(
+            "HW Mipmapping",
+            s.hwMipmap,
+            description = "Uses mipmaps in hardware renderers. Can fix texture shimmer or broken effects.",
+        ) {
             apply(s.copy(hwMipmap = it))
         }
         SettingsDivider()
@@ -195,6 +273,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Trilinear",
             options = triLabels,
             selectedIndex = triIdx,
+            description = "Mip texture filtering. Auto is safest for compatibility.",
             onChange = { apply(s.copy(triFilter = it - 1)) },
         )
         SettingsDivider()
@@ -205,6 +284,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Anisotropic",
             options = anisoLabels,
             selectedIndex = anisoIdx,
+            description = "Sharpens angled textures. Higher values can cost GPU time.",
             onChange = { apply(s.copy(maxAnisotropy = anisoVals[it])) },
         )
         SettingsDivider()
@@ -220,6 +300,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "GPU Profile",
             options = listOf("Auto", "Mali", "Adreno", "PowerVR"),
             selectedIndex = s.gpuProfile.coerceIn(0, 3),
+            description = "Overrides Android GPU workaround selection. Auto is recommended.",
             onChange = {
                 apply(s.copy(gpuProfile = it))
             },

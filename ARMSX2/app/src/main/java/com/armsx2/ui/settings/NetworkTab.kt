@@ -11,10 +11,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -41,9 +47,12 @@ fun NetworkTab(state: MutableState<Settings>) {
     val s = state.value
     val scroll = remember { ScrollState(0) }
     val adapters = remember { enumerateAdapters() }
-    val apiValues = listOf("Unset", "PCAP Bridged", "PCAP Switched", "Sockets")
-    val apiLabels = listOf("Unset", "PCAP Br.", "PCAP Sw.", "Sockets")
+    val apiValues = listOf("Unset", "PCAP Bridged", "PCAP Switched", "TAP", "Sockets")
+    val apiLabels = listOf("Unset", "PCAP Br.", "PCAP Sw.", "TAP", "Sockets")
     val apiIndex = apiValues.indexOf(s.dev9EthApi).let { if (it >= 0) it else apiValues.lastIndex }
+    val dnsModes = listOf("Manual", "Auto", "Internal")
+    val dns1Index = dnsModes.indexOf(s.dev9ModeDns1).let { if (it >= 0) it else 1 }
+    val dns2Index = dnsModes.indexOf(s.dev9ModeDns2).let { if (it >= 0) it else 1 }
 
     fun apply(updated: Settings) = InGameOverlay.saveSettings(updated)
 
@@ -58,6 +67,7 @@ fun NetworkTab(state: MutableState<Settings>) {
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
+        HelpText("Sockets + Auto is the normal Android setup. Advanced fields mirror PCSX2's DEV9 INI keys for games that need custom DHCP/DNS behavior.")
 
         ToggleRow("Enable DEV9 Ethernet", s.dev9EthEnable) {
             val currentDevice = s.dev9EthDevice.ifEmpty { "Auto" }
@@ -83,6 +93,60 @@ fun NetworkTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(dev9EthDevice = it.ifEmpty { "Auto" })) },
         )
         SettingsDivider()
+        ToggleRow("Intercept DHCP", s.dev9InterceptDhcp) {
+            apply(s.copy(dev9InterceptDhcp = it))
+        }
+        SettingsDivider()
+        ToggleRow("Auto Subnet Mask", s.dev9AutoMask) {
+            apply(s.copy(dev9AutoMask = it))
+        }
+        SettingsDivider()
+        ToggleRow("Auto Gateway", s.dev9AutoGateway) {
+            apply(s.copy(dev9AutoGateway = it))
+        }
+        SettingsDivider()
+        SegmentedRow(
+            label = "Primary DNS",
+            options = dnsModes,
+            selectedIndex = dns1Index,
+            onChange = { apply(s.copy(dev9ModeDns1 = dnsModes[it])) },
+        )
+        SettingsDivider()
+        SegmentedRow(
+            label = "Secondary DNS",
+            options = dnsModes,
+            selectedIndex = dns2Index,
+            onChange = { apply(s.copy(dev9ModeDns2 = dnsModes[it])) },
+        )
+        SettingsDivider()
+        EditableTextRow("PS2 IP", s.dev9Ps2Ip) {
+            apply(s.copy(dev9Ps2Ip = it.ifEmpty { "0.0.0.0" }))
+        }
+        SettingsDivider()
+        EditableTextRow("Subnet Mask", s.dev9Mask) {
+            apply(s.copy(dev9Mask = it.ifEmpty { "0.0.0.0" }))
+        }
+        SettingsDivider()
+        EditableTextRow("Gateway", s.dev9Gateway) {
+            apply(s.copy(dev9Gateway = it.ifEmpty { "0.0.0.0" }))
+        }
+        SettingsDivider()
+        EditableTextRow("DNS 1", s.dev9Dns1) {
+            apply(s.copy(dev9Dns1 = it.ifEmpty { "0.0.0.0" }))
+        }
+        SettingsDivider()
+        EditableTextRow("DNS 2", s.dev9Dns2) {
+            apply(s.copy(dev9Dns2 = it.ifEmpty { "0.0.0.0" }))
+        }
+        SettingsDivider()
+        ToggleRow("Log DHCP", s.dev9EthLogDhcp) {
+            apply(s.copy(dev9EthLogDhcp = it))
+        }
+        SettingsDivider()
+        ToggleRow("Log DNS", s.dev9EthLogDns) {
+            apply(s.copy(dev9EthLogDns = it))
+        }
+        SettingsDivider()
         ToggleRow("Enable DEV9 Virtual HDD", s.dev9HddEnable) {
             apply(s.copy(dev9HddEnable = it, dev9HddFile = s.dev9HddFile.ifEmpty { "DEV9hdd.raw" }))
         }
@@ -90,6 +154,54 @@ fun NetworkTab(state: MutableState<Settings>) {
         HddFileRow(
             fileName = s.dev9HddFile.ifEmpty { "DEV9hdd.raw" },
             onReset = { apply(s.copy(dev9HddFile = "DEV9hdd.raw")) },
+        )
+    }
+}
+
+@Composable
+private fun EditableTextRow(label: String, value: String, onChange: (String) -> Unit) {
+    var editing by remember(label) { mutableStateOf(false) }
+    var draft by remember(label, value) { mutableStateOf(value.ifEmpty { "0.0.0.0" }) }
+    if (editing) {
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text(label) },
+            text = {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    singleLine = true,
+                    label = { Text("Address") },
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onChange(draft.trim())
+                    editing = false
+                }) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(onClick = { editing = false }) { Text("Cancel") }
+            },
+        )
+    }
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(24.dp)
+            .background(rowAura())
+            .clickable { editing = true }
+            .padding(horizontal = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
+        Text(
+            value.ifEmpty { "0.0.0.0" },
+            color = Color(0xFFCCCCCC),
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
     }
 }

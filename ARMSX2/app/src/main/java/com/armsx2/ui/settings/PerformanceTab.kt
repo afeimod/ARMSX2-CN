@@ -46,6 +46,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
             value = s.eeCycleRate,
             min = -3,
             max = 3,
+            description = "CPU overclock/underclock. Higher can help CPU-bound games but may break timing.",
             valueFormatter = { rate ->
                 when (rate) {
                     -3 -> "50%"
@@ -66,6 +67,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
             value = s.eeCycleSkip,
             min = 0,
             max = 3,
+            description = "Skips EE cycles for speed. Can cause stutter, physics bugs, or crashes.",
             onChange = { apply(s.copy(eeCycleSkip = it)) },
         )
         SettingsDivider()
@@ -76,14 +78,54 @@ fun PerformanceTab(state: MutableState<Settings>) {
             val speedPresets = listOf(25, 50, 75, 100, 150, 200, 300)
             val idx = speedPresets.indexOf(s.nominalSpeedPercent).let { if (it < 0) 3 else it }
             IntSliderRow(
-                label = "Speed Limit",
+                label = "FPS / Speed Limit",
                 value = idx,
                 min = 0,
                 max = speedPresets.size - 1,
+                description = "Caps emulation speed as a percent of the game's native rate.",
                 valueFormatter = { "${speedPresets[it]}%" },
                 onChange = { apply(s.copy(nominalSpeedPercent = speedPresets[it])) },
             )
         }
+        SettingsDivider()
+        HelpText("Compatibility shortcuts. Leave Game Fixes off unless a game needs one of the fixes below.")
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            BubbleGridRow {
+                ToggleBubble("Skip BIOS", s.enableFastBoot, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableFastBoot = it))
+                }
+                ToggleBubble("Game Fixes", s.enableGameFixes, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = it))
+                }
+                ToggleBubble("Skip MPEG", s.gamefixSkipMpeg, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixSkipMpeg = it))
+                }
+                ToggleBubble("FMV Software", s.gamefixSoftwareRendererFmv, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixSoftwareRendererFmv = it))
+                }
+            }
+            BubbleGridRow {
+                ToggleBubble("EE Timing", s.gamefixEETiming, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixEETiming = it))
+                }
+                ToggleBubble("Instant DMA", s.gamefixInstantDma, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixInstantDma = it))
+                }
+                ToggleBubble("Blit FPS", s.gamefixBlitInternalFps, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixBlitInternalFps = it))
+                }
+                Spacer(Modifier.weight(1f))
+            }
+        }
+        HelpText(
+            "Skip BIOS - bypasses the PS2 startup screen.\n" +
+                "Game Fixes - master switch for manual compatibility fixes.\n" +
+                "Skip MPEG - skips problematic video playback.\n" +
+                "FMV Software - switches FMVs to software rendering.\n" +
+                "EE Timing - adjusts CPU timing for sensitive games.\n" +
+                "Instant DMA - completes DMA transfers immediately.\n" +
+                "Blit FPS - uses PCSX2's internal FPS blit workaround."
+        )
         SettingsDivider()
         Spacer(Modifier.height(8.dp))
         // On/Off toggles as a 4-wide bubble grid, matching the Playing-Now

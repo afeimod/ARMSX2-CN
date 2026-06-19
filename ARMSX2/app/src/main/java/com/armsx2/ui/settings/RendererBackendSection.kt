@@ -68,8 +68,8 @@ fun RendererBackendSection() {
     val context = androidx.compose.ui.platform.LocalContext.current
     val scope = rememberCoroutineScope()
 
-    val rendererIds = listOf("auto", "opengl", "vulkan")
-    val rendererLabels = listOf("Auto", "OpenGL", "Vulkan")
+    val rendererIds = listOf("auto", "opengl", "vulkan", "software")
+    val rendererLabels = listOf("Auto", "OpenGL", "Vulkan", "Software")
     val currentRenderer = Main.renderer.value
     val selIdx = rendererIds.indexOf(currentRenderer).coerceAtLeast(0)
 

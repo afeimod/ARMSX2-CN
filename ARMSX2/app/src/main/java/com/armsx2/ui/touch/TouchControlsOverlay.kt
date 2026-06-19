@@ -6,6 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -57,8 +58,10 @@ import com.armsx2.ui.WindowImpl
 import compose.icons.LineAwesomeIcons
 import compose.icons.lineawesomeicons.CogSolid
 import kr.co.iefriends.pcsx2.NativeApp
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.hypot
+import kotlin.math.max
 import kotlin.math.min
 
 /** Root entry point. Place this in the same fillMaxSize() container as
@@ -91,13 +94,36 @@ fun TouchControlsOverlay() {
             OverlayDims.last = OverlayDims.Dims(widthPx, heightPx)
         }
         val layout = TouchControls.activeLayout.value
+        var facePressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
 
         if (!edit) {
-            InGameSettingsButton(
+            var showSettingsCog by remember { mutableStateOf(false) }
+            LaunchedEffect(showSettingsCog) {
+                if (showSettingsCog) {
+                    delay(3000)
+                    showSettingsCog = false
+                }
+            }
+            Box(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .padding(14.dp),
+                    .size(74.dp)
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                    ) { showSettingsCog = true },
             )
+            if (showSettingsCog) {
+                InGameSettingsButton(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(14.dp),
+                    onClick = {
+                        showSettingsCog = false
+                        InGameOverlay.open()
+                    },
+                )
+            }
         }
 
         val showPad = TouchControls.visible.value || edit
@@ -144,6 +170,10 @@ fun TouchControlsOverlay() {
             )
         }
 
+        val faceMulti = !edit && TouchControls.faceMultiTouch.value
+        if (!faceMulti && facePressed.isNotEmpty()) {
+            facePressed = emptySet()
+        }
         for (cfg in layout.buttons) {
             if (!cfg.enabled && !edit) continue
             val size = cfg.sizeDp.dp
@@ -160,10 +190,26 @@ fun TouchControlsOverlay() {
                     TouchButtonId.Kind.DPAD -> DpadWidget(cfg, edit)
                     TouchButtonId.Kind.STICK -> StickWidget(cfg, edit)
                     TouchButtonId.Kind.PAUSE -> PauseWidget(cfg, edit)
-                    else -> ButtonWidget(cfg, edit)
+	                    else -> ButtonWidget(
+	                        cfg = cfg,
+	                        edit = edit,
+	                        inputEnabled = !(faceMulti && cfg.id.kind == TouchButtonId.Kind.FACE),
+	                        forcedPressed = faceMulti && cfg.id in facePressed,
+	                    )
                 }
             }
         }
+
+        if (faceMulti) {
+            FaceMultiTouchLayer(
+	                buttons = layout.buttons.filter {
+	                    it.enabled && it.id.kind == TouchButtonId.Kind.FACE
+	                },
+	                widthPx = widthPx,
+	                heightPx = heightPx,
+	                onPressedChange = { facePressed = it },
+	            )
+	        }
 
         if (edit) {
             EditToolbar(
@@ -184,14 +230,14 @@ fun TouchControlsOverlay() {
 /* -------------------------------------------------------------------- */
 
 @Composable
-private fun InGameSettingsButton(modifier: Modifier = Modifier) {
+private fun InGameSettingsButton(modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier = modifier
             .size(38.dp)
             .clip(CircleShape)
             .background(Color(0xFF111111).copy(alpha = 0.55f))
             .border(1.dp, Color.White.copy(alpha = 0.20f), CircleShape)
-            .clickable { InGameOverlay.open() },
+            .clickable { onClick() },
         contentAlignment = Alignment.Center,
     ) {
         Icon(
@@ -208,14 +254,21 @@ private fun InGameSettingsButton(modifier: Modifier = Modifier) {
 /* -------------------------------------------------------------------- */
 
 @Composable
-private fun ButtonWidget(cfg: TouchButtonCfg, edit: Boolean) {
-    var pressed by remember(cfg.id) { mutableStateOf(false) }
+private fun ButtonWidget(
+    cfg: TouchButtonCfg,
+    edit: Boolean,
+    inputEnabled: Boolean = true,
+    forcedPressed: Boolean = false,
+) {
+    var localPressed by remember(cfg.id) { mutableStateOf(false) }
+    val pressed = forcedPressed || localPressed
     val opacity = TouchControls.opacity.value
     val mod = Modifier
         .fillMaxSize()
         .let {
             if (edit) it.editGestures(cfg)
-            else it.pressGestures(cfg.id.keycode) { p -> pressed = p }
+            else if (inputEnabled) it.pressGestures(cfg.id.keycode) { p -> localPressed = p }
+            else it
         }
     // Pressed feedback: every button shrinks a hair AND darkens.
     // - Buttons with a pressed sprite (most) get the darken via the
@@ -280,6 +333,104 @@ private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK,
     TouchButtonId.PAUSE -> R.drawable.pad_cross
 }
+
+@Composable
+private fun FaceMultiTouchLayer(
+    buttons: List<TouchButtonCfg>,
+    widthPx: Float,
+    heightPx: Float,
+    onPressedChange: (Set<TouchButtonId>) -> Unit,
+) {
+    if (buttons.isEmpty() || widthPx <= 0f || heightPx <= 0f) return
+    val density = LocalDensity.current
+    val buttonRects = buttons.map { cfg ->
+        val sizePx = with(density) { cfg.sizeDp.dp.toPx() }
+        val cx = widthPx * cfg.xFrac
+        val cy = heightPx * cfg.yFrac
+        FaceHit(
+            id = cfg.id,
+            cx = cx,
+            cy = cy,
+            radius = sizePx * 0.62f,
+            left = cx - sizePx / 2f,
+            top = cy - sizePx / 2f,
+            right = cx + sizePx / 2f,
+            bottom = cy + sizePx / 2f,
+        )
+    }
+    val padPx = with(density) { 18.dp.toPx() }
+    val leftPx = buttonRects.minOf { it.left } - padPx
+    val topPx = buttonRects.minOf { it.top } - padPx
+    val rightPx = buttonRects.maxOf { it.right } + padPx
+    val bottomPx = buttonRects.maxOf { it.bottom } + padPx
+    val layerWidth = max(1f, rightPx - leftPx)
+    val layerHeight = max(1f, bottomPx - topPx)
+
+    Box(
+        modifier = Modifier
+            .offset(
+                x = with(density) { leftPx.toDp() },
+                y = with(density) { topPx.toDp() },
+            )
+            .size(
+                width = with(density) { layerWidth.toDp() },
+                height = with(density) { layerHeight.toDp() },
+            )
+            .pointerInput(buttonRects, leftPx, topPx) {
+                var pressed = emptySet<TouchButtonId>()
+                fun updatePressed(next: Set<TouchButtonId>) {
+                    if (pressed == next) return
+                    pressed = next
+                    onPressedChange(next)
+                }
+                fun hits(local: Offset): Set<TouchButtonId> {
+                    val gx = leftPx + local.x
+                    val gy = topPx + local.y
+                    return buttonRects
+                        .filter { hit ->
+                            val dx = gx - hit.cx
+                            val dy = gy - hit.cy
+                            dx * dx + dy * dy <= hit.radius * hit.radius
+                        }
+                        .map { it.id }
+                        .toSet()
+                }
+	                fun releaseAll() {
+	                    pressed.forEach { sendDigital(it.keycode, false) }
+	                    updatePressed(emptySet())
+	                }
+                awaitPointerEventScope {
+                    try {
+                        while (true) {
+                            val ev = awaitPointerEvent()
+                            val next = ev.changes
+                                .filter { it.pressed }
+                                .flatMap { hits(it.position) }
+                                .toSet()
+	                            (pressed - next).forEach { sendDigital(it.keycode, false) }
+	                            (next - pressed).forEach { sendDigital(it.keycode, true) }
+	                            if (next.isNotEmpty() || pressed.isNotEmpty())
+	                                ev.changes.forEach { it.consume() }
+	                            updatePressed(next)
+	                        }
+                    } finally {
+                        releaseAll()
+                    }
+                }
+            },
+    )
+}
+
+private data class FaceHit(
+    val id: TouchButtonId,
+    val cx: Float,
+    val cy: Float,
+    val radius: Float,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+)
 
 /* -------------------------------------------------------------------- */
 /*  Pause hotspot — invisible long-press zone that opens the overlay    */
@@ -722,6 +873,9 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             }
             ToolbarChip("Reset") { TouchControls.resetActiveToDefault() }
             ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
+            ToolbarChip(if (TouchControls.faceMultiTouch.value) "Face Multi On" else "Face Multi Off") {
+                TouchControls.setFaceMultiTouch(!TouchControls.faceMultiTouch.value)
+            }
         }
         // Opacity slider — controls the live HUD alpha so the user sees
         // the change immediately while editing. Range 0.20..1.00 mirrors

@@ -37,9 +37,18 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material3.Checkbox
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.rememberCoroutineScope
 import com.armsx2.EmuState
 import com.armsx2.Main
+import com.armsx2.PatchRepo
 import com.armsx2.config.Settings
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import com.armsx2.ui.Colors
 import com.armsx2.ui.InGameOverlay
 import kr.co.iefriends.pcsx2.NativeApp
@@ -163,16 +172,31 @@ fun PatchesTab(state: MutableState<Settings>) {
     val activeGameId = activePnachGameId()
 
     val cheatsDir = remember { File(Main.assetCopyRoot(context), "cheats").apply { mkdirs() } }
-    fun listPnach(): List<String> =
-        cheatsDir.listFiles()
-            ?.filter { it.isFile && it.name.endsWith(".pnach", ignoreCase = true) }
-            ?.map { it.name }
-            ?.sorted()
-            ?: emptyList()
-    var pnachFiles: List<String> by remember { mutableStateOf(listPnach()) }
+    // Loose patches load from <DataRoot>/patches (EmuFolders::Patches); cheats
+    // from <DataRoot>/cheats. Downloaded files land in the matching dir.
+    val patchesDir = remember { File(Main.assetCopyRoot(context), "patches").apply { mkdirs() } }
+    // List both folders so the manager shows everything that's installed (and
+    // lets the user confirm a browse actually wrote files).
+    fun listPnach(): List<File> =
+        listOf(patchesDir, cheatsDir)
+            .flatMap { it.listFiles()?.toList() ?: emptyList() }
+            .filter { it.isFile && it.name.endsWith(".pnach", ignoreCase = true) }
+            .sortedBy { it.name.lowercase() }
+    var pnachFiles: List<File> by remember { mutableStateOf(listPnach()) }
     fun refresh() { pnachFiles = listPnach() }
     var pnachStatus by remember { mutableStateOf("") }
     var showManualDialog by remember { mutableStateOf(false) }
+    var showPatchWarning by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var browseResult by remember { mutableStateOf<PatchRepo.Result?>(null) }
+    // Game the open browser results belong to (running game, or a library game
+    // picked before launch). Drives the saved file name so emucore loads it.
+    var browseGameId by remember { mutableStateOf<PnachGameId?>(null) }
+    val selected = remember { mutableStateMapOf<Int, Boolean>() } // entry index -> checked
+    val scope = rememberCoroutineScope()
+    // Game whose settings were opened from the library via long-press (null
+    // when a game is actually running). Lets us browse before booting.
+    val libraryGame = InGameOverlay.patchPreviewGame
 
     fun apply(updated: Settings) = InGameOverlay.saveSettings(updated)
     fun activateCheatsAndReload(): Int {
@@ -197,6 +221,102 @@ fun PatchesTab(state: MutableState<Settings>) {
             else ->
                 "$action $savedName. Reload skipped; restart the game to load it."
         }
+
+    // Fetch + parse this game's patch/cheat entries from the PCSX2 database,
+    // then open the per-entry browser dialog. Works two ways:
+    //   • in-game  — exact serial+CRC are known, fetch the file directly.
+    //   • library  — a game was long-pressed but not booted; we only have its
+    //                serial, so look it up in the repo file tree by name (the
+    //                CRC comes back from the matched filename).
+    fun startBrowse() {
+        val running = activePnachGameId()
+        val librarySerial = libraryGame?.serial?.takeIf { it.isNotBlank() }
+        if ((running == null || running.crc.isBlank()) && librarySerial == null) {
+            pnachStatus = "Boot the game, or long-press it in your library, to browse its patches."
+            return
+        }
+        downloading = true
+        pnachStatus = "Searching the PCSX2 patch database…"
+        scope.launch(Dispatchers.IO) {
+            val res = if (running != null && running.crc.isNotBlank())
+                PatchRepo.fetchForGame(running.serial, running.crc)
+            else
+                PatchRepo.fetchForSerial(librarySerial)
+            val gid = res.takeIf { it.error == null && it.crc.isNotBlank() }
+                ?.let { PnachGameId(it.serial.ifBlank { librarySerial ?: running?.serial ?: "" }, it.crc) }
+                ?: running
+            withContext(Dispatchers.Main) {
+                downloading = false
+                if (res.error != null) {
+                    pnachStatus = res.error
+                } else {
+                    selected.clear()
+                    browseGameId = gid
+                    browseResult = res
+                    pnachStatus = ""
+                }
+            }
+        }
+    }
+
+    // AetherSX2-style gate: warn before browsing/enabling patch codes unless the
+    // user opted out ("Don't ask again").
+    fun onDownloadClick() {
+        if (downloading) return
+        if (Main.prefs.getBoolean("patchCodesWarnAck", false)) startBrowse()
+        else showPatchWarning = true
+    }
+
+    // Write ONLY the checked entries to disk, with their [labels] flattened to
+    // comments so the patch= lines auto-run as unlabelled legacy PNACH. PCSX2
+    // auto-enables unlabelled patches (Patch.cpp), so this activates exactly the
+    // selected items and persists across reset — no [Patches]/[Cheats] "Enable"
+    // list needed (that path doesn't survive on Android). Deselecting all for a
+    // category removes its file. This is the same mechanism the manual importer
+    // uses, which is why it reliably takes effect.
+    fun applySelected() {
+        val res = browseResult ?: return
+        val gid = browseGameId
+        val chosen = res.entries.filterIndexed { i, _ -> selected[i] == true }
+        browseResult = null
+        val base = gid?.let { if (it.serial.isNotBlank()) "${it.serial}_${it.crc}" else it.crc }
+            ?.ifBlank { null } ?: "patch"
+        var anyCheatChosen = false
+        val saved = runCatching {
+            listOf("patches", "cheats").forEach { source ->
+                val picked = chosen.filter { it.source == source }
+                val dir = if (source == "cheats") cheatsDir else patchesDir
+                val file = File(dir, "$base.pnach")
+                if (picked.isEmpty()) {
+                    file.delete() // nothing selected here -> turn it off
+                    return@forEach
+                }
+                if (source == "cheats") anyCheatChosen = true
+                file.writeText(buildString {
+                    if (res.gametitle.isNotEmpty()) append("gametitle=").append(res.gametitle).append("\n\n")
+                    picked.forEach { append(executablePnachBody(it.body)).append("\n\n") }
+                })
+            }
+        }
+        if (saved.isFailure) {
+            pnachStatus = "Save failed: ${saved.exceptionOrNull()?.message ?: "unknown error"}"
+            return
+        }
+        if (!state.value.enablePatches) apply(state.value.copy(enablePatches = true))
+        NativeApp.setSetting("EmuCore", "EnablePatches", "bool", "true")
+        val active = if (anyCheatChosen) activateCheatsAndReload() else {
+            NativeApp.commitSettings()
+            NativeApp.reloadPatches()
+        }
+        pnachStatus = when {
+            chosen.isEmpty() -> "Cleared all patches for ${gid?.serial ?: "this game"}."
+            Main.eState.value == EmuState.STOPPED ->
+                "Saved ${chosen.size} item${if (chosen.size == 1) "" else "s"} for ${gid?.serial ?: "this game"}. Start the game to load them."
+            else ->
+                "Enabled ${chosen.size} item${if (chosen.size == 1) "" else "s"} ($active live). Restart the game to (re)load boot-time patches."
+        }
+        refresh()
+    }
 
     val importLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -253,6 +373,82 @@ fun PatchesTab(state: MutableState<Settings>) {
         )
     }
 
+    if (showPatchWarning) {
+        AlertDialog(
+            onDismissRequest = { showPatchWarning = false },
+            title = { Text("Patch codes") },
+            text = {
+                Text(
+                    "Using patch codes can have unpredictable effects on games, causing " +
+                        "crashes, graphical glitches, and corrupted saves. By using patch " +
+                        "codes, you agree that it is an unsupported configuration, and we " +
+                        "will not provide you with any assistance when games break.\n\n" +
+                        "Some codes persist through save states even after being disabled, " +
+                        "please remember to reset/reboot the game after turning off any " +
+                        "codes.\n\nAre you sure you want to continue?",
+                    fontSize = 13.sp,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { showPatchWarning = false; startBrowse() }) { Text("YES") }
+            },
+            dismissButton = {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    TextButton(onClick = {
+                        Main.prefs.edit().putBoolean("patchCodesWarnAck", true).apply()
+                        showPatchWarning = false
+                        startBrowse()
+                    }) { Text("DON'T ASK AGAIN") }
+                    TextButton(onClick = { showPatchWarning = false }) { Text("NO") }
+                }
+            },
+        )
+    }
+
+    browseResult?.let { res ->
+        AlertDialog(
+            onDismissRequest = { browseResult = null },
+            title = {
+                Text(
+                    if (res.gametitle.isNotEmpty()) res.gametitle else "Patches & cheats",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                )
+            },
+            text = {
+                Column(modifier = Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        TextButton(onClick = { res.entries.indices.forEach { selected[it] = true } }) { Text("Select all") }
+                        TextButton(onClick = { selected.clear() }) { Text("None") }
+                    }
+                    res.entries.forEachIndexed { i, e ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { selected[i] = !(selected[i] ?: false) }
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Checkbox(checked = selected[i] == true, onCheckedChange = { selected[i] = it })
+                            Column(modifier = Modifier.weight(1f).padding(start = 4.dp)) {
+                                Text(e.name, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                                Text(
+                                    listOfNotNull(e.description.takeIf { it.isNotEmpty() }, "[${e.source}]").joinToString("  •  "),
+                                    fontSize = 10.sp,
+                                    color = Color(0xFF9A9A9A),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton(onClick = { applySelected() }) { Text("APPLY") } },
+            dismissButton = { TextButton(onClick = { browseResult = null }) { Text("CANCEL") } },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -279,15 +475,18 @@ fun PatchesTab(state: MutableState<Settings>) {
 
         // ---- PNACH importer ----
         Text(
-            "Cheat files (.pnach)",
+            "Installed patches & cheats (.pnach)",
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.padding(top = 6.dp, bottom = 2.dp),
         )
         Text(
-            activeGameId?.let { "Active game: ${it.serial} / CRC ${it.crc}" }
-                ?: "Start the target game first to auto-name PNACH files.",
+            when {
+                activeGameId != null -> "Active game: ${activeGameId.serial} / CRC ${activeGameId.crc}"
+                libraryGame?.serial?.isNotBlank() == true -> "Selected game: ${libraryGame.serial} — browse its patches below."
+                else -> "Start a game, or long-press one in your library, to browse its patches."
+            },
             color = Color(0xFF8C8C8C),
             fontSize = 10.sp,
             modifier = Modifier.padding(bottom = 4.dp),
@@ -298,6 +497,25 @@ fun PatchesTab(state: MutableState<Settings>) {
             fontSize = 10.sp,
             modifier = Modifier.padding(bottom = 4.dp),
         )
+        // Online fetch from the PCSX2 patch database (mirrors the GPU driver
+        // downloader). Gated by the AetherSX2 patch-codes warning.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(36.dp)
+                .background(rowAura())
+                .clickable(enabled = !downloading) { onDownloadClick() }
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Text(
+                if (downloading) "Fetching…" else "⤓  Browse patches & cheats online",
+                color = Colors.pasx2_blue,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Spacer(Modifier.height(6.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
@@ -335,13 +553,14 @@ fun PatchesTab(state: MutableState<Settings>) {
         }
         if (pnachFiles.isEmpty()) {
             Text(
-                "No cheat files imported yet.",
+                "No patch or cheat files installed yet.",
                 color = Color(0xFF8C8C8C),
                 fontSize = 11.sp,
                 modifier = Modifier.padding(vertical = 4.dp, horizontal = 4.dp),
             )
         } else {
-            pnachFiles.forEach { fileName ->
+            pnachFiles.forEach { file ->
+                val kind = if (file.parentFile?.name == "cheats") "cheat" else "patch"
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -350,7 +569,7 @@ fun PatchesTab(state: MutableState<Settings>) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
-                        fileName,
+                        "[$kind] ${file.name}",
                         color = Color(0xFFCCCCCC),
                         fontSize = 11.sp,
                         maxLines = 1,
@@ -364,7 +583,7 @@ fun PatchesTab(state: MutableState<Settings>) {
                         fontWeight = FontWeight.Bold,
                         modifier = Modifier
                             .clickable {
-                                runCatching { File(cheatsDir, fileName).delete() }
+                                runCatching { file.delete() }
                                 refresh()
                             }
                             .padding(start = 8.dp),

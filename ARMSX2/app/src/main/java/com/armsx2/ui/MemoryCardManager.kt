@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.armsx2.Main
+import com.armsx2.config.ConfigStore
 import java.io.File
 import java.io.FileOutputStream
 import kr.co.iefriends.pcsx2.NativeApp
@@ -308,6 +309,7 @@ object MemoryCardManager {
             NativeApp.setSetting("MemoryCards", "Slot${slot}_Filename", "string", file.name)
             NativeApp.setSetting("MemoryCards", "Slot${slot}_Enable", "bool", "true")
             NativeApp.commitSettings()
+            persistSlot(slot, file.name)
             status.value = "${file.name} assigned to Slot $slot."
             Toast.makeText(context, status.value, Toast.LENGTH_SHORT).show()
             return true
@@ -329,6 +331,34 @@ object MemoryCardManager {
         NativeApp.setSetting("MemoryCards", "Slot2_Filename", "string", "Mcd002.ps2")
         NativeApp.setSetting("MemoryCards", "Slot2_Enable", "bool", "true")
         NativeApp.commitSettings()
+        persistDefaultSlots()
+    }
+
+    private fun persistSlot(slot: Int, filename: String) {
+        val current = ConfigStore.loadGlobal()
+        val updated = when (slot) {
+            1 -> current.copy(
+                memoryCardSlot1Enabled = true,
+                memoryCardSlot1Filename = filename,
+            )
+            2 -> current.copy(
+                memoryCardSlot2Enabled = true,
+                memoryCardSlot2Filename = filename,
+            )
+            else -> current
+        }
+        ConfigStore.saveGlobal(updated)
+    }
+
+    private fun persistDefaultSlots() {
+        ConfigStore.saveGlobal(
+            ConfigStore.loadGlobal().copy(
+                memoryCardSlot1Enabled = true,
+                memoryCardSlot1Filename = "Mcd001.ps2",
+                memoryCardSlot2Enabled = true,
+                memoryCardSlot2Filename = "Mcd002.ps2",
+            )
+        )
     }
 
     private fun memcardsDir(context: Context): File =

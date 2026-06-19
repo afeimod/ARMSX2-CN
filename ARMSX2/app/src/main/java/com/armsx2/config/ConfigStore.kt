@@ -36,15 +36,29 @@ enum class SettingsScope { Global, Game }
 
 object ConfigStore {
     private const val KEY_GLOBAL = "config.global"
+    private const val KEY_BLEND_BASIC_MIGRATED = "config.migrated.blendBasic"
     private fun keyForGame(serial: String) = "config.game.$serial"
 
     fun loadGlobal(): Settings {
         val raw = Main.prefs.getString(KEY_GLOBAL, null) ?: return Settings()
-        return try {
+        val parsed = try {
             Settings.fromJson(JSONObject(raw))
         } catch (_: Exception) {
             Settings()
         }
+        val migrated = Main.prefs.getBoolean(KEY_BLEND_BASIC_MIGRATED, false)
+        if (!migrated && parsed.accurateBlendingUnit == 4) {
+            val updated = parsed.copy(accurateBlendingUnit = 1)
+            Main.prefs.edit()
+                .putBoolean(KEY_BLEND_BASIC_MIGRATED, true)
+                .putString(KEY_GLOBAL, updated.toJson().toString())
+                .commit()
+            return updated
+        }
+        if (!migrated) {
+            Main.prefs.edit().putBoolean(KEY_BLEND_BASIC_MIGRATED, true).apply()
+        }
+        return parsed
     }
 
     fun saveGlobal(s: Settings) {

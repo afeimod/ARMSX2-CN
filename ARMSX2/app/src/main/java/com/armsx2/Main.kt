@@ -39,9 +39,9 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
-import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.pointer.pointerInput
@@ -51,6 +51,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.armsx2.input.ControllerMappings
 import com.armsx2.events.TestResult
 import com.armsx2.ui.Colors
 import com.armsx2.ui.SetupImpl
@@ -482,6 +483,7 @@ class Main: ComponentActivity() {
             when (renderer.value) {
                 "vulkan" -> NativeApp.renderVulkan()
                 "opengl" -> NativeApp.renderOpenGL()
+                "software" -> NativeApp.renderSoftware()
                 else -> NativeApp.renderAuto()
             }
             com.armsx2.config.ConfigStore
@@ -1145,24 +1147,10 @@ class Main: ComponentActivity() {
                             .onKeyEvent { event ->
                                 if (eState.value != EmuState.RUNNING)
                                     return@onKeyEvent false
-                                when (event.key) {
-                                    // DirectionUp/Down/Left/Right intentionally NOT
-                                    // bound here — they're handled by the focus
-                                    // navigation path so the toolbar can use them.
-                                    Key.ButtonA -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_A); true }
-                                    Key.ButtonB -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_B); true }
-                                    Key.ButtonX -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_X); true }
-                                    Key.ButtonY -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_Y); true }
-                                    Key.ButtonSelect -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_SELECT); true }
-                                    Key.ButtonStart -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_START); true }
-                                    Key.ButtonL1 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L1); true }
-                                    Key.ButtonR1 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R1); true }
-                                    Key.ButtonL2 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_L2); true }
-                                    Key.ButtonR2 -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_R2); true }
-                                    Key.ButtonThumbLeft -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBL); true }
-                                    Key.ButtonThumbRight -> { sendKeyAction(event.type, KeyEvent.KEYCODE_BUTTON_THUMBR); true }
-                                    else -> false
-                                }
+                                val target = ControllerMappings.targetForPhysical(event.key.nativeKeyCode)
+                                    ?: return@onKeyEvent false
+                                sendKeyAction(event.type, target)
+                                true
                             })
                     }
 

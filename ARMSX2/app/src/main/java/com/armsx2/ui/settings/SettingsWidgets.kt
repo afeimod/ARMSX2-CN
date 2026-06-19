@@ -68,26 +68,49 @@ fun SettingsDivider() {
     )
 }
 
+@Composable
+fun HelpText(text: String, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        color = Color(0xFFB8B8B8),
+        fontSize = 10.sp,
+        lineHeight = 12.sp,
+        modifier = modifier.padding(horizontal = 6.dp, vertical = 4.dp),
+    )
+}
+
 /** Toggle row — label on left, status text on right. Tapping anywhere
  *  on the row flips the value via [onChange]. */
 @Composable
 fun ToggleRow(
     label: String,
     value: Boolean,
+    description: String? = null,
     onChange: (Boolean) -> Unit,
 ) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(24.dp)
+            .height(if (description == null) 24.dp else 42.dp)
             .background(rowAura())
             .clickable { onChange(!value) }
             .padding(horizontal = 6.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.weight(1f))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                if (description != null) {
+                    Text(
+                        description,
+                        color = Color(0xFFB8B8B8),
+                        fontSize = 9.sp,
+                        lineHeight = 10.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             Text(
                 if (value) "On" else "Off",
                 color = if (value) Colors.pasx2_blue else Color(0xFF888888),
@@ -173,21 +196,33 @@ fun IntSliderRow(
     value: Int,
     min: Int,
     max: Int,
+    description: String? = null,
     valueFormatter: (Int) -> String = { it.toString() },
     onChange: (Int) -> Unit,
 ) {
     Box(
         Modifier
             .fillMaxWidth()
-            .height(36.dp)
+            .height(if (description == null) 36.dp else 50.dp)
             .background(rowAura())
             .padding(horizontal = 6.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.weight(1f))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                    if (description != null) {
+                        Text(
+                            description,
+                            color = Color(0xFFB8B8B8),
+                            fontSize = 9.sp,
+                            lineHeight = 10.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
                 Text(
                     valueFormatter(value),
                     color = Colors.pasx2_blue,
@@ -318,6 +353,7 @@ fun SegmentedRow(
     label: String,
     options: List<String>,
     selectedIndex: Int,
+    description: String? = null,
     onChange: (Int) -> Unit,
 ) {
     Box(
@@ -329,6 +365,17 @@ fun SegmentedRow(
     ) {
         Column {
             Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            if (description != null) {
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    description,
+                    color = Color(0xFFB8B8B8),
+                    fontSize = 9.sp,
+                    lineHeight = 10.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Spacer(Modifier.height(3.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                 options.forEachIndexed { idx, option ->
@@ -362,6 +409,7 @@ fun SegmentedGridRow(
     options: List<String>,
     selectedIndex: Int,
     columns: Int = 3,
+    description: String? = null,
     onChange: (Int) -> Unit,
 ) {
     Box(
@@ -373,6 +421,17 @@ fun SegmentedGridRow(
     ) {
         Column {
             Text(label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+            if (description != null) {
+                Spacer(Modifier.height(1.dp))
+                Text(
+                    description,
+                    color = Color(0xFFB8B8B8),
+                    fontSize = 9.sp,
+                    lineHeight = 10.sp,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
             Spacer(Modifier.height(3.dp))
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 options.chunked(columns.coerceAtLeast(1)).forEachIndexed { rowIndex, rowOptions ->

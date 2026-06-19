@@ -6,6 +6,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +50,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.layout.onSizeChanged
@@ -72,14 +74,17 @@ import androidx.compose.ui.unit.sp
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.armsx2.EmuState
+import com.armsx2.GameInfo
 import com.armsx2.Main
 import com.armsx2.R
 import com.armsx2.config.ConfigStore
 import com.armsx2.config.Settings
 import com.armsx2.config.SettingsScope
 import com.armsx2.ui.settings.AudioTab
+import com.armsx2.ui.settings.FixesTab
 import com.armsx2.ui.settings.NetworkTab
 import com.armsx2.ui.settings.OverlayTab
+import com.armsx2.ui.settings.PadTab
 import com.armsx2.ui.settings.PatchesTab
 import com.armsx2.ui.settings.PerformanceTab
 import com.armsx2.ui.settings.RecompilerTab
@@ -135,10 +140,12 @@ object InGameOverlay {
         PlayingNow("Play"),
         Performance("Perf"),
         Renderer("Render"),
+        Fixes("Fixes"),
         Audio("Audio"),
         Patches("Patches"),
         Network("Network"),
         Overlay("Overlay"),
+        Pad("Pad"),
         Recompiler("JIT"),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
@@ -147,6 +154,12 @@ object InGameOverlay {
     // Hydrated from ConfigStore on every overlay open so we pick up any
     // out-of-band edits (e.g. from a future global Settings screen).
     private val settingsState = mutableStateOf(Settings())
+    private val previewGame = mutableStateOf<GameInfo?>(null)
+
+    /** The library game whose settings were opened via long-press before
+     *  launch (null once a game is actually running). Lets the Patches tab
+     *  browse the patch database for a game you haven't booted yet. */
+    val patchPreviewGame: GameInfo? get() = previewGame.value
 
     // Settings scope picked by the overlay header switch. Defaults to
     // [Game] when a game is loaded on open; falls back to [Global] when
@@ -255,6 +268,35 @@ object InGameOverlay {
         } else {
             applySafeLiveDelta(previous, updated)
         }
+        frameLimitOn.value = updated.frameLimitEnable
+        osdShown.value = anyOsdElementEnabled(updated)
+    }
+
+    private fun anyOsdElementEnabled(settings: Settings): Boolean =
+        settings.osdShowFps ||
+            settings.osdShowVps ||
+            settings.osdShowSpeed ||
+            settings.osdShowCpu ||
+            settings.osdShowGpu ||
+            settings.osdShowResolution ||
+            settings.osdShowGsStats ||
+            settings.osdShowFrameTimes
+
+    private fun withAllOsdElements(settings: Settings, enabled: Boolean): Settings =
+        settings.copy(
+            osdShowFps = enabled,
+            osdShowVps = enabled,
+            osdShowSpeed = enabled,
+            osdShowCpu = enabled,
+            osdShowGpu = enabled,
+            osdShowResolution = enabled,
+            osdShowGsStats = enabled,
+            osdShowFrameTimes = enabled,
+        )
+
+    private fun syncQuickTogglesFromSettings(settings: Settings) {
+        frameLimitOn.value = settings.frameLimitEnable
+        osdShown.value = anyOsdElementEnabled(settings)
     }
 
     private fun applySafeLiveDelta(previous: Settings, updated: Settings) {
@@ -344,12 +386,21 @@ object InGameOverlay {
             NativeApp.setSetting("EmuCore/GS", "OsdShowFrameTimes", "bool", updated.osdShowFrameTimes.toString())
             NativeApp.osdShowFrameTimes(updated.osdShowFrameTimes)
         }
+
+        // Renderer / hardware-fix / upscaling-fix changes apply live via a GS-only
+        // reconfigure (Settings.applyGsLive → native applyGSSettingsLive). It does
+        // NOT rebuild the CPU/JIT and preserves the device-identity fields, so it
+        // can't trigger a GS device recreate. Gated on an actual GS diff so non-GS
+        // taps (audio, frame limit, …) don't reconfigure the GS thread.
+        if (previous.gsDiffersFrom(updated))
+            updated.applyGsLive()
     }
 
     /** Open the overlay. Pauses the VM. Safe to call when already open. */
     fun open() {
         if (WindowImpl.overlayVisible.value) return
         settingsOnly.value = false
+        previewGame.value = null
         pausedByOverlay = (Main.eState.value == EmuState.RUNNING)
         // ALWAYS pause while the overlay is up — even if eState already
         // says PAUSED. The Kotlin flag can run ahead of the actual VM,
@@ -381,6 +432,7 @@ object InGameOverlay {
         // loaded we want to see the EFFECTIVE settings (global ∘ overrides)
         // so the user edits the merged value; otherwise just the global.
         settingsState.value = ConfigStore.resolveForGame(serial)
+        syncQuickTogglesFromSettings(settingsState.value)
         // Sync pill state from native — covers emucore-driven swaps that
         // happened while the overlay was closed. Auto is sticky against
         // the sync (the user picked "let it decide", so we keep showing
@@ -398,12 +450,30 @@ object InGameOverlay {
     fun openGlobalSettings() {
         if (WindowImpl.overlayVisible.value) return
         settingsOnly.value = true
+        previewGame.value = null
         pausedByOverlay = false
         state.value = State.Root
         currentTab.value = Tab.Performance
         currentSerial.value = null
         settingsScope.value = SettingsScope.Global
         settingsState.value = ConfigStore.loadGlobal()
+        syncQuickTogglesFromSettings(settingsState.value)
+        WindowImpl.overlayVisible.value = true
+    }
+
+    /** Open per-game settings from a long-pressed library card before launch. */
+    fun openGameSettings(game: GameInfo) {
+        if (WindowImpl.overlayVisible.value) return
+        settingsOnly.value = true
+        previewGame.value = game
+        pausedByOverlay = false
+        state.value = State.Root
+        currentTab.value = Tab.Performance
+        currentSerial.value = game.serial?.takeIf { it.isNotEmpty() }
+        settingsScope.value =
+            if (currentSerial.value != null) SettingsScope.Game else SettingsScope.Global
+        settingsState.value = ConfigStore.resolveForGame(currentSerial.value)
+        syncQuickTogglesFromSettings(settingsState.value)
         WindowImpl.overlayVisible.value = true
     }
 
@@ -411,6 +481,7 @@ object InGameOverlay {
         WindowImpl.overlayVisible.value = false
         state.value = State.Root
         settingsOnly.value = false
+        previewGame.value = null
         // Always resume if the VM is paused — close-paths that should
         // preserve a paused VM (Change Disc picker, library, edit mode)
         // go through closeKeepingState instead. The earlier
@@ -426,6 +497,7 @@ object InGameOverlay {
         WindowImpl.overlayVisible.value = false
         state.value = State.Root
         settingsOnly.value = false
+        previewGame.value = null
         pausedByOverlay = false
     }
 
@@ -449,7 +521,7 @@ object InGameOverlay {
         Box(
             Modifier
                 .fillMaxSize()
-                .background(Color(0xFF101010).copy(alpha = 0.5f))
+                .background(Color.Black.copy(alpha = 0.68f))
                 .clickable(
                     indication = null,
                     interactionSource = backdropInteraction,
@@ -461,6 +533,36 @@ object InGameOverlay {
             // the dim band outside still falls through to the backdrop's
             // close-on-tap handler because this inner Box is non-clickable.
             Box(Modifier.fillMaxSize().displayCutoutPadding()) {
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .fillMaxHeight()
+                    .width(560.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.Black.copy(alpha = 0.54f),
+                                Color.Black.copy(alpha = 0.28f),
+                                Color.Transparent,
+                            )
+                        )
+                    )
+            )
+            Box(
+                Modifier
+                    .align(Alignment.TopEnd)
+                    .fillMaxHeight()
+                    .width(520.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.Transparent,
+                                Color.Black.copy(alpha = 0.22f),
+                                Color.Black.copy(alpha = 0.50f),
+                            )
+                        )
+                    )
+            )
             // Top-left: game info, then (on Root) the tab strip and the
             // active tab's body stacked directly beneath it. Keeping the
             // strip and its content in the same column means tabs always
@@ -472,7 +574,7 @@ object InGameOverlay {
                     .align(Alignment.TopStart)
                     .fillMaxHeight()
                     .padding(20.dp)
-                    .width(360.dp),
+                    .width(520.dp),
             ) {
                 GameInfoHeader()
                 if (state.value is State.Root) {
@@ -496,39 +598,41 @@ object InGameOverlay {
                 }
             }
 
-            // Top-right column: ARMSX2 branding + version, and below it the
-            // achievements panel (visible on the Root state only — submenus
-            // own the screen for confirms / pickers). Polls
-            // NativeApp.getAchievementsJSON every few seconds while open so
-            // freshly-unlocked rows appear without a manual reopen.
-            Column(
+            BrandHeader(
                 modifier = Modifier
                     .align(Alignment.TopEnd)
-                    .fillMaxHeight()
                     .padding(20.dp)
-                    .width(360.dp),
-                horizontalAlignment = Alignment.End,
-            ) {
-                BrandHeader(modifier = Modifier)
-                if (state.value is State.Root) {
-                    Spacer(Modifier.height(12.dp))
-                    Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                        AchievementsPanel(
-                            modifier = Modifier.fillMaxWidth(),
-                            onSignInClick = { state.value = State.AchievementsLogin },
-                            onHardcoreToggle = {
-                                if (hardcoreOn.value) {
-                                    // Turn-off is safe (no VM reset) — apply
-                                    // immediately. Native will fold the change
-                                    // through Achievements::DisableHardcoreMode.
-                                    NativeApp.setHardcoreMode(false)
-                                    hardcoreOn.value = false
-                                } else {
-                                    state.value = State.HardcoreEnableConfirm
-                                }
-                            },
-                        )
-                    }
+            )
+
+            // Bottom-right: achievements only on the Play tab, where the right
+            // half of the screen is free. On settings tabs the 520dp options
+            // column would overlap it, so it's hidden there. Compact + bottom-
+            // anchored so a short "not signed in" card sits in the corner
+            // instead of floating up into the action grid.
+            if (state.value is State.Root && currentTab.value == Tab.PlayingNow) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = 20.dp, bottom = 28.dp)
+                        .width(260.dp)
+                        .fillMaxHeight(0.55f),
+                    contentAlignment = Alignment.BottomEnd,
+                ) {
+                    AchievementsPanel(
+                        modifier = Modifier.fillMaxSize(),
+                        onSignInClick = { state.value = State.AchievementsLogin },
+                        onHardcoreToggle = {
+                            if (hardcoreOn.value) {
+                                // Turn-off is safe (no VM reset) — apply
+                                // immediately. Native will fold the change
+                                // through Achievements::DisableHardcoreMode.
+                                NativeApp.setHardcoreMode(false)
+                                hardcoreOn.value = false
+                            } else {
+                                state.value = State.HardcoreEnableConfirm
+                            }
+                        },
+                    )
                 }
             }
 
@@ -554,7 +658,7 @@ object InGameOverlay {
                     Modifier
                         .align(Alignment.BottomStart)
                         .fillMaxHeight(maxFrac)
-                        .let { if (isSlotPicker) it.fillMaxWidth() else it.width(360.dp) }
+                        .let { if (isSlotPicker) it.fillMaxWidth() else it.width(520.dp) }
                         .padding(start = 20.dp, end = if (isSlotPicker) 20.dp else 0.dp, bottom = 20.dp, top = 20.dp),
                     contentAlignment = Alignment.BottomStart,
                 ) {
@@ -600,12 +704,16 @@ object InGameOverlay {
         // pre-resolved compat (computed at library scan time), the cover
         // URL, and the container extension. Fallback to NativeApp.getPause*
         // for paths that lack a GameInfo (Change Disc file picker, BIOS).
-        val cached = Main.currentGame.value
-        val title = cached?.title?.takeIf { it.isNotEmpty() }
-            ?: NativeApp.getPauseGameTitle()?.takeIf { it.isNotEmpty() }
-            ?: "PS2 BIOS"
+        val globalSettingsView =
+            settingsOnly.value && currentSerial.value == null && previewGame.value == null
+        val cached = if (globalSettingsView) null else (previewGame.value ?: Main.currentGame.value)
+        val cachedTitle = cached?.title?.takeIf { it.isNotEmpty() }
+        val nativeTitle = if (!globalSettingsView)
+            NativeApp.getPauseGameTitle()?.takeIf { it.isNotEmpty() }
+        else null
+        val title = cachedTitle ?: nativeTitle ?: if (globalSettingsView) "General Settings" else "PS2 BIOS"
         val serial = cached?.serial
-            ?: NativeApp.getPauseGameSerial()?.takeIf { it.isNotEmpty() }
+            ?: if (!globalSettingsView) NativeApp.getPauseGameSerial()?.takeIf { it.isNotEmpty() } else null
         val compatStars = when {
             cached != null -> cached.compatibility
             serial != null -> (NativeApp.getCompatibilityForSerial(serial) - 1).coerceIn(0, 5)
@@ -656,8 +764,8 @@ object InGameOverlay {
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        serial ?: "No disc",
-                        color = if (serial != null) Color(0xFFAACCFF) else Color(0xFF808080),
+                        if (globalSettingsView) "Global" else serial ?: "No disc",
+                        color = if (serial != null || globalSettingsView) Color(0xFFAACCFF) else Color(0xFF808080),
                         fontSize = 13.sp,
                     )
                     if (serial != null) {
@@ -863,10 +971,12 @@ object InGameOverlay {
             Tab.PlayingNow -> PlayingNowTab()
             Tab.Performance -> PerformanceTab(settingsState)
             Tab.Renderer -> RendererTab(settingsState)
+            Tab.Fixes -> FixesTab(settingsState)
             Tab.Audio -> AudioTab(settingsState)
             Tab.Patches -> PatchesTab(settingsState)
             Tab.Network -> NetworkTab(settingsState)
             Tab.Overlay -> OverlayTab(settingsState)
+            Tab.Pad -> PadTab(settingsState)
             Tab.Recompiler -> RecompilerTab(settingsState)
         }
     }
@@ -876,20 +986,29 @@ object InGameOverlay {
      *  chip area. */
     @Composable
     private fun TabStrip() {
+        val scroll = rememberScrollState()
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(scroll),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             val tabs = if (settingsOnly.value) {
-                listOf(Tab.Performance, Tab.Renderer, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Recompiler)
+                listOf(Tab.Performance, Tab.Renderer, Tab.Fixes, Tab.Audio, Tab.Patches, Tab.Network, Tab.Overlay, Tab.Pad, Tab.Recompiler)
             } else {
                 Tab.values().toList()
             }
             tabs.forEach { tab ->
                 val active = currentTab.value == tab
+                val chipWidth = when (tab) {
+                    Tab.Patches, Tab.Network, Tab.Overlay -> 72.dp
+                    Tab.Pad -> 52.dp
+                    Tab.PlayingNow -> 52.dp
+                    else -> 64.dp
+                }
                 Column(
                     modifier = Modifier
-                        .weight(1f)
+                        .width(chipWidth)
                         .clickable { currentTab.value = tab }
                         .padding(vertical = 4.dp),
                     horizontalAlignment = Alignment.CenterHorizontally,
@@ -1095,16 +1214,8 @@ object InGameOverlay {
                         BubbleAccent.Active else BubbleAccent.Normal,
                     modifier = Modifier.weight(1f),
                 ) {
-                    frameLimitOn.value = !frameLimitOn.value
-                    // Update both the BASE layer (so a future VM init /
-                    // settings reload sees the new value) and call
-                    // speedhackLimitermode for immediate effect on the
-                    // running VM.
-                    NativeApp.setSetting(
-                        "EmuCore/GS", "FrameLimitEnable", "bool",
-                        frameLimitOn.value.toString()
-                    )
-                    NativeApp.speedhackLimitermode(if (frameLimitOn.value) 0 else 3)
+                    val enabled = !frameLimitOn.value
+                    saveSettings(settingsState.value.copy(frameLimitEnable = enabled))
                 }
                 BubbleButton(
                     "Touch Layout",
@@ -1131,8 +1242,9 @@ object InGameOverlay {
                         BubbleAccent.Active else BubbleAccent.Normal,
                     modifier = Modifier.weight(1f),
                 ) {
-                    osdShown.value = !osdShown.value
-                    NativeApp.osdShowAll(osdShown.value)
+                    val enabled = !osdShown.value
+                    saveSettings(withAllOsdElements(settingsState.value, enabled))
+                    NativeApp.osdShowAll(enabled)
                 }
                 BubbleButton(
                     "Reset",

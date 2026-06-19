@@ -2,13 +2,16 @@ package com.armsx2.ui
 
 import android.content.Context
 import android.net.Uri
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -39,6 +42,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
@@ -83,6 +87,7 @@ private val GAME_EXTENSIONS = setOf(
 )
 
 object GamesList {
+    private const val KEY_LIBRARY_BACKGROUND = "library.background.path"
     /**
      * Cached list of games for the configured ROMs folder. Backed by
      * SharedPreferences (`gamesCache` JSON + `gamesCacheDir` URI) so a
@@ -99,11 +104,20 @@ object GamesList {
     private val cacheLoaded = mutableStateOf(false)
     private val recentUris = mutableStateListOf<String>()
     private val recentLoaded = mutableStateOf(false)
+    private val customBackgroundPath = mutableStateOf<String?>(null)
+    private val customBackgroundLoaded = mutableStateOf(false)
 
     @Composable
     fun GamesRow() {
         val context = LocalContext.current
         val romsDirs = Main.romsDirs.value
+
+        LaunchedEffect(Unit) {
+            if (!customBackgroundLoaded.value) {
+                customBackgroundLoaded.value = true
+                loadCustomBackground(context)
+            }
+        }
 
         // Stable cache key — order-independent join of all configured dirs.
         // Two-dir configs in either order hit the same cache, single-dir
@@ -138,6 +152,7 @@ object GamesList {
         Box(
             Modifier
                 .fillMaxSize()
+                .let { if (WindowImpl.overlayVisible.value) it.blur(18.dp) else it }
                 .background(
                     Brush.verticalGradient(
                         listOf(
@@ -235,44 +250,73 @@ object GamesList {
         val libraryRows = games.chunked(if (landscape) 8 else 5)
 
         Box(modifier = modifier.fillMaxSize()) {
-            // Base reactor-blue wash (unchanged palette).
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.radialGradient(
-                            listOf(
-                                Color(0xFF07355E),
-                                Color(0xFF001C35),
-                                Color(0xFF000814),
+            val customBackground = customBackgroundPath.value
+                ?.let { File(it) }
+                ?.takeIf { it.exists() && it.length() > 0L }
+            if (customBackground != null) {
+                SubcomposeAsyncImage(
+                    model = ImageRequest.Builder(context)
+                        .data(customBackground)
+                        .crossfade(true)
+                        .build(),
+                    contentDescription = null,
+                    modifier = Modifier.matchParentSize(),
+                    contentScale = ContentScale.Crop,
+                    alignment = Alignment.Center,
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(Color.Black.copy(alpha = 0.38f)),
+                )
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Black.copy(alpha = 0.10f), Color.Black.copy(alpha = 0.42f)),
                             ),
                         ),
-                    ),
-            )
-            // "Inside the core reactor": the app's glowing monolith stands tall
-            // behind the shelves, scaled past the screen height and dimmed so it
-            // reads as ambient light rather than a foreground object. The cover
-            // cards sit over it.
-            Image(
-                painter = painterResource(id = R.drawable.savetowerforeground),
-                contentDescription = null,
-                modifier = Modifier
-                    .align(Alignment.Center)
-                    .fillMaxHeight(1.25f)
-                    .graphicsLayer { alpha = 0.30f },
-                contentScale = ContentScale.Fit,
-            )
-            // Vertical vignette so the tower glow falls off toward the bottom and
-            // the shelf rows keep their contrast.
-            Box(
-                Modifier
-                    .matchParentSize()
-                    .background(
-                        Brush.verticalGradient(
-                            listOf(Color.Transparent, Color(0x66000814)),
+                )
+            } else {
+                // Base reactor-blue wash (unchanged palette).
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.radialGradient(
+                                listOf(
+                                    Color(0xFF07355E),
+                                    Color(0xFF001C35),
+                                    Color(0xFF000814),
+                                ),
+                            ),
                         ),
-                    ),
-            )
+                )
+                // "Inside the core reactor": the app's glowing monolith stands
+                // tall behind the shelves, scaled past the screen height and
+                // dimmed so it reads as ambient light rather than a foreground object.
+                Image(
+                    painter = painterResource(id = R.drawable.savetowerforeground),
+                    contentDescription = null,
+                    modifier = Modifier
+                        .align(Alignment.Center)
+                        .fillMaxHeight(1.25f)
+                        .graphicsLayer { alpha = 0.30f },
+                    contentScale = ContentScale.Fit,
+                )
+                // Vertical vignette so the tower glow falls off toward the bottom and
+                // the shelf rows keep their contrast.
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .background(
+                            Brush.verticalGradient(
+                                listOf(Color.Transparent, Color(0x66000814)),
+                            ),
+                        ),
+                )
+            }
             LazyColumn(
                 modifier = Modifier
                     .fillMaxSize()
@@ -366,6 +410,12 @@ object GamesList {
                 Main.launchGame(outFile.absolutePath, null)
             }
         }
+        val wallLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.OpenDocument()
+        ) { uri ->
+            if (uri != null)
+                importCustomBackground(context, uri)
+        }
 
         Row(
             Modifier.fillMaxWidth(),
@@ -377,8 +427,17 @@ object GamesList {
                 modifier = Modifier.weight(1f),
             )
             ActionChip("Scan") {
-                if (!scanning.value && romsDirs.isNotEmpty())
-                    scanRoms(context, romsDirs, romsKey)
+                when {
+                    romsDirs.isEmpty() ->
+                        Toast.makeText(context, "Choose a game folder first", Toast.LENGTH_SHORT).show()
+                    scanning.value ->
+                        Toast.makeText(context, "Library scan already running", Toast.LENGTH_SHORT).show()
+                    else -> {
+                        Toast.makeText(context, "Scanning library...", Toast.LENGTH_SHORT).show()
+                        lastScannedRoms.value = null
+                        scanRoms(context, romsDirs, romsKey)
+                    }
+                }
             }
             ActionChip("BIOS") {
                 WindowImpl.showLibrary.value = false
@@ -386,6 +445,14 @@ object GamesList {
             }
             ActionChip("ELF") {
                 bootElfLauncher.launch(arrayOf("*/*"))
+            }
+            ActionChip("Wall") {
+                wallLauncher.launch(arrayOf("image/*"))
+            }
+            if (customBackgroundPath.value != null) {
+                ActionChip("Reset") {
+                    resetCustomBackground(context)
+                }
             }
             ActionChip("Cards") {
                 MemoryCardManager.visible.value = true
@@ -639,12 +706,16 @@ object GamesList {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun ShelfGameCard(game: GameInfo, width: Dp, modifier: Modifier = Modifier) {
         Column(
             modifier = modifier
                 .width(width)
-                .clickable { launchGame(game) },
+                .combinedClickable(
+                    onClick = { launchGame(game) },
+                    onLongClick = { InGameOverlay.openGameSettings(game) },
+                ),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             CoverArt(
@@ -699,6 +770,41 @@ object GamesList {
         WindowImpl.showLibrary.value = false
         markRecentlyPlayed(game)
         Main.launchGame(game.uri.toString(), game)
+    }
+
+    private fun loadCustomBackground(context: Context) {
+        val saved = Main.prefs.getString(KEY_LIBRARY_BACKGROUND, null)
+            ?.takeIf { File(it).exists() }
+        customBackgroundPath.value = saved
+    }
+
+    private fun importCustomBackground(context: Context, uri: Uri) {
+        val name = DocumentFile.fromSingleUri(context, uri)?.name.orEmpty()
+        val ext = name.substringAfterLast('.', missingDelimiterValue = "jpg")
+            .lowercase()
+            .takeIf { it in setOf("jpg", "jpeg", "png", "webp") }
+            ?: "jpg"
+        val outDir = File(Main.assetCopyRoot(context), "backgrounds").apply { mkdirs() }
+        val outFile = File(outDir, "library_background.$ext")
+        val ok = runCatching {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                outFile.outputStream().use { output -> input.copyTo(output) }
+            } != null && outFile.length() > 0L
+        }.getOrDefault(false)
+        if (ok) {
+            Main.prefs.edit().putString(KEY_LIBRARY_BACKGROUND, outFile.absolutePath).apply()
+            customBackgroundPath.value = outFile.absolutePath
+            Toast.makeText(context, "Library background imported", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, "Could not import background", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun resetCustomBackground(context: Context) {
+        customBackgroundPath.value?.let { runCatching { File(it).delete() } }
+        customBackgroundPath.value = null
+        Main.prefs.edit().remove(KEY_LIBRARY_BACKGROUND).apply()
+        Toast.makeText(context, "Library background reset", Toast.LENGTH_SHORT).show()
     }
 
     @Composable
@@ -864,6 +970,7 @@ object GamesList {
         }
     }
 
+    @OptIn(ExperimentalFoundationApi::class)
     @Composable
     private fun GameCard(game: GameInfo) {
         Column(
@@ -878,14 +985,17 @@ object GamesList {
                 // affects the chrome, not the children.
                 .background(Color(0xFF272525).copy(alpha = 0.3f))
                 .border(1.dp, Color(0xFF3A3A3A).copy(alpha = 0.3f), RoundedCornerShape(8.dp))
-                .clickable {
+                .combinedClickable(
+                    onClick = {
                     // Clear the library overlay (set by LoadGameButton while
                     // a game was running) so the surface for the new game
                     // comes up uncovered. No-op when starting from idle.
                     // Pass GameInfo so the in-game overlay has cover art /
                     // extension badge / pre-resolved compat stars ready.
                     launchGame(game)
-                },
+                    },
+                    onLongClick = { InGameOverlay.openGameSettings(game) },
+                ),
         ) {
             CoverArt(
                 game = game,

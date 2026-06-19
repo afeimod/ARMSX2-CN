@@ -2,14 +2,19 @@
 // SPDX-License-Identifier: GPL-3.0+
 
 #include "Common.h"
-#include "AndroidPerfBuckets.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
 #include "VMManager.h"
 #include "VU1Fingerprint.h"
 #include "Vif_Dynarec.h"
+#include "common/Console.h"
+#include "common/Timer.h"
 
 #include <thread>
+
+#ifndef ARMSX2_ANDROID_VU_PROBES
+#define ARMSX2_ANDROID_VU_PROBES 0
+#endif
 
 VU_Thread vu1Thread;
 
@@ -39,25 +44,9 @@ static void MTVU_Unpack(void* data, VIFregisters& vifRegs)
 	u16 wl = vifRegs.cycle.wl > 0 ? vifRegs.cycle.wl : 256;
 	bool isFill = vifRegs.cycle.cl < wl;
 	if (newVifDynaRec)
-	{
-#if defined(__ANDROID__)
-		AndroidPerfBuckets::ScopedTimer timer(
-			AndroidPerfBuckets::s_vif_mtvu_dyn_count,
-			AndroidPerfBuckets::s_vif_mtvu_dyn_us,
-			"vif_mtvu_dyn");
-#endif
 		dVifUnpack<1>((u8*)data, isFill);
-	}
 	else
-	{
-#if defined(__ANDROID__)
-		AndroidPerfBuckets::ScopedTimer timer(
-			AndroidPerfBuckets::s_vif_mtvu_int_count,
-			AndroidPerfBuckets::s_vif_mtvu_int_us,
-			"vif_mtvu_int");
-#endif
 		_nVifUnpack(1, (u8*)data, vifRegs.mode, isFill);
-	}
 }
 
 // Called on Saving/Loading states...
@@ -149,19 +138,30 @@ void VU_Thread::ExecuteRingBuffer()
 
 	for (;;)
 	{
-#if defined(__ANDROID__)
-		const u64 diag_wait_start_us = AndroidPerfBuckets::NowUs();
-#endif
-		semaEvent.WaitForWork();
-#if defined(__ANDROID__)
-		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtvu_wait_count);
-		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtvu_wait_us,
-			AndroidPerfBuckets::NowUs() - diag_wait_start_us);
-		AndroidPerfBuckets::MaybeReport("mtvu_wait");
-#endif
+		// Adaptive spin-before-wait: perfape (Ape Escape 3) showed ~27% of
+		// MTVU thread time inside `syscall` for sem_wait → futex. Most EE→
+		// MTVU posts arrive within microseconds of MTVU draining its ring,
+		// so spinning briefly catches them without a futex roundtrip.
+		semaEvent.WaitForWorkWithSpin();
 		if (m_shutdown_flag.load(std::memory_order_acquire))
 			break;
 
+		// Batch semaXGkick.Post() calls across the inner ring drain. Per-
+		// execute Post hits a futex syscall whenever MTGS is waiting (FFXII
+		// intro had MTGS catching up constantly → 8% of MTVU's CPU was
+		// sem_post→syscall). Coalescing reduces it to ~1 syscall per batch.
+		//
+		// Deadlock guard (FFX intro 3D scene hang): the VU JIT's XGKICK can
+		// fill the GIF path buffer mid-Execute, causing it to call
+		// `Gif_MTGS_Wait` which spins until MTGS drains the gsPackQueue.
+		// MTGS only drains after `semaXGkick.Wait()` returns. So we MUST
+		// have Posted any prior pending counts BEFORE entering Execute, or
+		// MTGS is stuck waiting and MTVU is stuck spinning. Pre-flushing at
+		// the top of MTVU_VU_EXECUTE collapses the batch when consecutive
+		// executes are queued — but preserves it when non-execute commands
+		// (WRITE_MICRO / WRITE_DATA / VIF_UNPACK) are interleaved, which is
+		// common since EE submits mixed work in a single ring drain.
+		int pending_xgkick_posts = 0;
 		while (m_ato_read_pos.load(std::memory_order_relaxed) != GetWritePos())
 		{
 			u32 tag = Read();
@@ -169,12 +169,13 @@ void VU_Thread::ExecuteRingBuffer()
 			{
 				case MTVU_VU_EXECUTE:
 				{
-#if defined(__ANDROID__)
-					AndroidPerfBuckets::ScopedTimer timer(
-						AndroidPerfBuckets::s_mtvu_exec_count,
-						AndroidPerfBuckets::s_mtvu_exec_us,
-						"mtvu_exec");
-#endif
+					// Pre-flush so MTGS can drain GIF buffer DURING this
+					// Execute (else XGKICK's Gif_MTGS_Wait deadlocks).
+					if (pending_xgkick_posts)
+					{
+						semaXGkick.Post(pending_xgkick_posts);
+						pending_xgkick_posts = 0;
+					}
 					VU1.cycle = 0;
 					s32 addr = Read();
 					vifRegs.top = Read();
@@ -183,9 +184,23 @@ void VU_Thread::ExecuteRingBuffer()
 					if (addr != -1)
 						VU1.VI[REG_TPC].UL = addr & 0x7FF;
 					CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+					static u32 s_mtvu_execute_sample_counter = 0;
+					const bool sample_execute = ((++s_mtvu_execute_sample_counter & 0x7f) == 0);
+					const u64 execute_start = sample_execute ? Common::Timer::GetCurrentValue() : 0;
+#endif
 					CpuVU1->Execute(vu1RunCycles);
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+					if (sample_execute)
+					{
+						const u64 execute_ticks = Common::Timer::GetCurrentValue() - execute_start;
+						Console.WriteLnFmt("@@MTVU_EXEC_SAMPLE@@ cycles={} vu_cycle={} tpc=0x{:04x} usec={:.2f}",
+							vu1RunCycles, VU1.cycle, VU1.VI[REG_TPC].UL,
+							Common::Timer::ConvertValueToSeconds(execute_ticks) * 1000000.0);
+					}
+#endif
 					gifUnit.gifPath[GIF_PATH_1].FinishGSPacketMTVU();
-					semaXGkick.Post(); // Tell MTGS a path1 packet is complete
+					pending_xgkick_posts++; // Batched → flushed before NEXT execute or at loop end
 					vuCycles[vuCycleIdx].store(VU1.cycle, std::memory_order_release);
 					vuCycleIdx = (vuCycleIdx + 1) & 3;
 					break;
@@ -242,6 +257,16 @@ void VU_Thread::ExecuteRingBuffer()
 
 			CommitReadPos();
 		}
+
+		// Drain any batched VU_EXECUTE Posts. One syscall to wake MTGS
+		// regardless of the batch size (Post(N) wakes min(N, waiters)
+		// futexes; the extra count goes into m_counter for MTGS to drain
+		// via TryWait without further syscalls).
+		if (pending_xgkick_posts)
+		{
+			semaXGkick.Post(pending_xgkick_posts);
+			pending_xgkick_posts = 0;
+		}
 	}
 
 	semaEvent.Kill();
@@ -251,10 +276,6 @@ void VU_Thread::ExecuteRingBuffer()
 // Should only be called by ReserveSpace()
 __ri void VU_Thread::WaitOnSize(s32 size)
 {
-#if defined(__ANDROID__)
-	const u64 diag_wait_start_us = AndroidPerfBuckets::NowUs();
-	u64 diag_spin_iters = 0;
-#endif
 	for (;;)
 	{
 		s32 readPos = GetReadPos();
@@ -273,22 +294,9 @@ __ri void VU_Thread::WaitOnSize(s32 size)
 			// will be more aggressive, and only flush the minimal size.
 			// Performance will be smoother but it will consume extra CPU cycle
 			// on the EE thread (not an issue on 4 cores).
-#if defined(__ANDROID__)
-			diag_spin_iters++;
-#endif
 			std::this_thread::yield();
 		}
 	}
-#if defined(__ANDROID__)
-	if (diag_spin_iters)
-	{
-		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtvu_reserve_wait_count);
-		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtvu_reserve_wait_us,
-			AndroidPerfBuckets::NowUs() - diag_wait_start_us);
-		AndroidPerfBuckets::Add(AndroidPerfBuckets::s_mtvu_reserve_spin_iters, diag_spin_iters);
-		AndroidPerfBuckets::MaybeReport("mtvu_reserve");
-	}
-#endif
 }
 
 // Makes sure theres enough room in the ring buffer
@@ -492,15 +500,19 @@ bool VU_Thread::IsDone()
 void VU_Thread::WaitVU()
 {
 	MTVU_LOG("MTVU - WaitVU!");
-#if defined(__ANDROID__)
-	const u64 diag_wait_start_us = AndroidPerfBuckets::NowUs();
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+	static std::atomic<u32> s_mtvu_wait_sample_counter{0};
+	const bool sample_wait = ((s_mtvu_wait_sample_counter.fetch_add(1, std::memory_order_relaxed) & 0x7f) == 0);
+	const u64 wait_start = sample_wait ? Common::Timer::GetCurrentValue() : 0;
 #endif
 	semaEvent.WaitForEmpty();
-#if defined(__ANDROID__)
-	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_waitvu_count);
-	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_waitvu_us,
-		AndroidPerfBuckets::NowUs() - diag_wait_start_us);
-	AndroidPerfBuckets::MaybeReport("waitvu");
+#if defined(__ANDROID__) && ARMSX2_ANDROID_VU_PROBES
+	if (sample_wait)
+	{
+		const u64 wait_ticks = Common::Timer::GetCurrentValue() - wait_start;
+		Console.WriteLnFmt("@@MTVU_WAIT_SAMPLE@@ usec={:.2f}",
+			Common::Timer::ConvertValueToSeconds(wait_ticks) * 1000000.0);
+	}
 #endif
 }
 
@@ -535,10 +547,6 @@ void VU_Thread::VifUnpack(vifStruct& _vif, VIFregisters& _vifRegs, const u8* dat
 	MTVU_LOG("MTVU - VifUnpack!");
 	u32 vif_copy_size = (u32)((uptr)&_vif.StructEnd - (uptr)&_vif.tag);
 	ReserveSpace(1 + size_u32(vif_copy_size) + size_u32(sizeof(VIFregistersMTVU)) + 1 + size_u32(size));
-#if defined(__ANDROID__)
-	AndroidPerfBuckets::Add(AndroidPerfBuckets::s_vif_mtvu_queue_count);
-	AndroidPerfBuckets::MaybeReport("vif_mtvu_queue");
-#endif
 	Write(MTVU_VIF_UNPACK);
 	Write(&_vif.tag, vif_copy_size);
 	WriteRegs(&_vifRegs);

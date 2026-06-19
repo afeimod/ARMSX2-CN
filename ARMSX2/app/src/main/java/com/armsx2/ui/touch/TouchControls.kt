@@ -23,6 +23,7 @@ object TouchControls {
     private const val KEY_PROFILES = "touch.profiles"
     private const val KEY_ACTIVE = "touch.active"
     private const val KEY_OPACITY = "touch.opacity"
+    private const val KEY_FACE_MULTI = "touch.faceMulti"
 
     /** Visible to the user. False when a controller is being used (latched
      *  off in onControllerInputDetected); flipped back on by any screen
@@ -59,6 +60,11 @@ object TouchControls {
     /** Master opacity 0.20..1.00. Persisted. */
     val opacity = mutableStateOf(0.55f)
 
+    /** When enabled, the face-button diamond has a shared hit layer so a
+     *  single thumb can slide/press between Cross/Square/Circle/Triangle and
+     *  emit overlapping button presses. */
+    val faceMultiTouch = mutableStateOf(false)
+
     /** Set true once load() has run — used to avoid clobbering disk state
      *  on first composition. */
     private var loaded = false
@@ -92,6 +98,7 @@ object TouchControls {
         val match = list.firstOrNull { it.name == active } ?: list.first()
         activeLayout.value = match.layout.copy()
         opacity.value = Main.prefs.getFloat(KEY_OPACITY, 0.55f).coerceIn(0.20f, 1.0f)
+        faceMultiTouch.value = Main.prefs.getBoolean(KEY_FACE_MULTI, false)
     }
 
     private fun persist() {
@@ -101,6 +108,7 @@ object TouchControls {
             .putString(KEY_PROFILES, arr.toString())
             .putString(KEY_ACTIVE, activeProfileName.value)
             .putFloat(KEY_OPACITY, opacity.value)
+            .putBoolean(KEY_FACE_MULTI, faceMultiTouch.value)
             .apply()
     }
 
@@ -161,6 +169,11 @@ object TouchControls {
 
     fun setOpacity(o: Float) {
         opacity.value = o.coerceIn(0.20f, 1.0f)
+        persist()
+    }
+
+    fun setFaceMultiTouch(enabled: Boolean) {
+        faceMultiTouch.value = enabled
         persist()
     }
 

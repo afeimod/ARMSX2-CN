@@ -70240,6 +70240,7 @@ SLUS-21106:
     nativeScaling: 2 # Fixes remaining post misalignment and light bloom and shadows.
     autoFlush: 1 # Fixes shadow alignment.
     bilinearUpscale: 2 # Fixes sun glare textures to behave like native.
+    textureInsideRT: 2 # Handles the "uneven pages" local transfers so the world (not just the HUD) renders on the HW renderer.
 SLUS-21107:
   name: "X-Men - The Official Game"
   region: "NTSC-U"

@@ -357,21 +357,22 @@ public class MainActivity extends AppCompatActivity {
 
         InputStream is = null;
         FileOutputStream os = null;
-        final boolean isShader = srcFile.contains("shaders");
+        // Files that MUST always reflect the current APK assets, even on an app
+        // UPDATE where the on-disk copy already exists (copyFile otherwise skips
+        // existing files): shader sources (a C++ entry-point bump needs the new
+        // GLSL or the compiler reports "main() is missing") AND the GameDB
+        // (GameIndex.yaml — shipped per-game fixes like True Crime's must reach
+        // users who already have an old copy, or the fix never applies).
+        final boolean forceFresh = srcFile.contains("shaders") || srcFile.endsWith("GameIndex.yaml");
         try {
             is = assetMgr.open(srcFile);
             File destFileObj = new File(destFile);
             boolean _exists = destFileObj.exists();
-            if (isShader) {
-                // Shader sources MUST always reflect the APK assets, otherwise a
-                // C++ entry-point bump (e.g. adding ps_convert_float32_depth_to_color)
-                // ends up requesting a function the on-disk shader doesn't define and
-                // the GLSL compiler reports "main() function is missing." Forcing
-                // _exists=false alone is not enough — a partial/denied write would
-                // leave the OLD file in place. Delete first so a write failure can't
-                // silently fall back to stale content.
+            if (forceFresh) {
+                // Delete first so a partial/denied write can't silently fall back
+                // to stale content.
                 if (_exists && !destFileObj.delete()) {
-                    Log.w("ARMSX2", "copyFile: failed to delete stale shader " + destFile);
+                    Log.w("ARMSX2", "copyFile: failed to delete stale asset " + destFile);
                 }
                 _exists = false;
             }
