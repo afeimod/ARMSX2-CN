@@ -124,6 +124,13 @@ struct GameScreenView: View {
     private static let importantStatusDisplayDuration: TimeInterval = 6.0
     private static let retroAchievementsToastDisplayDuration: TimeInterval = 5.0
 
+    private var displaySafeAreaInsets: UIEdgeInsets {
+        UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first?.windows
+            .first?.safeAreaInsets ?? .zero
+    }
+
     // MARK: - Body
 
     var body: some View {
@@ -233,8 +240,6 @@ struct GameScreenView: View {
         }
         .overlay(alignment: .top) {
             retroAchievementsToastOverlay
-                .padding(.top, 54)
-                .padding(.horizontal, 14)
         }
         .sheet(isPresented: $showPerGameSettings) {
             runtimePerGameSettingsContent
@@ -322,18 +327,9 @@ struct GameScreenView: View {
 
     private func menuButton() -> some View {
         Menu {
-            Toggle(isOn: Binding(
-                get: { settings.osdPreset != .off },
-                set: { newValue in
-                    if newValue {
-                        settings.osdPreset = settings.lastActiveOsdPreset
-                        ARMSX2Bridge.setPerformanceOverlayVisible(true)
-                    } else {
-                        settings.osdPreset = .off
-                        ARMSX2Bridge.setPerformanceOverlayVisible(false)
-                    }
-                }
-            )) {
+            Button {
+                cycleOsdPreset()
+            } label: {
                 Label(settings.localized("OSD"), systemImage: "speedometer")
             }
             Toggle(isOn: $userVirtualPadVisible) {
@@ -985,6 +981,7 @@ struct GameScreenView: View {
                 .padding(.vertical, 10)
                 .background(.black.opacity(0.72), in: Capsule())
                 .padding(.bottom, 24)
+                .padding(.horizontal, max(max(displaySafeAreaInsets.left, displaySafeAreaInsets.right), 14))
                 .transition(.opacity.combined(with: .move(edge: .bottom)))
         }
     }
@@ -1021,6 +1018,8 @@ struct GameScreenView: View {
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
                     .stroke(.white.opacity(0.12), lineWidth: 1)
             }
+            .padding(.top, max(displaySafeAreaInsets.top, 54))
+            .padding(.horizontal, max(max(displaySafeAreaInsets.left, displaySafeAreaInsets.right), 14))
             .allowsHitTesting(false)
             .transition(.opacity.combined(with: .move(edge: .top)))
         }
@@ -1062,6 +1061,23 @@ struct GameScreenView: View {
                 statusMessage = nil
             }
         }
+    }
+
+    private func cycleOsdPreset() {
+        let allPresets: [OsdPreset] = [.off, .simple, .detail, .full]
+        guard let currentIndex = allPresets.firstIndex(of: settings.osdPreset) else {
+            return
+        }
+        let nextIndex = (currentIndex + 1) % allPresets.count
+        let nextPreset = allPresets[nextIndex]
+
+        settings.osdPreset = nextPreset
+        ARMSX2Bridge.setPerformanceOverlayVisible(nextPreset != .off)
+
+        let label = nextPreset != .off
+            ? settings.localized(nextPreset.label)
+            : settings.localized("OFF")
+        presentStatusMessage("OSD: \(label)")
     }
 
     private func presentRetroAchievementsToast(_ notification: Notification) {
