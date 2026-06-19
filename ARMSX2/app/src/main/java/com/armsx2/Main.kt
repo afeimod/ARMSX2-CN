@@ -620,6 +620,9 @@ class Main: ComponentActivity() {
         private val vmControl = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
             Thread(r, "VMControl")
         }
+        private val vmStopControl = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+            Thread(r, "VMStop")
+        }
 
         fun pause() {
             if (vmStopInProgress)
@@ -628,6 +631,12 @@ class Main: ComponentActivity() {
                 if (!vmStopInProgress)
                     NativeApp.pause()
             }
+        }
+
+        fun pauseForOverlay() {
+            if (vmStopInProgress)
+                return
+            NativeApp.pause()
         }
 
         fun resume() {
@@ -640,6 +649,7 @@ class Main: ComponentActivity() {
         }
 
         fun stop(saveAutosave: Boolean = false, restartAfterStop: Boolean = false) {
+            val nativeActive = runCatching { NativeApp.hasActiveVM() }.getOrDefault(false)
             val shouldStop = synchronized(vmLifecycleLock) {
                 if (restartAfterStop)
                     vmRestartAfterStop = true
@@ -647,8 +657,8 @@ class Main: ComponentActivity() {
                     vmRestartAfterStop = false
 
                 if (vmStopInProgress) {
-                    false
-                } else if (eState.value == EmuState.STOPPED && !vmRunLoopActive) {
+                    nativeActive
+                } else if (eState.value == EmuState.STOPPED && !vmRunLoopActive && !nativeActive) {
                     false
                 } else {
                     vmStopInProgress = true
@@ -660,7 +670,7 @@ class Main: ComponentActivity() {
 
             WindowImpl.overlayVisible.value = false
             WindowImpl.showLibrary.value = false
-            vmControl.execute {
+            vmStopControl.execute {
                 println("@@ANDROID_STOP_JAVA@@ begin saveAutosave=$saveAutosave restart=$restartAfterStop")
                 if (saveAutosave)
                     NativeApp.saveAutosaveState()

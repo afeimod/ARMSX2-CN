@@ -788,7 +788,7 @@ static void LogAndroidGSSettings(const char* reason)
         static_cast<int>(EmuConfig.GS.UserHacks_BilinearHack));
 }
 
-static void ApplyLiveGSSettingsIfOpen(const char* reason)
+static bool ApplyLiveGSSettingsIfOpen(const char* reason)
 {
     if (MTGS::IsOpen())
     {
@@ -796,12 +796,13 @@ static void ApplyLiveGSSettingsIfOpen(const char* reason)
         if (!vm_pause.parked())
         {
             Console.WriteLnFmt("@@ANDROID_GS_SETTINGS@@ reason={} skipped=cpu_not_parked", reason);
-            return;
+            return false;
         }
         MTGS::ApplySettings();
     }
 
     LogAndroidGSSettings(reason);
+    return true;
 }
 
 // Generic setting writer — mirror of pcsx2-qt's settings save path.
@@ -902,7 +903,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_commitSettings(JNIEnv *env, jclass clazz) {
 // the same way the desktop pause menu's GS settings do. The UI writes the
 // changed keys via setSetting() first, then calls this.
 extern "C"
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass clazz) {
     // CRITICAL (Android stability): reloading the WHOLE EmuCore/GS section pulls
     // the device-identity fields (Renderer/Adapter/…) from the base layer too —
@@ -931,7 +932,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass cla
         auto lock = Host::GetSettingsLock();
         SettingsInterface* si = Host::GetSettingsInterface();
         if (!si)
-            return;
+            return JNI_FALSE;
         SettingsLoadWrapper slw(*si);
         EmuConfig.GS.LoadSave(slw);
     }
@@ -967,7 +968,7 @@ Java_kr_co_iefriends_pcsx2_NativeApp_applyGSSettingsLive(JNIEnv *env, jclass cla
         game->applyGSHardwareFixes(EmuConfig.GS);
         EmuConfig.GS.MaskUpscalingHacks();
     }
-    ApplyLiveGSSettingsIfOpen("ui_render_live");
+    return ApplyLiveGSSettingsIfOpen("ui_render_live") ? JNI_TRUE : JNI_FALSE;
 }
 
 extern "C"

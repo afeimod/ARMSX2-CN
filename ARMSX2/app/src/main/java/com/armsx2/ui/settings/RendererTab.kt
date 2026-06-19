@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import com.armsx2.Main
+import com.armsx2.config.LiveGsApplyQueue
 import com.armsx2.config.Settings
 import com.armsx2.ui.Colors
 import com.armsx2.ui.InGameOverlay
@@ -97,7 +98,7 @@ fun RendererTab(state: MutableState<Settings>) {
                 if (abs(Main.upscale.value - mult) >= 0.01f) {
                     Main.upscale.value = mult
                     Main.prefs.edit().putFloat("upscaleFloat", mult).apply()
-                    NativeApp.renderUpscalemultiplier(mult)
+                    LiveGsApplyQueue.applyUpscale(mult)
                 }
             },
         )

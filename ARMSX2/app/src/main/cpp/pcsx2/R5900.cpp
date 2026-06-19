@@ -424,6 +424,17 @@ __fi void _cpuEventTest_Shared()
 
 	_cpuTestTIMR();
 
+#if defined(__ANDROID__)
+	// Android pause/stop requests can be pumped during the counter/vsync work
+	// above. Once that happens, return to the rec/interpreter wrapper immediately
+	// instead of continuing through VU sync and scheduling a fresh event.
+	if (VMManager::Internal::IsExecutionInterrupted())
+	{
+		eeEventTestIsActive = false;
+		return;
+	}
+#endif
+
 	// ---- Interrupts -------------
 	// These are basically just DMAC-related events, which also piggy-back the same bits as
 	// the PS2's own DMA channel IRQs and IRQ Masks.

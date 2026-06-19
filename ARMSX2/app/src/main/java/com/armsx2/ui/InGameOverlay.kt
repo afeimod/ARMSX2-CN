@@ -78,6 +78,7 @@ import com.armsx2.GameInfo
 import com.armsx2.Main
 import com.armsx2.R
 import com.armsx2.config.ConfigStore
+import com.armsx2.config.LiveGsApplyQueue
 import com.armsx2.config.Settings
 import com.armsx2.config.SettingsScope
 import com.armsx2.ui.settings.AudioTab
@@ -398,7 +399,7 @@ object InGameOverlay {
         // can't trigger a GS device recreate. Gated on an actual GS diff so non-GS
         // taps (audio, frame limit, …) don't reconfigure the GS thread.
         if (previous.gsDiffersFrom(updated))
-            updated.applyGsLive()
+            LiveGsApplyQueue.applySettings(updated)
     }
 
     /** Toggle the overlay open/closed — for a physical "menu" button binding.
@@ -418,14 +419,12 @@ object InGameOverlay {
         // says PAUSED. The Kotlin flag can run ahead of the actual VM,
         // and a stale PAUSED left the VM running underneath while settings
         // changes (upscale → live GS reconfig) applied mid-frame.
-        // Main.pause() dispatches the (blocking) native pause to a
-        // background executor — it must NOT run here on the UI thread:
-        // SetState(Paused) drains MTVU/MTGS with no watchdog, which froze
-        // the app on long-press so the overlay showed late or never.
+        // Main.pauseForOverlay() directly signals the nonblocking native pause
+        // path so the EE breaks out of Execute() as soon as the overlay opens.
         // Mid-frame-settings safety doesn't depend on this call having
         // completed: commitSettings and the savestate/GS-reconfig JNI entry
         // points enforce VM quiescence themselves (ScopedVMPause).
-        if (Main.eState.value != EmuState.STOPPED) Main.pause()
+        if (Main.eState.value != EmuState.STOPPED) Main.pauseForOverlay()
         state.value = State.Root
         currentTab.value = Tab.PlayingNow
         // Resolve the current game's serial first; scope and settings

@@ -99,7 +99,7 @@ public class NativeApp {
 	 * renderer / hardware-fix / upscaling-fix changes apply mid-game. No-op
 	 * when the GS is closed — the keys still take effect on next launch.
 	 */
-	public static native void applyGSSettingsLive();
+	public static native boolean applyGSSettingsLive();
 	public static native int reloadPatches();
 
 	/**

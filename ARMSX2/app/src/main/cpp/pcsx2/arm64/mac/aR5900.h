@@ -26,7 +26,9 @@
 // here once; do not reuse them as scratch inside generators.
 //
 //   x19 = &cpuRegs              (base for all guest GPR / PC / HI/LO accesses)
-//   x20 = EE GPR cache register (the vtlb vmap path via x21 is the fast path)
+//   x20 = EE GPR cache register (was reserved for a 4GB fastmem base that was never
+//                                wired up — the vtlb vmap path via x21 is the fast path;
+//                                see REC_GPR_CACHE_REGS in aR5900.cpp)
 //   x21 = vtlb table base       (assigned for real in Phase 2)
 //
 #define RESTATEPTR vixl::aarch64::x19
@@ -37,8 +39,8 @@
 // --------------------------------------------------------------------------------------
 // Emit a call to the C++ vtlb_memRead / vtlb_memWrite helpers — semantically
 // identical to the interpreter's load/store ops (same virtual-memory path, so
-// these are correct by construction). The vtlb vmap path through REVTLBPTR is
-// the fast path used by the ARM64 backend.
+// these are correct by construction). The fastmem fast path (direct access via
+// REFASTMEMBASE + SIGSEGV backpatch through vtlb_DynBackpatchLoadStore) is Phase 2.2.
 //
 //   bits  : 8 / 16 / 32 / 64 (use the *Quad helpers for 128-bit).
 //   sign  : sign-extend (true) vs zero-extend (false) the loaded value into the GPR.
@@ -50,7 +52,6 @@
 // persistent state regs (x19-x21) are callee-saved and survive. Once the EE rec
 // has a register allocator (Phase 3) it must flush live caller-saved guest state
 // before invoking these.
-
 namespace pcsx2_macrec {
 
 void armEmitVtlbRead(u32 bits, bool sign, const vixl::aarch64::Register& dst, const vixl::aarch64::Register& addr);
@@ -194,10 +195,11 @@ void armEmitStoreQuad(u32 rt, u32 rs, s32 imm);
 // --------------------------------------------------------------------------------------
 //  Unaligned load/store opcode generators (LWL/LWR/SWL/SWR, LDL/LDR/SDL/SDR)
 // --------------------------------------------------------------------------------------
-// Bit-exact ports of the interpreter's byte-merge semantics. The aligned
-// word/doubleword is read through the vtlb, merged with GPR[rt] according to the
-// runtime low address bits, and store forms write the merged value back. These are
-// common in copy loops and are expensive when they force interpreter single-steps.
+// Bit-exact ports of the interpreter's byte-merge semantics (R5900OpcodeImpl.cpp):
+// the aligned word/doubleword is read through the vtlb, merged with GPR[rt]
+// according to the runtime low address bits, and (for the store forms) written
+// back. These are heavily used in memcpy-style EE loops (GOW, NFS) and previously
+// forced an interpreter single-step block per instruction.
 void armEmitLWL(u32 rt, u32 rs, s32 imm);
 void armEmitLWR(u32 rt, u32 rs, s32 imm);
 void armEmitSWL(u32 rt, u32 rs, s32 imm);
@@ -375,10 +377,22 @@ void armEmitBGEZAL(u32 rs, u32 target, u32 fallthrough, u32 linkpc);
 void armEmitBC1F(u32 target, u32 fallthrough);
 void armEmitBC1T(u32 target, u32 fallthrough);
 
-// Branch-likely forms evaluate the condition, write
-// cpuRegs.pc = taken ? target : fallthrough, and return the ARM64 condition that
-// is true when the branch is taken. The block compiler uses that live flags result
-// to skip the delay slot when the branch is not taken.
+// COP2 VU0-macro condition branches (test VU0.VI[REG_VPU_STAT].UL & 0x100, the VBS0
+// bit). BC2F branches when the bit is CLEAR, BC2T when SET. No VU sync/cycle commit
+// (faithful to x86 microVU_Macro.inl recBC2F/T — a plain bit-test branch).
+void armEmitBC2F(u32 target, u32 fallthrough);
+void armEmitBC2T(u32 target, u32 fallthrough);
+
+// --------------------------------------------------------------------------------------
+//  Branch-likely forms (BEQL/BNEL/BLEZL/BGTZL, BLTZL/BGEZL, BC1FL/BC1TL)
+// --------------------------------------------------------------------------------------
+// Same next-PC selection as the normal forms, but the delay slot is NULLIFIED when
+// the branch is not taken. The generator evaluates the condition, writes
+// cpuRegs.pc = taken ? target : fallthrough, and returns the ARM64 condition that
+// is true when the branch is TAKEN — with the flags still live, so the block
+// compiler can emit `b.<inverted> skip` around the delay-slot code it compiles
+// next. Returns the condition; `op` is the raw instruction word (the generator
+// decodes the form itself). Only call for ops recIsLikelyBranch accepts.
 vixl::aarch64::Condition armEmitBranchLikelyTest(u32 op, u32 target, u32 fallthrough);
 
 // --------------------------------------------------------------------------------------
@@ -544,6 +558,5 @@ void armEmitPEXT5(u32 rd, u32 rt);
 void armEmitPPAC5(u32 rd, u32 rt);
 bool armEmitPMFHL(u32 rd, u32 sa);
 void armEmitPMTHL(u32 rs, u32 sa);
-
 
 } // namespace pcsx2_macrec

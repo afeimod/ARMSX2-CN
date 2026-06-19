@@ -532,9 +532,9 @@ data class Settings(
      *  reconfigure the GS thread without the heavy CPU/JIT rebuild commitSettings()
      *  does. Lets renderer / hardware-fix / upscaling-fix changes apply instantly
      *  mid-game. */
-    fun applyGsLive() {
+    fun applyGsLive(): Boolean {
         writeGsToNative()
-        NativeApp.applyGSSettingsLive()
+        return NativeApp.applyGSSettingsLive()
     }
 
     /** True when any field a live GS reconfigure ([applyGsLive]) can pick up

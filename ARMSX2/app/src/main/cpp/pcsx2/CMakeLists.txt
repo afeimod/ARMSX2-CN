@@ -1110,6 +1110,7 @@ set(pcsx2arm64Sources
 	arm64/mac/Vif_UnpackNEON.cpp
 	arm64/mac/aR3000A.cpp
 	arm64/mac/aR5900.cpp
+	arm64/mac/aR5900Analysis.cpp
 	arm64/mac/aR5900Arith.cpp
 	arm64/mac/aR5900Branch.cpp
 	arm64/mac/aR5900FPU.cpp
@@ -1138,6 +1139,7 @@ set(pcsx2arm64Headers
 	arm64/mac/Vif_UnpackNEON.h
 	arm64/mac/aR3000A.h
 	arm64/mac/aR5900.h
+	arm64/mac/aR5900Analysis.h
 	arm64/mac/aVU.h
 	arm64/mac/aVU_IR.h
 	arm64/mac/aVU_Misc.h
@@ -1148,6 +1150,7 @@ set(pcsx2arm64Headers
 	arm64/mac/aVU_Compile.inl
 	arm64/mac/aVU_Flags.inl
 	arm64/mac/aVU_Lower.inl
+	arm64/mac/aVU_Macro.inl
 	arm64/mac/aVU_Misc.inl
 	arm64/mac/aVU_Tables.inl
 	arm64/mac/aVU_Upper.inl
