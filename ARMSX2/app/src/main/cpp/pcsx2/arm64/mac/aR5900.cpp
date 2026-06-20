@@ -1599,17 +1599,23 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache, const RecGp
 			return true;
 		}
 
-		case 0x00: // SLL
-		case 0x02: // SRL
-		case 0x03: // SRA
-		{
-			if (rd == 0)
-				return true;
-			const a64::Register& src = recCacheLoad(cache, rt);
-			const a64::Register& dst = recCacheDest(cache, rd, rt);
-			if (funct == 0x00)
-				armAsm->Lsl(dst.W(), src.W(), sa);
-			else if (funct == 0x02)
+			case 0x00: // SLL
+			case 0x02: // SRL
+			case 0x03: // SRA
+			{
+				if (rd == 0)
+					return true;
+				if (rt == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd);
+					armAsm->Mov(dst, 0);
+					return true;
+				}
+				const a64::Register& src = recCacheLoad(cache, rt);
+				const a64::Register& dst = recCacheDest(cache, rd, rt);
+				if (funct == 0x00)
+					armAsm->Lsl(dst.W(), src.W(), sa);
+				else if (funct == 0x02)
 				armAsm->Lsr(dst.W(), src.W(), sa);
 			else
 				armAsm->Asr(dst.W(), src.W(), sa);
@@ -1617,18 +1623,31 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache, const RecGp
 			return true;
 		}
 
-		case 0x04: // SLLV
-		case 0x06: // SRLV
-		case 0x07: // SRAV
-		{
-			if (rd == 0)
-				return true;
-			const a64::Register& src = recCacheLoad(cache, rt);
-			const a64::Register& sh = recCacheLoad(cache, rs);
-			const a64::Register& dst = recCacheDest(cache, rd, rt, rs);
-			if (funct == 0x04)
-				armAsm->Lsl(dst.W(), src.W(), sh.W());
-			else if (funct == 0x06)
+			case 0x04: // SLLV
+			case 0x06: // SRLV
+			case 0x07: // SRAV
+			{
+				if (rd == 0)
+					return true;
+				if (rt == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd);
+					armAsm->Mov(dst, 0);
+					return true;
+				}
+				const a64::Register& src = recCacheLoad(cache, rt);
+				if (rs == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd, rt);
+					move_w(dst.W(), src.W());
+					armAsm->Sxtw(dst, dst.W());
+					return true;
+				}
+				const a64::Register& sh = recCacheLoad(cache, rs);
+				const a64::Register& dst = recCacheDest(cache, rd, rt, rs);
+				if (funct == 0x04)
+					armAsm->Lsl(dst.W(), src.W(), sh.W());
+				else if (funct == 0x06)
 				armAsm->Lsr(dst.W(), src.W(), sh.W());
 			else
 				armAsm->Asr(dst.W(), src.W(), sh.W());
@@ -1636,18 +1655,30 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache, const RecGp
 			return true;
 		}
 
-		case 0x14: // DSLLV
-		case 0x16: // DSRLV
-		case 0x17: // DSRAV
-		{
-			if (rd == 0)
-				return true;
-			const a64::Register& src = recCacheLoad(cache, rt);
-			const a64::Register& sh = recCacheLoad(cache, rs);
-			const a64::Register& dst = recCacheDest(cache, rd, rt, rs);
-			if (funct == 0x14)
-				armAsm->Lsl(dst, src, sh);
-			else if (funct == 0x16)
+			case 0x14: // DSLLV
+			case 0x16: // DSRLV
+			case 0x17: // DSRAV
+			{
+				if (rd == 0)
+					return true;
+				if (rt == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd);
+					armAsm->Mov(dst, 0);
+					return true;
+				}
+				const a64::Register& src = recCacheLoad(cache, rt);
+				if (rs == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd, rt);
+					move_x(dst, src);
+					return true;
+				}
+				const a64::Register& sh = recCacheLoad(cache, rs);
+				const a64::Register& dst = recCacheDest(cache, rd, rt, rs);
+				if (funct == 0x14)
+					armAsm->Lsl(dst, src, sh);
+				else if (funct == 0x16)
 				armAsm->Lsr(dst, src, sh);
 			else
 				armAsm->Asr(dst, src, sh);
@@ -1660,17 +1691,25 @@ static bool recTryTranslateCachedOp(u32 op, RecGprCacheState& cache, const RecGp
 		case 0x3C: // DSLL32
 		case 0x3E: // DSRL32
 		case 0x3F: // DSRA32
-		{
-			if (rd == 0)
-				return true;
-			const u32 shift = sa + ((funct == 0x3C || funct == 0x3E || funct == 0x3F) ? 32 : 0);
-			const a64::Register& src = recCacheLoad(cache, rt);
-			const a64::Register& dst = recCacheDest(cache, rd, rt);
-			if (funct == 0x38 || funct == 0x3C)
-				armAsm->Lsl(dst, src, shift);
-			else if (funct == 0x3A || funct == 0x3E)
-				armAsm->Lsr(dst, src, shift);
-			else
+			{
+				if (rd == 0)
+					return true;
+				const u32 shift = sa + ((funct == 0x3C || funct == 0x3E || funct == 0x3F) ? 32 : 0);
+				if (rt == 0)
+				{
+					const a64::Register& dst = recCacheDest(cache, rd);
+					armAsm->Mov(dst, 0);
+					return true;
+				}
+				const a64::Register& src = recCacheLoad(cache, rt);
+				const a64::Register& dst = recCacheDest(cache, rd, rt);
+				if (shift == 0)
+					move_x(dst, src);
+				else if (funct == 0x38 || funct == 0x3C)
+					armAsm->Lsl(dst, src, shift);
+				else if (funct == 0x3A || funct == 0x3E)
+					armAsm->Lsr(dst, src, shift);
+				else
 				armAsm->Asr(dst, src, shift);
 			return true;
 		}

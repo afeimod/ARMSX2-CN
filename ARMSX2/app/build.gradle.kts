@@ -3,6 +3,9 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+val armsx2NativeLibName = providers.gradleProperty("armsx2.nativeLibName").orElse("emucore_4k")
+val armsx2HostPageSize = providers.gradleProperty("armsx2.hostPageSize").orElse("0x1000")
+
 android {
     namespace = "com.armsx2"
     compileSdk {
@@ -42,6 +45,8 @@ android {
                     arguments += "-DANDROID_STL=c++_static"
                     arguments += "-DCMAKE_BUILD_TYPE=Release"
                     arguments += "-DLTO_PCSX2_CORE=ON"
+                    arguments += "-DARMSX2_EMUCORE_LIBRARY_NAME=${armsx2NativeLibName.get()}"
+                    arguments += "-DARMSX2_ANDROID_HOST_PAGE_SIZE=${armsx2HostPageSize.get()}"
                     arguments += "-DCMAKE_C_FLAGS=-O3 -g"
                     arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
                 }
@@ -64,6 +69,8 @@ android {
                     arguments += "-DANDROID=true"
                     arguments += "-DANDROID_STL=c++_static"
                     arguments += "-DCMAKE_BUILD_TYPE=Debug"
+                    arguments += "-DARMSX2_EMUCORE_LIBRARY_NAME=${armsx2NativeLibName.get()}"
+                    arguments += "-DARMSX2_ANDROID_HOST_PAGE_SIZE=${armsx2HostPageSize.get()}"
                     arguments += "-DCMAKE_C_FLAGS=-O3 -g"
                     arguments += "-DCMAKE_CXX_FLAGS=-O3 -g"
                 }

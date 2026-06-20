@@ -135,7 +135,7 @@ object InGameOverlay {
 
     // Tab selection inside the Root state. Tabs are config groups —
     // PlayingNow holds the existing pause-menu options (Resume / Save
-    // State / Change Disc / Reset / Close / etc), Performance and
+    // State / Swap Disc / Reset / Close / etc), Performance and
     // Renderer host the speedhack + GS toggles backed by ConfigStore.
     private enum class Tab(val label: String) {
         PlayingNow("Play"),
@@ -521,7 +521,7 @@ object InGameOverlay {
         settingsOnly.value = false
         previewGame.value = null
         // Always resume if the VM is paused — close-paths that should
-        // preserve a paused VM (Change Disc picker, library, edit mode)
+        // preserve a paused VM (Swap Disc picker, library, edit mode)
         // go through closeKeepingState instead. The earlier
         // pausedByOverlay gate stale-locked the VM after the user
         // bounced through closeKeepingState (e.g. entered edit mode then
@@ -741,7 +741,7 @@ object InGameOverlay {
         // Prefer the cached GameInfo from Main.currentGame — it has the
         // pre-resolved compat (computed at library scan time), the cover
         // URL, and the container extension. Fallback to NativeApp.getPause*
-        // for paths that lack a GameInfo (Change Disc file picker, BIOS).
+        // for paths that lack a GameInfo (Swap/Boot Disc file picker, BIOS).
         val globalSettingsView =
             settingsOnly.value && currentSerial.value == null && previewGame.value == null
         val cached = if (globalSettingsView) null else (previewGame.value ?: Main.currentGame.value)
@@ -1143,8 +1143,7 @@ object InGameOverlay {
     }
 
     /** Playing Now — pause-menu actions laid out as a 4-wide bubble grid.
-     *  Three rows of four cells; the last row trails with two empty slots
-     *  so cell widths stay constant across all rows. Fits without
+     *  Three rows of four cells keep widths constant and fit without
      *  scrolling on phone landscape. Primary (Resume) and Danger (Close)
      *  accents land the eye on the most common entry and the destructive
      *  exit. Toggleable bubbles (Renderer, Frame Limit) carry their
@@ -1155,7 +1154,7 @@ object InGameOverlay {
             modifier = Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            // Row 1: primary + save/load + change disc.
+            // Row 1: primary + save/load + swap disc.
             BubbleRow {
                 BubbleButton(
                     "Resume",
@@ -1182,7 +1181,7 @@ object InGameOverlay {
                         State.HardcoreSaveStateBlocked else State.LoadStateSlots
                 }
                 BubbleButton(
-                    "Change Disc",
+                    "Swap Disc",
                     LineAwesomeIcons.CompactDiscSolid,
                     modifier = Modifier.weight(1f),
                 ) {
@@ -1190,12 +1189,24 @@ object InGameOverlay {
                     intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
                     intent.setType("*/*")
-                    Main.instance?.openFileAction?.launch(intent)
+                    Main.instance?.swapDiscAction?.launch(intent)
                     closeKeepingState()
                 }
             }
-            // Row 2: library + renderer + frame limit + touch layout.
+            // Row 2: boot disc + library + renderer + frame limit.
             BubbleRow {
+                BubbleButton(
+                    "Boot Disc",
+                    LineAwesomeIcons.CompactDiscSolid,
+                    modifier = Modifier.weight(1f),
+                ) {
+                    val intent = Intent(Intent.ACTION_GET_CONTENT)
+                    intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, false)
+                    intent.setType("*/*")
+                    Main.instance?.bootDiscAction?.launch(intent)
+                    closeKeepingState()
+                }
                 BubbleButton(
                     "Library",
                     LineAwesomeIcons.ThLargeSolid,
@@ -1255,6 +1266,9 @@ object InGameOverlay {
                     val enabled = !frameLimitOn.value
                     saveSettings(settingsState.value.copy(frameLimitEnable = enabled))
                 }
+            }
+            // Row 3: touch layout, OSD master toggle, reset, close.
+            BubbleRow {
                 BubbleButton(
                     "Touch Layout",
                     LineAwesomeIcons.ThLargeSolid,
@@ -1268,9 +1282,6 @@ object InGameOverlay {
                     // the editor.
                     closeKeepingState()
                 }
-            }
-            // Row 3: OSD master toggle, reset, close, trailing spacer.
-            BubbleRow {
                 BubbleButton(
                     "OSD",
                     if (osdShown.value) LineAwesomeIcons.EyeSolid
@@ -1294,8 +1305,17 @@ object InGameOverlay {
                     LineAwesomeIcons.PowerOffSolid,
                     accent = BubbleAccent.Danger,
                     modifier = Modifier.weight(1f),
-                ) { state.value = State.ExitConfirm }
-                Spacer(Modifier.weight(1f))
+                ) {
+                    // Auto-save on exit (Save Manager toggle): close straight
+                    // to the autosave slot, no prompt. Otherwise show the
+                    // Save-and-Exit / Exit-without-saving confirm.
+                    if (Main.prefs.getBoolean("autoSaveOnExit", false)) {
+                        Main.stop(saveAutosave = true)
+                        closeKeepingState()
+                    } else {
+                        state.value = State.ExitConfirm
+                    }
+                }
             }
         }
     }

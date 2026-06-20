@@ -1,6 +1,7 @@
 package com.armsx2.ui
 
 import android.graphics.BitmapFactory
+import android.widget.Toast
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -23,13 +24,17 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyHorizontalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -37,38 +42,44 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.armsx2.Main
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kr.co.iefriends.pcsx2.NativeApp
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
- * Save-state slot picker shared between Save and Load modes.
+ * Save-state slot picker, doubling as the per-game Save Manager.
  *
  * 10 numbered slots — matches PCSX2 convention. Each tile previews via
- * `NativeApp.getImageSlot(slot)` (PNG-encoded snapshot) plus the game
- * path from `getGamePathSlot(slot)`. Empty slots show a placeholder; in
- * Load mode they're disabled.
+ * `NativeApp.getImageSlot(slot)` (PNG-encoded snapshot) plus the on-disk
+ * `.p2s` file from `getGamePathSlot(slot)`. Slots are inherently per-game
+ * (the filename encodes serial + CRC), so this whole screen is scoped to
+ * the running game.
+ *
+ * Save mode: tap a tile to write that slot. Load mode = the manager:
+ *   - tap a non-empty tile to load it,
+ *   - the red ✕ deletes a slot (with confirm),
+ *   - Backup snapshots every existing slot into `savestates/backups/`,
+ *     Restore copies the last snapshot back (with confirm),
+ *   - the "Auto-save on exit" switch (global pref) makes Close Game write
+ *     the autosave slot automatically instead of prompting.
+ * File ops run in Kotlin (the app holds MANAGE_EXTERNAL_STORAGE) off the
+ * main thread; `refreshTick` re-probes the tiles afterward.
  *
  * Autosave tile (Load mode only, shown above slot 0 when present): the
- * "Save State And Exit" overlay action writes to a dedicated
- * `.autosave.p2s` file rather than slot 0, so numbered slots stay
- * user-controlled. The tile only appears when `hasAutosaveState` is
- * true on enter — probed off-thread at composition.
- *
- * On select:
- *   - Save: NativeApp.saveStateToSlot(slot), then onDone (closes overlay,
- *     resumes VM).
- *   - Load: NativeApp.loadStateFromSlot(slot) or loadAutosaveState() for
- *     the autosave tile, then onDone (same flow).
- *
- * Slot probe runs off-thread via produceState — getImageSlot is a JNI call
- * that touches disk for the snapshot blob.
+ * "Save State And Exit" action writes a dedicated `.autosave.p2s` rather
+ * than slot 0, so numbered slots stay user-controlled.
  */
 object SaveStatePicker {
     enum class Mode { Save, Load }
@@ -77,6 +88,46 @@ object SaveStatePicker {
     // Fixed tile width — LazyHorizontalGrid computes tile height from the
     // grid's intrinsic height ÷ rows. Width is up to the tile to set.
     private const val TILE_WIDTH_DP = 180
+
+    // ---- File-backed manager ops (savestates live under a MANAGE_EXTERNAL_
+    // STORAGE path, so plain File access works) -------------------------------
+
+    /** Directory that holds this game's `.p2s` slots (parent of any slot path). */
+    private fun savestateDir(): File? =
+        runCatching { File(NativeApp.getGamePathSlot(0)).parentFile }.getOrNull()
+
+    private fun backupDir(): File? = savestateDir()?.let { File(it, "backups") }
+
+    /** The slot's `.p2s` file iff it exists on disk, else null. */
+    private fun existingSlotFile(slot: Int): File? =
+        runCatching { File(NativeApp.getGamePathSlot(slot)) }.getOrNull()?.takeIf { it.exists() }
+
+    private fun deleteSlot(slot: Int): Boolean =
+        runCatching { existingSlotFile(slot)?.delete() ?: false }.getOrDefault(false)
+
+    /** Copy every existing slot for this game into backups/. Returns the count. */
+    private fun backupAll(): Int {
+        val bdir = backupDir()?.apply { mkdirs() } ?: return 0
+        var n = 0
+        (0 until SLOTS).forEach { s ->
+            val f = existingSlotFile(s) ?: return@forEach
+            if (runCatching { f.copyTo(File(bdir, f.name), overwrite = true) }.isSuccess) n++
+        }
+        return n
+    }
+
+    /** Copy the last backup of each slot back over the live slots. */
+    private fun restoreAll(): Int {
+        val dir = savestateDir() ?: return 0
+        val bdir = backupDir() ?: return 0
+        var n = 0
+        (0 until SLOTS).forEach { s ->
+            val name = runCatching { File(NativeApp.getGamePathSlot(s)).name }.getOrNull() ?: return@forEach
+            val bak = File(bdir, name)
+            if (bak.exists() && runCatching { bak.copyTo(File(dir, name), overwrite = true) }.isSuccess) n++
+        }
+        return n
+    }
 
     @Composable
     fun Render(mode: Mode, onDone: () -> Unit, onBack: () -> Unit) {
@@ -87,27 +138,70 @@ object SaveStatePicker {
         // handles thread attachment fine. onDone hops back to Main for
         // the overlay state mutation.
         val scope = rememberCoroutineScope()
+        val context = LocalContext.current
+        val manage = mode == Mode.Load
+        // Bumped after a delete/restore so the slot tiles re-probe disk.
+        var refreshTick by remember { mutableStateOf(0) }
+        var pendingDelete by remember { mutableStateOf<Int?>(null) }
+        var pendingRestore by remember { mutableStateOf(false) }
         // Probe the autosave slot once at composition (Load mode only).
-        // Off-thread because hasAutosaveState touches disk via
-        // FileSystem::FileExists.
         val hasAutosave by produceState<Boolean>(initialValue = false, mode) {
             value = if (mode == Mode.Load) withContext(Dispatchers.IO) {
                 NativeApp.hasAutosaveState()
             } else false
         }
+
+        // Destructive-action confirmations.
+        pendingDelete?.let { slot ->
+            ConfirmDialog(
+                title = "Delete Slot $slot?",
+                message = "Permanently removes the save in slot $slot for this game.",
+                confirmLabel = "DELETE",
+                onConfirm = {
+                    pendingDelete = null
+                    scope.launch(Dispatchers.IO) {
+                        deleteSlot(slot)
+                        withContext(Dispatchers.Main) { refreshTick++ }
+                    }
+                },
+                onDismiss = { pendingDelete = null },
+            )
+        }
+        if (pendingRestore) {
+            ConfirmDialog(
+                title = "Restore backup?",
+                message = "Replaces this game's current slots with the last backup. Current saves are overwritten.",
+                confirmLabel = "RESTORE",
+                onConfirm = {
+                    pendingRestore = false
+                    scope.launch(Dispatchers.IO) {
+                        val n = restoreAll()
+                        withContext(Dispatchers.Main) {
+                            refreshTick++
+                            Toast.makeText(
+                                context,
+                                if (n > 0) "Restored $n save(s)" else "No backup found",
+                                Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                },
+                onDismiss = { pendingRestore = false },
+            )
+        }
+
         Column(Modifier.fillMaxSize()) {
             Text(
-                if (mode == Mode.Save) "Save State" else "Load State",
+                if (mode == Mode.Save) "Save State" else "Load / Manage Saves",
                 color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
             )
+            if (manage) {
+                Spacer(Modifier.height(8.dp))
+                ManagerHeader(scope, context) { pendingRestore = true }
+            }
             Spacer(Modifier.height(8.dp))
-            // 2 columns keeps the tiles big enough to read in the 420dp
-            // overlay column. LazyVerticalGrid handles scroll if more
-            // slots are added later.
             // 2-row horizontal grid. Autosave (Load mode only) is the
             // leading tile, then numbered slots 0-9 flow column-by-column.
-            // Scrolls horizontally — fits ~5-6 columns on a typical phone
-            // landscape, rest accessible by swiping.
             LazyHorizontalGrid(
                 rows = GridCells.Fixed(2),
                 contentPadding = PaddingValues(2.dp),
@@ -126,23 +220,99 @@ object SaveStatePicker {
                     }
                 }
                 items((0 until SLOTS).toList(), key = { "slot_$it" }) { slot ->
-                    SlotTile(slot, mode) { selected ->
-                        when (mode) {
-                            Mode.Save -> scope.launch(Dispatchers.IO) {
-                                NativeApp.saveStateToSlot(selected)
-                                withContext(Dispatchers.Main) { onDone() }
+                    SlotTile(
+                        slot = slot,
+                        mode = mode,
+                        refreshTick = refreshTick,
+                        onPick = { selected ->
+                            when (mode) {
+                                Mode.Save -> scope.launch(Dispatchers.IO) {
+                                    NativeApp.saveStateToSlot(selected)
+                                    withContext(Dispatchers.Main) { onDone() }
+                                }
+                                Mode.Load -> scope.launch(Dispatchers.IO) {
+                                    NativeApp.loadStateFromSlot(selected)
+                                    withContext(Dispatchers.Main) { onDone() }
+                                }
                             }
-                            Mode.Load -> scope.launch(Dispatchers.IO) {
-                                NativeApp.loadStateFromSlot(selected)
-                                withContext(Dispatchers.Main) { onDone() }
-                            }
-                        }
-                    }
+                        },
+                        onDelete = { pendingDelete = it },
+                    )
                 }
             }
             Spacer(Modifier.height(8.dp))
             BackRow(onBack)
         }
+    }
+
+    // Manager controls: auto-save-on-exit switch + Backup / Restore.
+    @Composable
+    private fun ManagerHeader(
+        scope: CoroutineScope,
+        context: android.content.Context,
+        onRestoreRequest: () -> Unit,
+    ) {
+        var autoSave by remember { mutableStateOf(Main.prefs.getBoolean("autoSaveOnExit", false)) }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("Auto-save on exit", color = Color.White, fontSize = 12.sp)
+            Spacer(Modifier.width(6.dp))
+            Switch(
+                checked = autoSave,
+                onCheckedChange = {
+                    autoSave = it
+                    Main.prefs.edit().putBoolean("autoSaveOnExit", it).apply()
+                },
+            )
+            Spacer(Modifier.weight(1f))
+            PillButton("Backup") {
+                scope.launch(Dispatchers.IO) {
+                    val n = backupAll()
+                    withContext(Dispatchers.Main) {
+                        Toast.makeText(
+                            context,
+                            if (n > 0) "Backed up $n save(s)" else "No saves to back up",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                }
+            }
+            Spacer(Modifier.width(6.dp))
+            PillButton("Restore", onRestoreRequest)
+        }
+    }
+
+    @Composable
+    private fun PillButton(label: String, onClick: () -> Unit) {
+        Box(
+            Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(Color(0xFF272525).copy(alpha = 0.6f))
+                .border(1.dp, Color(0xFF3A3A3A).copy(alpha = 0.7f), RoundedCornerShape(8.dp))
+                .clickable(onClick = onClick)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+        ) {
+            Text(label, color = Color(0xFFAACCFF), fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+
+    @Composable
+    private fun ConfirmDialog(
+        title: String,
+        message: String,
+        confirmLabel: String,
+        onConfirm: () -> Unit,
+        onDismiss: () -> Unit,
+    ) {
+        AlertDialog(
+            onDismissRequest = onDismiss,
+            containerColor = Color(0xFF1B1A1A),
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
+            title = { Text(title, fontWeight = FontWeight.Bold, fontSize = 15.sp) },
+            text = { Text(message, fontSize = 13.sp) },
+            confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel) } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } },
+        )
     }
 
     @Composable
@@ -182,12 +352,15 @@ object SaveStatePicker {
     }
 
     @Composable
-    private fun SlotTile(slot: Int, mode: Mode, onPick: (Int) -> Unit) {
-        // Probe the slot off-thread. Recompositions cheaply hit the cache.
-        val gamePath by produceState<String?>(initialValue = null, slot) {
-            value = withContext(Dispatchers.IO) { NativeApp.getGamePathSlot(slot) }
+    private fun SlotTile(slot: Int, mode: Mode, refreshTick: Int, onPick: (Int) -> Unit, onDelete: (Int) -> Unit) {
+        // Re-probe whenever a delete/restore bumps the tick. File existence is
+        // the authoritative "empty" signal (getGamePathSlot builds a name even
+        // for empty slots).
+        val tick = refreshTick
+        val file by produceState<File?>(initialValue = null, slot, tick) {
+            value = withContext(Dispatchers.IO) { existingSlotFile(slot) }
         }
-        val image by produceState<android.graphics.Bitmap?>(initialValue = null, slot) {
+        val image by produceState<android.graphics.Bitmap?>(initialValue = null, slot, tick) {
             value = withContext(Dispatchers.IO) {
                 runCatching {
                     val bytes = NativeApp.getImageSlot(slot) ?: return@runCatching null
@@ -196,10 +369,17 @@ object SaveStatePicker {
             }
         }
 
-        val empty = gamePath.isNullOrEmpty()
+        val empty = file == null
         // Load mode: empty slots are disabled. Save mode: tap = overwrite,
         // empty slots are valid targets.
         val enabled = mode == Mode.Save || !empty
+        val meta = remember(file) {
+            file?.let { f ->
+                val date = SimpleDateFormat("dd/MM/yy HH:mm", Locale.getDefault()).format(Date(f.lastModified()))
+                val mb = f.length() / 1024.0 / 1024.0
+                "$date  •  ${"%.1f".format(mb)} MB"
+            }
+        }
         TileFrame(
             borderColor = Color(0xFF3A3A3A).copy(alpha = 0.6f),
             backgroundColor = Color(0xFF272525).copy(alpha = 0.3f),
@@ -218,12 +398,27 @@ object SaveStatePicker {
             BottomLabel(
                 title = "Slot $slot",
                 subtitle = when {
-                    !empty -> gamePath?.substringAfterLast('/')?.substringBeforeLast('.') ?: ""
+                    !empty -> meta
                     mode == Mode.Save -> "(empty — tap to save here)"
                     else -> null
                 },
                 titleColor = Color.White,
             )
+            // Delete affordance — manager (Load) mode, non-empty slots only.
+            if (mode == Mode.Load && !empty) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(6.dp)
+                        .size(26.dp)
+                        .clip(RoundedCornerShape(13.dp))
+                        .background(Color(0xCCB00020))
+                        .clickable { onDelete(slot) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("✕", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 

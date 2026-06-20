@@ -243,13 +243,11 @@ bool VMManager::PerformEarlyHardwareChecks(const char** error)
 	}
 #endif
 #elif defined(ARCH_ARM64)
-	// The build targets a fixed host page size (__pagesize, 16K on Android). It
-	// runs safely when the OS page size is the same OR a smaller divisor —
-	// 16K-granular mmap/mprotect are valid on 4K-page kernels (16K is a multiple
-	// of 4K). Only a LARGER OS page (e.g. 64K) or a non-dividing size is
-	// unsupportable. This lets one 16K build serve both 16K and 4K devices.
+	// The ARM64 core uses a compile-time host page size in fastmem/VTLB paths.
+	// ELF alignment for Android 16K-page devices is handled at link time, but the
+	// core itself still needs the runtime kernel page size to match this build.
 	const size_t runtime_host_page_size = HostSys::GetRuntimePageSize();
-	if (runtime_host_page_size > __pagesize || (__pagesize % runtime_host_page_size) != 0)
+	if (__pagesize != runtime_host_page_size)
 	{
 		*error = "Page size mismatch. This build cannot run on your system.\n\n" COMMON_DOWNLOAD_MESSAGE;
 		return false;

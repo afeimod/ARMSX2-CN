@@ -89,6 +89,25 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(eeCycleSkip = it)) },
         )
         SettingsDivider()
+        // Recompiler float-clamping accuracy (PCSX2 parity). Higher = more
+        // accurate float handling (fixes SPS / missing geometry / VU glitches)
+        // at a speed cost. Needs a recompiler reset, so restart the game.
+        SegmentedRow(
+            label = "EE/FPU Clamping",
+            options = listOf("None", "Normal", "Extra", "Full"),
+            selectedIndex = s.eeClampMode.coerceIn(0, 3),
+            description = "FPU overflow/rounding accuracy. Restart the game to apply.",
+            onChange = { apply(s.copy(eeClampMode = it)) },
+        )
+        SettingsDivider()
+        SegmentedRow(
+            label = "VU Clamping",
+            options = listOf("None", "Normal", "Extra", "Extra+Sign"),
+            selectedIndex = s.vuClampMode.coerceIn(0, 3),
+            description = "VU float clamping (both VU0 + VU1). Restart the game to apply.",
+            onChange = { apply(s.copy(vuClampMode = it)) },
+        )
+        SettingsDivider()
         // Speed Limit / Custom FPS — caps emulation speed as a % of native
         // (100% ≈ 60fps NTSC / 50fps PAL). Only effective with the Frame
         // Limiter on. Driven by a preset index; stores the actual percent.

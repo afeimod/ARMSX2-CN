@@ -88,7 +88,7 @@ object ConfigStore {
      *   per-game override (if present) ∘ global ∘ defaults.
      *
      * Pass null serial to skip the per-game tier (BIOS boots, anonymous
-     * launches via Change Disc when no GameInfo was carried through).
+     * launches via Swap/Boot Disc when no GameInfo was carried through).
      */
     fun resolveForGame(serial: String?): Settings {
         val global = loadGlobal()

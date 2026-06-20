@@ -29,10 +29,7 @@ import compose.icons.lineawesomeicons.BugSolid
 
 /**
  * Bug icon — opens a drawer with the runtime-test suite results
- * (codegen / patch / VU JIT / EE JIT / VIF / EE seq). The tests
- * themselves still run automatically when the main UI renders for the
- * first time; this button just exposes their PASS/FAIL counts so the
- * main screen can show the games list instead.
+ * (codegen / patch / VU JIT / EE JIT / VIF / EE seq).
  */
 class TestsButton : ToolbarButton() {
     override var icon = mutableStateOf<ImageVector?>(LineAwesomeIcons.BugSolid)

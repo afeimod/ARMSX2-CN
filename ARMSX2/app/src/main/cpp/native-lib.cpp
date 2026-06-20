@@ -17,6 +17,7 @@
 #include "common/ZipHelpers.h"
 #include "pcsx2/GS.h"
 #include "pcsx2/VMManager.h"
+#include "pcsx2/CDVD/CDVDcommon.h"
 #include "pcsx2/Patch.h"
 #include "pcsx2/R5900.h"
 #include "PerformanceMetrics.h"
@@ -1419,10 +1420,11 @@ Java_kr_co_iefriends_pcsx2_NativeApp_runVMThread(JNIEnv *env, jclass clazz,
         s_cpu_thread_queue.clear();
     }
 
-//    const char* error;
-//    if (!VMManager::PerformEarlyHardwareChecks(&error)) {
-//        return false;
-//    }
+    const char* error;
+    if (!VMManager::PerformEarlyHardwareChecks(&error)) {
+        Console.Error("Early hardware check failed: %s", error ? error : "unknown error");
+        return false;
+    }
 
     // fast_boot : (false:bios->game, true:game)
     VMBootParameters boot_params;
@@ -1692,6 +1694,44 @@ Java_kr_co_iefriends_pcsx2_NativeApp_loadStateFromSlot(JNIEnv *env, jclass clazz
         return false;
     }
     return VMManager::LoadStateFromSlot(p_slot);
+}
+
+extern "C"
+JNIEXPORT jboolean JNICALL
+Java_kr_co_iefriends_pcsx2_NativeApp_changeDisc(JNIEnv *env, jclass clazz, jstring p_path) {
+    // Hot-swap the CDVD image on the running VM (NetherSX2-style) instead of
+    // rebooting. ChangeDisc cycles the tray so the game detects the new disc —
+    // which is exactly what CodeBreaker / multi-disc hand-offs rely on — and
+    // emits the on-screen "Disc changed to '...'" OSD. Booting a picked disc is
+    // handled separately in Kotlin by stopping and restarting the VM.
+    if (!VMManager::HasValidVM())
+        return false;
+    const char* c_path = (p_path != nullptr) ? env->GetStringUTFChars(p_path, nullptr) : nullptr;
+    if (c_path == nullptr)
+        return false;
+    std::string path(c_path);
+    env->ReleaseStringUTFChars(p_path, c_path);
+    if (path.empty())
+        return false;
+    // ChangeDisc mutates live CDVD/IOP/tray state OWNED by the CPU thread, so it
+    // must run THERE, not from JNI (doing it here races the emulator and hangs).
+    // Park the CPU thread so the paused idle loop (runVMThread) drains the queue
+    // within a frame; RunOnCPUThread(block) then waits for the swap to finish.
+    // We deliberately do NOT resume here — the Kotlin caller unpauses afterward
+    // (single resume authority), so the game runs and detects the new disc.
+    const bool was_running = (VMManager::GetState() == VMState::Running);
+    if (was_running) {
+        VMManager::SetPaused(true);
+        if (!s_execute_exit.load(std::memory_order_acquire) && Cpu)
+            Cpu->ExitExecution();
+        for (int i = 0; i < 3000 && !s_execute_exit.load(std::memory_order_acquire); ++i)
+            usleep(1000);
+    }
+    bool ok = false;
+    Host::RunOnCPUThread([&path, &ok]() {
+        ok = VMManager::ChangeDisc(CDVD_SourceType::Iso, path);
+    }, /*block=*/true);
+    return ok;
 }
 
 extern "C"

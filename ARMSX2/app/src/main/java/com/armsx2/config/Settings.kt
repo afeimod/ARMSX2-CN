@@ -25,6 +25,12 @@ data class Settings(
     val eeCycleRate: Int = 0,
     /** EmuCore/Speedhacks/EECycleSkip — 0..3. 0 = no skip. */
     val eeCycleSkip: Int = 0,
+    /** EE/FPU clamp mode — 0 None / 1 Normal / 2 Extra / 3 Full (PCSX2 default Normal).
+     *  Unpacks to EmuCore/CPU/Recompiler fpuOverflow/fpuExtraOverflow/fpuFullMode. */
+    val eeClampMode: Int = 1,
+    /** VU clamp mode — 0 None / 1 Normal / 2 Extra / 3 Extra+Sign (PCSX2 default Normal).
+     *  Unpacks to vu0/vu1 Overflow/ExtraOverflow/SignOverflow. */
+    val vuClampMode: Int = 1,
     /** EmuCore/Speedhacks/vuThread — Multi-Threaded VU1 (MTVU).
      *  Kept on by default for the mac ARM64 backend, but persisted normally
      *  so testers can A/B games which dislike MTVU. */
@@ -333,6 +339,17 @@ data class Settings(
         // Speedhacks
         NativeApp.setSetting("EmuCore/Speedhacks", "EECycleRate", "int", eeCycleRate.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "EECycleSkip", "int", eeCycleSkip.toString())
+        // EE/FPU + VU clamping (recompiler accuracy). Each mode unpacks to the
+        // PCSX2 bit flags below; both VUs get the same mode. Needs a recompiler
+        // reset (commitSettings / game restart) to take effect.
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "fpuOverflow", "bool", (eeClampMode >= 1).toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "fpuExtraOverflow", "bool", (eeClampMode >= 2).toString())
+        NativeApp.setSetting("EmuCore/CPU/Recompiler", "fpuFullMode", "bool", (eeClampMode >= 3).toString())
+        for (vu in arrayOf("vu0", "vu1")) {
+            NativeApp.setSetting("EmuCore/CPU/Recompiler", "${vu}Overflow", "bool", (vuClampMode >= 1).toString())
+            NativeApp.setSetting("EmuCore/CPU/Recompiler", "${vu}ExtraOverflow", "bool", (vuClampMode >= 2).toString())
+            NativeApp.setSetting("EmuCore/CPU/Recompiler", "${vu}SignOverflow", "bool", (vuClampMode >= 3).toString())
+        }
         NativeApp.setSetting("EmuCore/Speedhacks", "vuThread", "bool", mtvu.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "vu1Instant", "bool", vu1Instant.toString())
         NativeApp.setSetting("EmuCore/Speedhacks", "vuFlagHack", "bool", vuFlagHack.toString())
@@ -607,6 +624,8 @@ data class Settings(
     fun toJson(): JSONObject = JSONObject().apply {
         put("eeCycleRate", eeCycleRate)
         put("eeCycleSkip", eeCycleSkip)
+        put("eeClampMode", eeClampMode)
+        put("vuClampMode", vuClampMode)
         put("mtvu", mtvu)
         put("vu1Instant", vu1Instant)
         put("vuFlagHack", vuFlagHack)
@@ -734,6 +753,8 @@ data class Settings(
             return Settings(
                 eeCycleRate = json.optInt("eeCycleRate", def.eeCycleRate),
                 eeCycleSkip = json.optInt("eeCycleSkip", def.eeCycleSkip),
+                eeClampMode = json.optInt("eeClampMode", def.eeClampMode),
+                vuClampMode = json.optInt("vuClampMode", def.vuClampMode),
                 mtvu = json.optBoolean("mtvu", def.mtvu),
                 vu1Instant = json.optBoolean("vu1Instant", def.vu1Instant),
                 vuFlagHack = json.optBoolean("vuFlagHack", def.vuFlagHack),
@@ -871,6 +892,8 @@ data class Settings(
             val j = JSONObject()
             if (current.eeCycleRate         != base.eeCycleRate)         j.put("eeCycleRate", current.eeCycleRate)
             if (current.eeCycleSkip         != base.eeCycleSkip)         j.put("eeCycleSkip", current.eeCycleSkip)
+            if (current.eeClampMode         != base.eeClampMode)         j.put("eeClampMode", current.eeClampMode)
+            if (current.vuClampMode         != base.vuClampMode)         j.put("vuClampMode", current.vuClampMode)
             if (current.mtvu                != base.mtvu)                j.put("mtvu", current.mtvu)
             if (current.vu1Instant          != base.vu1Instant)          j.put("vu1Instant", current.vu1Instant)
             if (current.vuFlagHack          != base.vuFlagHack)          j.put("vuFlagHack", current.vuFlagHack)
@@ -994,6 +1017,8 @@ data class Settings(
         fun merge(base: Settings, overrides: JSONObject): Settings = Settings(
             eeCycleRate = if (overrides.has("eeCycleRate")) overrides.getInt("eeCycleRate") else base.eeCycleRate,
             eeCycleSkip = if (overrides.has("eeCycleSkip")) overrides.getInt("eeCycleSkip") else base.eeCycleSkip,
+            eeClampMode = if (overrides.has("eeClampMode")) overrides.getInt("eeClampMode") else base.eeClampMode,
+            vuClampMode = if (overrides.has("vuClampMode")) overrides.getInt("vuClampMode") else base.vuClampMode,
             mtvu = if (overrides.has("mtvu")) overrides.getBoolean("mtvu") else base.mtvu,
             vu1Instant = if (overrides.has("vu1Instant")) overrides.getBoolean("vu1Instant") else base.vu1Instant,
             vuFlagHack = if (overrides.has("vuFlagHack")) overrides.getBoolean("vuFlagHack") else base.vuFlagHack,

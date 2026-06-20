@@ -377,7 +377,7 @@ class Main: ComponentActivity() {
         // Cached metadata for the currently-running game. Populated when
         // GamesList taps a card (so we have title, serial, compatibility,
         // extension and the cover URL ready), cleared when the user
-        // launches via paths that don't have a GameInfo handy (Change Disc
+        // launches via paths that don't have a GameInfo handy (Swap/Boot Disc
         // file picker, BIOS-only boot). InGameOverlay reads this for its
         // top-left game info block — falls back to NativeApp.getPause* +
         // a runtime compat lookup when it's null.
@@ -530,7 +530,7 @@ class Main: ComponentActivity() {
          * stored on Main.currentGame so the in-game overlay can show
          * cover art / extension badge / pre-resolved compat stars
          * without re-querying gamedb. Pass null when launching from a
-         * path that doesn't have a GameInfo (Change Disc file picker).
+         * path that doesn't have a GameInfo (Swap/Boot Disc file picker).
          */
         fun launchGame(uri: String, info: GameInfo? = null) {
             if (uri.isBlank()) {
@@ -818,22 +818,53 @@ class Main: ComponentActivity() {
         }
     }
 
-    val openFileAction = registerForActivityResult(
+    val swapDiscAction = registerForActivityResult(
         StartActivityForResult()
     ) { result: ActivityResult ->
         if (result.resultCode == RESULT_OK) {
             try {
                 val intent = result.data
-                if (intent != null) {
-                    m_szGamefile = intent.dataString ?: ""
-                    if (m_szGamefile.isNotEmpty()) {
-                        // No GameInfo on this path — overlay's game header
-                        // falls back to NativeApp.getPause* + a runtime
-                        // compat lookup. Cover art will be missing.
-                        currentGame.value = null
-                        println(m_szGamefile)
-                        restart()
+                val uri = intent?.dataString ?: ""
+                if (uri.isNotEmpty()) {
+                    // Swap the mounted disc instead of rebooting. The old path
+                    // (restart()) booted the picked disc as a fresh VM, which
+                    // dropped CodeBreaker/multi-disc hand-offs and never showed
+                    // a "disc changed" notification. NativeApp.changeDisc keeps
+                    // the running VM, cycles the tray so the game detects the
+                    // new disc, and emits the on-screen "Disc changed to …" OSD.
+                    // Runs off-thread since it parks the CPU thread and blocks.
+                    println("@@ANDROID_SWAP_DISC@@ uri=${uri.take(240)}")
+                    kotlin.concurrent.thread {
+                        val ok = runCatching { NativeApp.changeDisc(uri) }.getOrDefault(false)
+                        instance?.runOnUiThread {
+                            if (ok) {
+                                // changeDisc parks the VM to swap on the CPU
+                                // thread; unpause so the game runs and detects
+                                // the new disc (otherwise the screen sits frozen
+                                // on the paused frame).
+                                resume()
+                            } else {
+                                // Swap Disc is swap-only. If native rejected
+                                // the image it already restored the old disc,
+                                // so just resume the existing session.
+                                resume()
+                            }
+                        }
                     }
+                }
+            } catch (_: Exception) { }
+        }
+    }
+
+    val bootDiscAction = registerForActivityResult(
+        StartActivityForResult()
+    ) { result: ActivityResult ->
+        if (result.resultCode == RESULT_OK) {
+            try {
+                val uri = result.data?.dataString ?: ""
+                if (uri.isNotEmpty()) {
+                    println("@@ANDROID_BOOT_DISC@@ uri=${uri.take(240)}")
+                    launchGame(uri, null)
                 }
             } catch (_: Exception) { }
         }
@@ -842,8 +873,6 @@ class Main: ComponentActivity() {
     init {
         instance = this
     }
-
-    var tested = false
 
     /** Latched on first kickoffEmucoreInit so a second call (e.g. after
      *  the user re-enters setup via the cog) is a no-op. Heavy init —
@@ -1105,12 +1134,6 @@ class Main: ComponentActivity() {
                 )
             } else if (setupComplete.value) {
                 WindowImpl.Window {
-                    if (!tested) {
-                        NativeApp.runCodegenTests()
-                        NativeApp.runPatchTests()
-                        NativeApp.runVuJitTests()
-                        tested = true
-                    }
                     if (surface.value != null) {
                         // Pull Compose focus onto the surface as soon as it's
                         // composed. Without this the AndroidView starts

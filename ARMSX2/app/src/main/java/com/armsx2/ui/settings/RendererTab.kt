@@ -54,6 +54,12 @@ import kotlin.math.abs
 private data class UpscaleOption(val value: Float, val label: String)
 
 private val UPSCALE_OPTIONS = listOf(
+    // Sub-native (issue #207) — fewer pixels = big perf win on low/mid devices,
+    // at the cost of sharpness. The GS only clamps the upper bound, so these are
+    // applied as-is.
+    UpscaleOption(0.25f, "0.25x"),
+    UpscaleOption(0.5f, "0.5x"),
+    UpscaleOption(0.75f, "0.75x"),
     UpscaleOption(1.0f, "Native"),
     UpscaleOption(1.25f, "1.25x"),
     UpscaleOption(1.5f, "1.5x"),

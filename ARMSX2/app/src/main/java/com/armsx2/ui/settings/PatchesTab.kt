@@ -376,6 +376,9 @@ fun PatchesTab(state: MutableState<Settings>) {
     if (showPatchWarning) {
         AlertDialog(
             onDismissRequest = { showPatchWarning = false },
+            containerColor = Colors.surfaceColor,
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
             title = { Text("Patch codes") },
             text = {
                 Text(
@@ -408,6 +411,9 @@ fun PatchesTab(state: MutableState<Settings>) {
     browseResult?.let { res ->
         AlertDialog(
             onDismissRequest = { browseResult = null },
+            containerColor = Colors.surfaceColor,
+            titleContentColor = Color.White,
+            textContentColor = Color.White,
             title = {
                 Text(
                     if (res.gametitle.isNotEmpty()) res.gametitle else "Patches & cheats",

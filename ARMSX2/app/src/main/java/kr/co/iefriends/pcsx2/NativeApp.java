@@ -6,6 +6,8 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.ParcelFileDescriptor;
 import android.os.Looper;
+import android.system.Os;
+import android.system.OsConstants;
 import android.view.Surface;
 
 import com.armsx2.BiosInfo;
@@ -18,16 +20,31 @@ import java.lang.ref.WeakReference;
 
 public class NativeApp {
 	static {
+		String libraryName = selectNativeLibraryName();
 		try {
-			System.loadLibrary("emucore");
+			System.loadLibrary(libraryName);
 			hasNoNativeBinary = false;
-			System.out.println("PCSX2_LOAD");
+			System.out.println("PCSX2_LOAD " + libraryName + " pageSize=" + getRuntimePageSize());
 		} catch (UnsatisfiedLinkError e) {
 			hasNoNativeBinary = true;
+			System.err.println("PCSX2_LOAD_FAILED " + libraryName + ": " + e.getMessage());
 		}
 	}
 
 	public static boolean hasNoNativeBinary;
+
+	private static long getRuntimePageSize() {
+		try {
+			long pageSize = Os.sysconf(OsConstants._SC_PAGESIZE);
+			return pageSize > 0 ? pageSize : 4096;
+		} catch (Throwable ignored) {
+			return 4096;
+		}
+	}
+
+	private static String selectNativeLibraryName() {
+		return getRuntimePageSize() >= 16384 ? "emucore_16k" : "emucore_4k";
+	}
 
 
 	protected static WeakReference<Context> mContext;
@@ -301,6 +318,14 @@ public class NativeApp {
 	public static native boolean loadStateFromSlot(int slot);
 	public static native String getGamePathSlot(int slot);
 	public static native byte[] getImageSlot(int slot);
+
+	// Hot-swap the CDVD disc on the running VM (keeps the session alive, cycles
+	// the tray so the game detects the new disc). Returns false if there's no
+	// valid VM or the new image failed to open (in which case the core has
+	// already reverted to the previous disc). Used by the in-game Swap Disc
+	// picker for CodeBreaker / multi-disc swaps. Call off the main thread — it
+	// parks the CPU thread and blocks until the swap completes.
+	public static native boolean changeDisc(String path);
 
 	// Autosave-on-exit slot. Backed by a dedicated `.autosave.p2s` filename
 	// in the savestate folder (see VMManager::SAVESTATE_SLOT_AUTOSAVE) so the

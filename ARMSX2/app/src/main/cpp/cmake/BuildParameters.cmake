@@ -150,13 +150,17 @@ elseif("${_PCSX2_TARGET_PROCESSOR}" STREQUAL "arm64" OR "${_PCSX2_TARGET_PROCESS
 	endif()
 
 	if(ANDROID)
-		# Build for 16K pages (0x4000) so the lib also runs on 16K-page devices
-		# (Snapdragon 8 Elite gen 5 / 2025 flagships). 16K-granular mmap/mprotect
-		# are valid on 4K-page kernels too (16K is a multiple of 4K), so a single
-		# build covers both — paired with the relaxed page-size check in
-		# VMManager::PerformEarlyHardwareChecks. 64-byte cache lines on ARM.
-		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=0x4000)
+		set(ARMSX2_ANDROID_HOST_PAGE_SIZE "0x1000" CACHE STRING "Compile-time Android host page size for the PCSX2 core")
+		# Android 16K-page compatibility requires ELF segment alignment, and the
+		# PCSX2 ARM64 memory manager still needs its compile-time host page size to
+		# match the runtime kernel page size. Universal APK builds compile one
+		# emucore variant with 4K internal pages and one with 16K internal pages.
+		list(APPEND PCSX2_DEFS OVERRIDE_HOST_PAGE_SIZE=${ARMSX2_ANDROID_HOST_PAGE_SIZE})
 		list(APPEND PCSX2_DEFS OVERRIDE_HOST_CACHE_LINE_SIZE=64)
+		add_link_options(
+			"LINKER:-z,max-page-size=16384"
+			"LINKER:-z,common-page-size=16384"
+		)
 	endif()
 
 	# Windows page/cache line size seems to match x68-64
