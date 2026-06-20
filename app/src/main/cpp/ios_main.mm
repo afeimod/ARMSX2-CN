@@ -442,6 +442,7 @@ int main(int argc, char* argv[]) {
 #include <string>
 #include <iostream>
 #include <chrono>
+#include <cstdio>
 
 #include "common/ProgressCallback.h"
 #include "common/Error.h"
@@ -462,6 +463,7 @@ int main(int argc, char* argv[]) {
 #include "pcsx2/CDVD/CDVD.h"
 #include "pcsx2/CDVD/CDVDcommon.h"
 #include "pcsx2/ps2/BiosTools.h"
+#include "pcsx2/SIO/Memcard/MemoryCardFile.h"
 
 #include "pcsx2/DEV9/pcap_io.h"
 #include "pcsx2/DEV9/net.h"
@@ -862,7 +864,9 @@ static const char* ARMSX2IOSHeatStateName(NSProcessInfoThermalState state)
     }
 }
 
-static constexpr bool ARMSX2IOSRetroAchievementsHardcoreAvailable = false;
+static constexpr bool ARMSX2IOSRetroAchievementsHardcoreAvailable = true;
+
+extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void);
 
 static void ARMSX2DisableRetroAchievementsHardcoreForIOS(SettingsInterface* si, const char* reason)
 {
@@ -876,6 +880,210 @@ static void ARMSX2DisableRetroAchievementsHardcoreForIOS(SettingsInterface* si, 
         Console.Warning("@@RA_IOS_HARDCORE_DISABLED@@ reason=%s",
             reason ? reason : "unknown");
     }
+}
+
+static void ARMSX2IOSApplyRetroAchievementsOverlayDefaults(SettingsInterface* si, const char* reason)
+{
+    if (!si)
+        return;
+
+    // iOS overlays share the screen with touch controls and the perf OSD. Keep
+    // gameplay trackers left, but show achievement notifications at top-center.
+    si->SetBoolValue("Achievements", "Overlays", true);
+    si->SetBoolValue("Achievements", "LBOverlays", true);
+    si->SetBoolValue("Achievements", "Notifications", true);
+    si->SetBoolValue("Achievements", "LeaderboardNotifications", true);
+    si->SetIntValue("Achievements", "OverlayPosition", static_cast<int>(AchievementOverlayPosition::TopLeft));
+    si->SetIntValue("Achievements", "NotificationPosition", static_cast<int>(OsdOverlayPos::TopCenter));
+
+    EmuConfig.Achievements.Overlays = true;
+    EmuConfig.Achievements.LBOverlays = true;
+    EmuConfig.Achievements.Notifications = true;
+    EmuConfig.Achievements.LeaderboardNotifications = true;
+    EmuConfig.Achievements.OverlayPosition = AchievementOverlayPosition::TopLeft;
+    EmuConfig.Achievements.NotificationPosition = OsdOverlayPos::TopCenter;
+
+    Console.WriteLn("@@RA_IOS_OVERLAY_DEFAULTS@@ reason=%s overlay=top_left notification=top_center notifications=1 overlays=1",
+        reason ? reason : "unknown");
+}
+
+static bool ARMSX2IOSPathStartsWith(const std::string& value, const std::string& prefix)
+{
+    return value.size() >= prefix.size() && value.compare(0, prefix.size(), prefix) == 0;
+}
+
+static bool ARMSX2IOSPathIsInsideRoot(const std::string& path, const std::string& root)
+{
+    return path == root || ARMSX2IOSPathStartsWith(path, root + "/");
+}
+
+static bool ARMSX2IOSPathContainsContainerFragment(const std::string& path)
+{
+    return path.find("Data/Application/") != std::string::npos ||
+           path.find("/Containers/Data/Application/") != std::string::npos ||
+           path.find("/var/mobile/Containers/Data/Application/") != std::string::npos ||
+           path.find("/private/var/mobile/Containers/Data/Application/") != std::string::npos;
+}
+
+static std::string ARMSX2IOSResolveFolderPath(const std::string& root, const std::string& value)
+{
+    return Path::IsAbsolute(value) ? value : Path::Combine(root, value);
+}
+
+static NSInteger ARMSX2IOSCopyDirectoryContentsIfPresent(const std::string& source, const std::string& destination)
+{
+    if (source.empty() || destination.empty() || source == destination)
+        return 0;
+
+    @autoreleasepool {
+        NSFileManager* fm = [NSFileManager defaultManager];
+        NSString* sourcePath = [NSString stringWithUTF8String:source.c_str()];
+        NSString* destinationPath = [NSString stringWithUTF8String:destination.c_str()];
+        if (!sourcePath || !destinationPath)
+            return 0;
+
+        BOOL sourceIsDirectory = NO;
+        if (![fm fileExistsAtPath:sourcePath isDirectory:&sourceIsDirectory] || !sourceIsDirectory)
+            return 0;
+
+        NSError* createError = nil;
+        [fm createDirectoryAtPath:destinationPath withIntermediateDirectories:YES attributes:nil error:&createError];
+        if (createError)
+            NSLog(@"[ARMSX2 iOS FolderSanitize] destination create failed: %@ -> %@ error=%@",
+                  sourcePath, destinationPath, createError.localizedDescription ?: @"unknown");
+
+        NSInteger copied = 0;
+        NSDirectoryEnumerator<NSString*>* enumerator = [fm enumeratorAtPath:sourcePath];
+        for (NSString* relativePath in enumerator) {
+            NSString* itemSource = [sourcePath stringByAppendingPathComponent:relativePath];
+            NSString* itemDestination = [destinationPath stringByAppendingPathComponent:relativePath];
+
+            BOOL itemIsDirectory = NO;
+            if (![fm fileExistsAtPath:itemSource isDirectory:&itemIsDirectory])
+                continue;
+
+            if (itemIsDirectory) {
+                [fm createDirectoryAtPath:itemDestination withIntermediateDirectories:YES attributes:nil error:nil];
+                continue;
+            }
+
+            if ([fm fileExistsAtPath:itemDestination])
+                continue;
+
+            [fm createDirectoryAtPath:itemDestination.stringByDeletingLastPathComponent
+          withIntermediateDirectories:YES
+                           attributes:nil
+                                error:nil];
+
+            NSError* copyError = nil;
+            if ([fm copyItemAtPath:itemSource toPath:itemDestination error:&copyError]) {
+                copied++;
+            } else {
+                NSLog(@"[ARMSX2 iOS FolderSanitize] copy failed: %@ -> %@ error=%@",
+                      itemSource, itemDestination, copyError.localizedDescription ?: @"unknown");
+            }
+        }
+
+        return copied;
+    }
+}
+
+static void ARMSX2IOSSanitizeFolderSettings(SettingsInterface* si, const std::string& dataRoot, const char* reason)
+{
+    if (!si)
+        return;
+
+    struct FolderDefault
+    {
+        const char* key;
+        const char* value;
+        bool settingsRoot;
+    };
+
+    static constexpr FolderDefault defaults[] = {
+        {"Bios", "bios", false},
+        {"Snapshots", "snaps", false},
+        {"Savestates", "sstates", false},
+        {"MemoryCards", "memcards", false},
+        {"Logs", "logs", false},
+        {"Cheats", "cheats", false},
+        {"Patches", "patches", false},
+        {"Covers", "covers", false},
+        {"GameSettings", "gamesettings", false},
+        {"UserResources", "resources", false},
+        {"Cache", "cache", false},
+        {"Textures", "textures", false},
+        {"InputProfiles", "inputprofiles", false},
+        {"Videos", "videos", false},
+        {"DebuggerLayouts", "debuggerlayouts", true},
+        {"DebuggerSettings", "debuggersettings", true},
+    };
+
+    const std::string settingsRoot = Path::Combine(dataRoot, "inis");
+    bool changed = false;
+
+    for (const FolderDefault& entry : defaults) {
+        std::string rawValue;
+        if (!si->GetStringValue("Folders", entry.key, &rawValue) || rawValue.empty())
+            continue;
+
+        const std::string& root = entry.settingsRoot ? settingsRoot : dataRoot;
+        const std::string resolved = ARMSX2IOSResolveFolderPath(root, rawValue);
+        const bool rawAbsolute = Path::IsAbsolute(rawValue);
+        const bool containerPath = ARMSX2IOSPathContainsContainerFragment(rawValue);
+        const bool stale = (!rawAbsolute && containerPath) ||
+            (rawAbsolute && containerPath && !ARMSX2IOSPathIsInsideRoot(resolved, root));
+
+        if (!stale)
+            continue;
+
+        const std::string migratedPath = Path::Combine(root, entry.value);
+        const NSInteger copied = ARMSX2IOSCopyDirectoryContentsIfPresent(resolved, migratedPath);
+        si->SetStringValue("Folders", entry.key, entry.value);
+        changed = true;
+
+        std::fprintf(stderr,
+            "@@IOS_FOLDER_SANITIZE@@ reason=%s key=%s old=\"%s\" resolved=\"%s\" default=\"%s\" copied=%ld\n",
+            reason ? reason : "unknown", entry.key, rawValue.c_str(), resolved.c_str(),
+            entry.value, static_cast<long>(copied));
+        std::fflush(stderr);
+    }
+
+    if (changed)
+        si->Save();
+}
+
+static void ARMSX2IOSLogMemoryCardConfig(const char* reason)
+{
+    std::fprintf(stderr, "@@IOS_MEMCARD_DIR@@ reason=%s path=\"%s\"\n",
+        reason ? reason : "unknown", EmuFolders::MemoryCards.c_str());
+
+    constexpr size_t numMemoryCardSlots = sizeof(EmuConfig.Mcd) / sizeof(EmuConfig.Mcd[0]);
+    for (size_t slot = 0; slot < numMemoryCardSlots; slot++) {
+        const auto& card = EmuConfig.Mcd[slot];
+        const std::string path = card.Filename.empty() ? std::string() : EmuConfig.FullpathToMcd(static_cast<uint>(slot));
+        const bool existsFile = !path.empty() && FileSystem::FileExists(path.c_str());
+        const bool existsDirectory = !path.empty() && FileSystem::DirectoryExists(path.c_str());
+        const s64 size = existsFile ? FileSystem::GetPathFileSize(path.c_str()) : -1;
+        const bool formatted = existsFile ? FileMcd_IsMemoryCardFormatted(path) : false;
+
+        std::fprintf(stderr,
+            "@@IOS_MEMCARD_SLOT@@ reason=%s slot=%zu enabled=%d type=%d name=\"%s\" path=\"%s\" file=%d dir=%d size=%lld formatted=%d hardcore_pref=%d hardcore_active=%d\n",
+            reason ? reason : "unknown",
+            slot + 1,
+            card.Enabled ? 1 : 0,
+            static_cast<int>(card.Type),
+            card.Filename.c_str(),
+            path.c_str(),
+            existsFile ? 1 : 0,
+            existsDirectory ? 1 : 0,
+            static_cast<long long>(size),
+            formatted ? 1 : 0,
+            EmuConfig.Achievements.HardcoreMode ? 1 : 0,
+            Achievements::IsHardcoreModeActive() ? 1 : 0);
+    }
+
+    std::fflush(stderr);
 }
 
 struct ARMSX2IOSDeviceStatsCache
@@ -1135,7 +1343,6 @@ static void ARMSX2DrainCPUThreadTasks()
     }
 }
 
-extern "C" void ARMSX2_PostRetroAchievementsStateChanged(void);
 extern "C" bool ARMSX2_StartExternalGameDirectoryAccess(const char* path);
 extern "C" void ARMSX2_PostRuntimeMenuStateChanged(void)
 {
@@ -2729,7 +2936,10 @@ namespace Host
     void OnInputDeviceConnected(std::string_view, std::string_view) {}
     void RequestExitApplication(bool) {}
     void CheckForSettingsChanges(const Pcsx2Config&) {}
-    void OnAchievementsRefreshed() { ARMSX2_PostRetroAchievementsStateChanged(); }
+    void OnAchievementsRefreshed()
+    {
+        ARMSX2_PostRetroAchievementsStateChanged();
+    }
     void PumpMessagesOnCPUThread()
     {
         ARMSX2DrainCPUThreadTasks();
@@ -2841,7 +3051,18 @@ namespace Host
         }
 #endif // DEBUG — BIOS_NAV
     }
-    std::string TranslatePluralToString(const char*, const char*, const char*, int) { return ""; }
+    std::string TranslatePluralToString(const char*, const char* msg, const char*, int count)
+    {
+        std::string result = msg ? msg : "";
+        const std::string count_string = std::to_string(count);
+        size_t pos = 0;
+        while ((pos = result.find("%n", pos)) != std::string::npos)
+        {
+            result.replace(pos, 2, count_string);
+            pos += count_string.size();
+        }
+        return result;
+    }
     void CommitBaseSettingChanges()
     {
         if (s_settings_interface)
@@ -2905,7 +3126,16 @@ namespace Host
 
 namespace Host::Internal
 {
-    s32 GetTranslatedStringImpl(const std::string_view, const std::string_view, char*, size_t) { return 0; }
+    s32 GetTranslatedStringImpl(const std::string_view, const std::string_view msg, char* tbuf, size_t tbuf_space)
+    {
+        if (msg.size() > tbuf_space)
+            return -1;
+
+        if (!msg.empty())
+            std::memcpy(tbuf, msg.data(), msg.size());
+
+        return static_cast<s32>(msg.size());
+    }
 }
 
 // Called from ARMSX2Bridge to toggle SDL fullscreen (controls status bar visibility)
@@ -3393,6 +3623,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     if (!s_settings_interface->ContainsValue("ARMSX2iOS/Gamepad", "MultitapMode")) {
         s_settings_interface->SetIntValue("ARMSX2iOS/Gamepad", "MultitapMode", 0);
     }
+    ARMSX2IOSSanitizeFolderSettings(s_settings_interface, dataRoot, "scene-connect");
     ARMSX2EnsureIOSSpeedhackDefaults(s_settings_interface, "scene-connect");
     ARMSX2SanitizeFrameLimiterConfig("scene-connect");
     ARMSX2ApplyIOSMultitapConfig("scene-connect");
@@ -3417,9 +3648,10 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
     }
     ARMSX2SanitizeFrameLimiterConfig("after-startup-settings");
     ARMSX2ApplyIOSOsdPresetFromConfig("after-startup-settings");
+    ARMSX2IOSApplyRetroAchievementsOverlayDefaults(s_settings_interface, "after-startup-settings");
+    s_settings_interface->Save();
     VMManager::ApplySettings();
-    if (EmuConfig.Achievements.Enabled)
-        Console.WriteLn("@@RA_INIT_DEFER@@ reason=scene-connect enabled=1 active=%d", Achievements::IsActive() ? 1 : 0);
+    ARMSX2IOSLogMemoryCardConfig("scene-connect-after-apply-settings");
     ARMSX2_PostRetroAchievementsStateChanged();
     
     // --- Create SDL Window ---
@@ -3949,6 +4181,16 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                         boot_params.elf_override = isoPath;
                         boot_params.source_type = CDVD_SourceType::NoDisc;
                         boot_params.fast_boot = true;
+                        std::string discPath = VMManager::GetDiscOverrideFromGameSettings(isoPath);
+                        if (!discPath.empty()) {
+                            if (FileSystem::FileExists(discPath.c_str())) {
+                                boot_params.filename = discPath;
+                                boot_params.source_type = CDVD_SourceType::Iso;
+                            } else {
+                                Host::ReportErrorAsync("Linked disc not found",
+                                    "This ELF has a linked disc, but the disc file is missing. Booting without it. Re-link it in the game's Disc Path menu.");
+                            }
+                        }
                         std::fprintf(stderr, "@@ISO_BOOT@@ path=%s fast_boot=1 mode=ELF INI=\"%s\"\n",
                             isoPath.c_str(), isoFilename.c_str());
                         std::fflush(stderr);
@@ -4005,6 +4247,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
             ARMSX2EnsureIOSSpeedhackDefaults(s_settings_interface, "pre-vm-initialize");
             ARMSX2RepairIOSARM64JITSettings(s_settings_interface, "pre-vm-initialize");
             ARMSX2MigrateJITScriptProtocolForIOS(s_settings_interface, "pre-vm-initialize");
+            ARMSX2IOSSanitizeFolderSettings(s_settings_interface, EmuFolders::DataRoot, "pre-vm-initialize");
             VMManager::Internal::LoadStartupSettings();
             ARMSX2ApplyIOSOsdPresetFromConfig("pre-vm-initialize");
             EmuConfig.Speedhacks.vuThread =
@@ -4028,6 +4271,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 EmuConfig.Speedhacks.vuThread ? 1 : 0,
                 DarwinMisc::iPSX2_FORCE_EE_INTERP ? 1 : 0);
             std::fflush(stderr);
+            ARMSX2IOSLogMemoryCardConfig("pre-vm-initialize");
             Console.WriteLn("@@FRAMELIMIT@@ boot nominal=%.3f turbo=%.3f slomo=%.3f ntsc=%.3f pal=%.3f",
                 EmuConfig.EmulationSpeed.NominalScalar,
                 EmuConfig.EmulationSpeed.TurboScalar,
@@ -4046,6 +4290,7 @@ INISettingsInterface* g_p44_settings_interface = nullptr;
                 bootErrorText.c_str());
             std::fflush(stderr);
             if (bootResult == VMBootResult::StartupSuccess) {
+                ARMSX2IOSLogMemoryCardConfig("post-vm-initialize");
                 std::fprintf(stderr, "@@BOOT_POST_INIT@@ stage=before_osd state=%d frame=%u\n",
                     static_cast<int>(VMManager::GetState()), ::g_FrameCount);
                 std::fflush(stderr);
@@ -4255,7 +4500,7 @@ static void SetupIOSDirectories(const std::string& dataRoot)
 #endif
     fprintf(stderr, "@@BUILD_ID@@ ARMSX2_iOS v%s %s %s %s\n",
         ARMSX2_VERSION_STR, ARMSX2_GIT_HASH, __DATE__, __TIME__);
-    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_32_pr189_pr190_ra_login_recover_v1\n");
+    fprintf(stderr, "@@TEST_MARKER@@ armsx2_ios_42_ra_hc_ready_not_active_v1\n");
     fprintf(stderr, "@@FF_FIX@@ offspeed_present_skip=1 present_cap60=1 adaptive_backoff=1 drawable_wait_probe=1 vm_pace_probe=1 turbo_only_toggle=1\n");
     fprintf(stderr, "@@DIAG_MODE@@ ee_hotpath=%d\n", ARMSX2_ENABLE_EE_HOTPATH_DIAGNOSTICS);
     

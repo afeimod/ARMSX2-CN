@@ -42,7 +42,7 @@ struct RetroAchievementsSettingsView: View {
                 .disabled(!achievementsSupported)
 
                 statusRow("Client", value: bool("active") ? "Active" : "Inactive")
-                statusRow("Account", value: accountSummary, localizeValue: !bool("loggedIn"))
+                statusRow("Account", value: accountSummary, localizeValue: !hasStoredAccount)
             } header: {
                 Text(settings.localized("RetroAchievements"))
             } footer: {
@@ -53,13 +53,15 @@ struct RetroAchievementsSettingsView: View {
 
             if achievementsSupported {
                 Section(settings.localized("Account")) {
-                    if bool("loggedIn") {
+                    if hasStoredAccount {
                         statusRow("User", value: displayName, localizeValue: false)
-                        statusRow("Points", value: hardcoreSupported ?
-                            "\(int("points")) hard / \(int("softcorePoints")) soft" :
-                            "\(int("softcorePoints"))", localizeValue: false)
-                        if int("unreadMessages") > 0 {
-                            statusRow("Messages", value: "\(int("unreadMessages")) \(settings.localized("unread"))", localizeValue: false)
+                        if bool("loggedIn") {
+                            statusRow("Points", value: hardcoreSupported ?
+                                "\(int("points")) hard / \(int("softcorePoints")) soft" :
+                                "\(int("softcorePoints"))", localizeValue: false)
+                            if int("unreadMessages") > 0 {
+                                statusRow("Messages", value: "\(int("unreadMessages")) \(settings.localized("unread"))", localizeValue: false)
+                            }
                         }
 
                         Button(role: .destructive) {
@@ -92,11 +94,18 @@ struct RetroAchievementsSettingsView: View {
                                         title: "Hardcore Mode",
                                         body: settings.localized("Hardcore mode will apply after a full reset of the current game.")
                                     )
+                                } else if newValue && !bool("hasActiveGame") {
+                                    showMessage(
+                                        title: "Hardcore Mode",
+                                        body: settings.localized("Hardcore mode is ready and will apply when you boot a game.")
+                                    )
                                 }
                                 refreshSoon()
                             }
                         ))
                         .disabled(!achievementsEnabled)
+
+                        statusRow("Hardcore Status", value: hardcoreStatus)
                     }
 
                     Toggle(settings.localized("Achievement Notifications"), isOn: Binding(
@@ -200,6 +209,9 @@ struct RetroAchievementsSettingsView: View {
         if bool("loggedIn") {
             return displayName
         }
+        if bool("savedLogin") {
+            return displayName
+        }
         return achievementsEnabled ? "Not logged in" : "Disabled"
     }
 
@@ -215,8 +227,20 @@ struct RetroAchievementsSettingsView: View {
         bool("hardcoreSupported", fallback: true)
     }
 
+    private var hasStoredAccount: Bool {
+        bool("loggedIn") || bool("savedLogin")
+    }
+
     private var unavailableMessage: String {
         string("unavailableMessage", fallback: "RetroAchievements is temporarily unavailable in this build.")
+    }
+
+    private var hardcoreStatus: String {
+        guard achievementsEnabled else { return "Disabled" }
+        if hardcoreEnabled && !bool("hasActiveGame") { return "Ready" }
+        if bool("hardcoreActive") { return "Active" }
+        if hardcoreEnabled { return "Pending Reset" }
+        return "Off"
     }
 
     private func statusRow(_ title: String, value: String, localizeValue: Bool = true) -> some View {

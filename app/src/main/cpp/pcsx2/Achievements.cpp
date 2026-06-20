@@ -38,6 +38,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdarg>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <limits>
@@ -1234,6 +1235,12 @@ void Achievements::ClientLoadGameCallback(int result, const char* error_message,
 	s_has_rich_presence = rc_client_has_rich_presence(client);
 	s_game_icon = {};
 	s_game_icon_url = info->badge_url;
+	std::fprintf(stderr,
+		"@@RA_LOAD_CALLBACK@@ result=ok game_id=%u title_len=%zu has_achievements=%d has_leaderboards=%d notifications=%d ios_notifications=%d hardcore=%d\n",
+		s_game_id, s_game_title.size(), has_achievements ? 1 : 0, has_leaderboards ? 1 : 0,
+		EmuConfig.Achievements.Notifications ? 1 : 0, ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS,
+		IsHardcoreModeActive() ? 1 : 0);
+	std::fflush(stderr);
 
 	// ensure fullscreen UI is ready for notifications
 	if (MTGS::IsOpen())
@@ -1288,6 +1295,9 @@ void Achievements::ClearGameHash()
 
 void Achievements::PostIOSNotification(const std::string& title, const std::string& message, const std::string& badge_path)
 {
+	std::fprintf(stderr, "@@RA_IOS_POST@@ ios_notifications=%d title_len=%zu message_len=%zu badge=%d\n",
+		ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS, title.size(), message.size(), badge_path.empty() ? 0 : 1);
+	std::fflush(stderr);
 #if ARMSX2_IOS_RETROACHIEVEMENTS_NOTIFICATIONS
 	ARMSX2_PostRetroAchievementsNotification(title.c_str(), message.c_str(), badge_path.c_str());
 #else
@@ -1299,6 +1309,13 @@ void Achievements::PostIOSNotification(const std::string& title, const std::stri
 
 void Achievements::DisplayAchievementSummary()
 {
+	std::fprintf(stderr,
+		"@@RA_SUMMARY_NOTIFY@@ enter notifications=%d game_id=%u title_len=%zu core=%u unlocked=%u points=%u hardcore=%d\n",
+		EmuConfig.Achievements.Notifications ? 1 : 0, s_game_id, s_game_title.size(),
+		s_game_summary.num_core_achievements, s_game_summary.num_unlocked_achievements,
+		s_game_summary.points_core, IsHardcoreModeActive() ? 1 : 0);
+	std::fflush(stderr);
+
 	if (EmuConfig.Achievements.Notifications)
 	{
 		std::string title;
@@ -1463,6 +1480,7 @@ void Achievements::HandleLeaderboardStartedEvent(const rc_client_event_t* event)
 	{
 		std::string title = event->leaderboard->title;
 		std::string message = TRANSLATE_STR("Achievements", "Leaderboard attempt started.");
+		PostIOSNotification(title, message, s_game_icon);
 
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
@@ -1482,6 +1500,7 @@ void Achievements::HandleLeaderboardFailedEvent(const rc_client_event_t* event)
 	{
 		std::string title = event->leaderboard->title;
 		std::string message = TRANSLATE_STR("Achievements", "Leaderboard attempt failed.");
+		PostIOSNotification(title, message, s_game_icon);
 
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
@@ -1511,6 +1530,7 @@ void Achievements::HandleLeaderboardSubmittedEvent(const rc_client_event_t* even
 							value_strings[std::min<u8>(event->leaderboard->format, NUM_RC_CLIENT_LEADERBOARD_FORMATS - 1)])),
 				event->leaderboard->tracker_value ? event->leaderboard->tracker_value : "Unknown",
 				EmuConfig.Achievements.SpectatorMode ? std::string_view() : TRANSLATE_SV("Achievements", " (Submitting)"));
+		PostIOSNotification(title, message, s_game_icon);
 
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = Achievements::s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
@@ -1548,6 +1568,7 @@ void Achievements::HandleLeaderboardScoreboardEvent(const rc_client_event_t* eve
 							value_strings[std::min<u8>(event->leaderboard->format, NUM_RC_CLIENT_LEADERBOARD_FORMATS - 1)])),
 				event->leaderboard_scoreboard->submitted_score, event->leaderboard_scoreboard->best_score),
 			event->leaderboard_scoreboard->new_rank, event->leaderboard_scoreboard->num_entries);
+		PostIOSNotification(title, message, s_game_icon);
 
 		MTGS::RunOnGSThread([title = std::move(title), message = std::move(message), icon = Achievements::s_game_icon, id = event->leaderboard->id]() {
 			if (ImGuiManager::InitializeFullscreenUI())
@@ -2141,6 +2162,7 @@ void Achievements::ShowLoginSuccess(const rc_client_t* client)
 		std::string title = user->display_name;
 		std::string summary = fmt::format(TRANSLATE_FS("Achievements", "Score: {0} pts (softcore: {1} pts)\nUnread messages: {2}"), user->score,
 			user->score_softcore, user->num_unread_messages);
+		PostIOSNotification(title, summary, badge_path);
 
 		MTGS::RunOnGSThread([title = std::move(title), summary = std::move(summary), badge_path = std::move(badge_path)]() {
 			if (ImGuiManager::InitializeFullscreenUI())

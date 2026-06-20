@@ -49,7 +49,7 @@ private struct RetroAchievementEntry: Identifiable, Equatable {
         rarityHardcore = (dictionary["rarityHardcore"] as? NSNumber)?.doubleValue ?? 0
     }
 
-    var isUnlocked: Bool { state == 2 || unlocked != 0 }
+    var isUnlocked: Bool { state == 2 }
     var isUnsupported: Bool { state == 3 || bucket == 3 }
     var isUnofficial: Bool { (category & 2) != 0 || bucket == 4 }
     var isActiveChallenge: Bool { bucket == 6 || bucket == 7 }
@@ -262,6 +262,7 @@ struct GameScreenView: View {
             applyInitialFullscreenPreference()
             refreshExternalControllerConnectionState()
             refreshRuntimeMenuState()
+            consumePendingRetroAchievementsToast()
         }
         .onDisappear {
             statusMessageDismissTask?.cancel()
@@ -300,6 +301,7 @@ struct GameScreenView: View {
             updateRuntimeOverlayPause()
         }
         .onReceive(NotificationCenter.default.publisher(for: retroAchievementsToastNotification)) { notification in
+            _ = ARMSX2Bridge.consumePendingRetroAchievementsNotification()
             presentRetroAchievementsToast(notification)
         }
         .onReceive(Timer.publish(every: 0.5, on: .main, in: .common).autoconnect()) { _ in
@@ -1081,6 +1083,10 @@ struct GameScreenView: View {
     }
 
     private func presentRetroAchievementsToast(_ notification: Notification) {
+        if (notification.userInfo?["handledByUIKit"] as? Bool) == true {
+            return
+        }
+
         let title = ((notification.userInfo?["title"] as? String) ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !title.isEmpty else { return }
@@ -1109,6 +1115,12 @@ struct GameScreenView: View {
                 retroAchievementsToast = nil
             }
         }
+    }
+
+    private func consumePendingRetroAchievementsToast() {
+        guard let userInfo = ARMSX2Bridge.consumePendingRetroAchievementsNotification(), !userInfo.isEmpty else { return }
+        let notificationUserInfo = Dictionary(uniqueKeysWithValues: userInfo.map { (AnyHashable($0.key), $0.value) })
+        presentRetroAchievementsToast(Notification(name: retroAchievementsToastNotification, object: nil, userInfo: notificationUserInfo))
     }
 
     private func presentImportantStatusMessage(_ message: String) {
