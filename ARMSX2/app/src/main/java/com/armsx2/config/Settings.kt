@@ -116,6 +116,31 @@ data class Settings(
     val gamefixInstantDma: Boolean = false,
     /** EmuCore/Gamefixes/BlitInternalFPSHack. */
     val gamefixBlitInternalFps: Boolean = false,
+    /** EmuCore/Gamefixes/FpuMulHack — Tales of Destiny. */
+    val gamefixFpuMul: Boolean = false,
+    /** EmuCore/Gamefixes/OPHFlagHack — Bleach Blade Battlers. */
+    val gamefixOphFlag: Boolean = false,
+    /** EmuCore/Gamefixes/GIFFIFOHack — emulate the GIF FIFO (Test Drive Unlimited). */
+    val gamefixGifFifo: Boolean = false,
+    /** EmuCore/Gamefixes/DMABusyHack — Mana Khemia 1. */
+    val gamefixDmaBusy: Boolean = false,
+    /** EmuCore/Gamefixes/VIF1StallHack — delay VIF1 stalls (SOCOM 2 HUD). */
+    val gamefixVif1Stall: Boolean = false,
+    /** EmuCore/Gamefixes/IbitHack — Scarface, Crash Twinsanity. */
+    val gamefixIbit: Boolean = false,
+    /** EmuCore/Gamefixes/FullVU0SyncHack — tight VU0 sync on every COP2 op. */
+    val gamefixFullVu0Sync: Boolean = false,
+    /** EmuCore/Gamefixes/VuAddSubHack — Tri-Ace games. */
+    val gamefixVuAddSub: Boolean = false,
+    /** EmuCore/Gamefixes/VUOverflowHack — Superman Returns. */
+    val gamefixVuOverflow: Boolean = false,
+    /** EmuCore/Gamefixes/XgKickHack — extra XGKICK delay (Erementar Gerad). */
+    val gamefixXgkick: Boolean = false,
+    /** EmuCore/GS/SkipDuplicateFrames — skip presenting unchanged frames. PCSX2 default on. */
+    val skipDuplicateFrames: Boolean = true,
+    /** EmuCore/CPU/FPU.Roundmode — EE FPU rounding: 0 Nearest / 1 Negative / 2 Positive
+     *  / 3 Chop. PS2 EE FPU default is Chop (toward zero). */
+    val eeFpuRoundMode: Int = 3,
 
     /** EmuCore/GS/AspectRatio:
      *  0 Stretch · 1 Auto 4:3/3:2 · 2 4:3 · 3 16:9 · 4 10:7. */
@@ -400,6 +425,18 @@ data class Settings(
         NativeApp.setSetting("EmuCore/Gamefixes", "EETimingHack", "bool", gamefixEETiming.toString())
         NativeApp.setSetting("EmuCore/Gamefixes", "InstantDMAHack", "bool", gamefixInstantDma.toString())
         NativeApp.setSetting("EmuCore/Gamefixes", "BlitInternalFPSHack", "bool", gamefixBlitInternalFps.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "FpuMulHack", "bool", gamefixFpuMul.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "OPHFlagHack", "bool", gamefixOphFlag.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "GIFFIFOHack", "bool", gamefixGifFifo.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "DMABusyHack", "bool", gamefixDmaBusy.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "VIF1StallHack", "bool", gamefixVif1Stall.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "IbitHack", "bool", gamefixIbit.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "FullVU0SyncHack", "bool", gamefixFullVu0Sync.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "VuAddSubHack", "bool", gamefixVuAddSub.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "VUOverflowHack", "bool", gamefixVuOverflow.toString())
+        NativeApp.setSetting("EmuCore/Gamefixes", "XgKickHack", "bool", gamefixXgkick.toString())
+        NativeApp.setSetting("EmuCore/GS", "SkipDuplicateFrames", "bool", skipDuplicateFrames.toString())
+        NativeApp.setSetting("EmuCore/CPU", "FPU.Roundmode", "int", eeFpuRoundMode.coerceIn(0, 3).toString())
         // Display + GS renderer + hardware/upscaling-fix keys are all written
         // together in writeGsToNative() below (shared with applyGsLive()).
         // DEV9. Networking/HDD are initialized with the VM, so changes
@@ -656,6 +693,18 @@ data class Settings(
         put("gamefixEETiming", gamefixEETiming)
         put("gamefixInstantDma", gamefixInstantDma)
         put("gamefixBlitInternalFps", gamefixBlitInternalFps)
+        put("gamefixFpuMul", gamefixFpuMul)
+        put("gamefixOphFlag", gamefixOphFlag)
+        put("gamefixGifFifo", gamefixGifFifo)
+        put("gamefixDmaBusy", gamefixDmaBusy)
+        put("gamefixVif1Stall", gamefixVif1Stall)
+        put("gamefixIbit", gamefixIbit)
+        put("gamefixFullVu0Sync", gamefixFullVu0Sync)
+        put("gamefixVuAddSub", gamefixVuAddSub)
+        put("gamefixVuOverflow", gamefixVuOverflow)
+        put("gamefixXgkick", gamefixXgkick)
+        put("skipDuplicateFrames", skipDuplicateFrames)
+        put("eeFpuRoundMode", eeFpuRoundMode)
         put("aspectRatio", aspectRatio)
         put("deinterlaceMode", deinterlaceMode)
         put("dev9EthEnable", dev9EthEnable)
@@ -785,6 +834,18 @@ data class Settings(
                 gamefixEETiming = json.optBoolean("gamefixEETiming", def.gamefixEETiming),
                 gamefixInstantDma = json.optBoolean("gamefixInstantDma", def.gamefixInstantDma),
                 gamefixBlitInternalFps = json.optBoolean("gamefixBlitInternalFps", def.gamefixBlitInternalFps),
+                gamefixFpuMul = json.optBoolean("gamefixFpuMul", def.gamefixFpuMul),
+                gamefixOphFlag = json.optBoolean("gamefixOphFlag", def.gamefixOphFlag),
+                gamefixGifFifo = json.optBoolean("gamefixGifFifo", def.gamefixGifFifo),
+                gamefixDmaBusy = json.optBoolean("gamefixDmaBusy", def.gamefixDmaBusy),
+                gamefixVif1Stall = json.optBoolean("gamefixVif1Stall", def.gamefixVif1Stall),
+                gamefixIbit = json.optBoolean("gamefixIbit", def.gamefixIbit),
+                gamefixFullVu0Sync = json.optBoolean("gamefixFullVu0Sync", def.gamefixFullVu0Sync),
+                gamefixVuAddSub = json.optBoolean("gamefixVuAddSub", def.gamefixVuAddSub),
+                gamefixVuOverflow = json.optBoolean("gamefixVuOverflow", def.gamefixVuOverflow),
+                gamefixXgkick = json.optBoolean("gamefixXgkick", def.gamefixXgkick),
+                skipDuplicateFrames = json.optBoolean("skipDuplicateFrames", def.skipDuplicateFrames),
+                eeFpuRoundMode = json.optInt("eeFpuRoundMode", def.eeFpuRoundMode),
                 aspectRatio = json.optInt("aspectRatio", def.aspectRatio),
                 deinterlaceMode = json.optInt("deinterlaceMode", def.deinterlaceMode),
                 dev9EthEnable = json.optBoolean("dev9EthEnable", def.dev9EthEnable),
@@ -924,6 +985,18 @@ data class Settings(
             if (current.gamefixEETiming != base.gamefixEETiming) j.put("gamefixEETiming", current.gamefixEETiming)
             if (current.gamefixInstantDma != base.gamefixInstantDma) j.put("gamefixInstantDma", current.gamefixInstantDma)
             if (current.gamefixBlitInternalFps != base.gamefixBlitInternalFps) j.put("gamefixBlitInternalFps", current.gamefixBlitInternalFps)
+            if (current.gamefixFpuMul        != base.gamefixFpuMul)        j.put("gamefixFpuMul", current.gamefixFpuMul)
+            if (current.gamefixOphFlag       != base.gamefixOphFlag)       j.put("gamefixOphFlag", current.gamefixOphFlag)
+            if (current.gamefixGifFifo       != base.gamefixGifFifo)       j.put("gamefixGifFifo", current.gamefixGifFifo)
+            if (current.gamefixDmaBusy       != base.gamefixDmaBusy)       j.put("gamefixDmaBusy", current.gamefixDmaBusy)
+            if (current.gamefixVif1Stall     != base.gamefixVif1Stall)     j.put("gamefixVif1Stall", current.gamefixVif1Stall)
+            if (current.gamefixIbit          != base.gamefixIbit)          j.put("gamefixIbit", current.gamefixIbit)
+            if (current.gamefixFullVu0Sync   != base.gamefixFullVu0Sync)   j.put("gamefixFullVu0Sync", current.gamefixFullVu0Sync)
+            if (current.gamefixVuAddSub      != base.gamefixVuAddSub)      j.put("gamefixVuAddSub", current.gamefixVuAddSub)
+            if (current.gamefixVuOverflow    != base.gamefixVuOverflow)    j.put("gamefixVuOverflow", current.gamefixVuOverflow)
+            if (current.gamefixXgkick        != base.gamefixXgkick)        j.put("gamefixXgkick", current.gamefixXgkick)
+            if (current.skipDuplicateFrames  != base.skipDuplicateFrames)  j.put("skipDuplicateFrames", current.skipDuplicateFrames)
+            if (current.eeFpuRoundMode       != base.eeFpuRoundMode)       j.put("eeFpuRoundMode", current.eeFpuRoundMode)
             if (current.aspectRatio         != base.aspectRatio)         j.put("aspectRatio", current.aspectRatio)
             if (current.deinterlaceMode     != base.deinterlaceMode)     j.put("deinterlaceMode", current.deinterlaceMode)
             if (current.dev9EthEnable       != base.dev9EthEnable)       j.put("dev9EthEnable", current.dev9EthEnable)
@@ -1049,6 +1122,18 @@ data class Settings(
             gamefixEETiming = if (overrides.has("gamefixEETiming")) overrides.getBoolean("gamefixEETiming") else base.gamefixEETiming,
             gamefixInstantDma = if (overrides.has("gamefixInstantDma")) overrides.getBoolean("gamefixInstantDma") else base.gamefixInstantDma,
             gamefixBlitInternalFps = if (overrides.has("gamefixBlitInternalFps")) overrides.getBoolean("gamefixBlitInternalFps") else base.gamefixBlitInternalFps,
+            gamefixFpuMul = if (overrides.has("gamefixFpuMul")) overrides.getBoolean("gamefixFpuMul") else base.gamefixFpuMul,
+            gamefixOphFlag = if (overrides.has("gamefixOphFlag")) overrides.getBoolean("gamefixOphFlag") else base.gamefixOphFlag,
+            gamefixGifFifo = if (overrides.has("gamefixGifFifo")) overrides.getBoolean("gamefixGifFifo") else base.gamefixGifFifo,
+            gamefixDmaBusy = if (overrides.has("gamefixDmaBusy")) overrides.getBoolean("gamefixDmaBusy") else base.gamefixDmaBusy,
+            gamefixVif1Stall = if (overrides.has("gamefixVif1Stall")) overrides.getBoolean("gamefixVif1Stall") else base.gamefixVif1Stall,
+            gamefixIbit = if (overrides.has("gamefixIbit")) overrides.getBoolean("gamefixIbit") else base.gamefixIbit,
+            gamefixFullVu0Sync = if (overrides.has("gamefixFullVu0Sync")) overrides.getBoolean("gamefixFullVu0Sync") else base.gamefixFullVu0Sync,
+            gamefixVuAddSub = if (overrides.has("gamefixVuAddSub")) overrides.getBoolean("gamefixVuAddSub") else base.gamefixVuAddSub,
+            gamefixVuOverflow = if (overrides.has("gamefixVuOverflow")) overrides.getBoolean("gamefixVuOverflow") else base.gamefixVuOverflow,
+            gamefixXgkick = if (overrides.has("gamefixXgkick")) overrides.getBoolean("gamefixXgkick") else base.gamefixXgkick,
+            skipDuplicateFrames = if (overrides.has("skipDuplicateFrames")) overrides.getBoolean("skipDuplicateFrames") else base.skipDuplicateFrames,
+            eeFpuRoundMode = if (overrides.has("eeFpuRoundMode")) overrides.getInt("eeFpuRoundMode") else base.eeFpuRoundMode,
             aspectRatio = if (overrides.has("aspectRatio")) overrides.getInt("aspectRatio") else base.aspectRatio,
             deinterlaceMode = if (overrides.has("deinterlaceMode")) overrides.getInt("deinterlaceMode") else base.deinterlaceMode,
             dev9EthEnable = if (overrides.has("dev9EthEnable")) overrides.getBoolean("dev9EthEnable") else base.dev9EthEnable,

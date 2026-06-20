@@ -108,6 +108,14 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(vuClampMode = it)) },
         )
         SettingsDivider()
+        SegmentedRow(
+            label = "EE FPU Round Mode",
+            options = listOf("Nearest", "Negative", "Positive", "Chop"),
+            selectedIndex = s.eeFpuRoundMode.coerceIn(0, 3),
+            description = "EE FPU float rounding. Chop (toward zero) is the PS2 default — change only if a game needs it. Restart the game to apply.",
+            onChange = { apply(s.copy(eeFpuRoundMode = it)) },
+        )
+        SettingsDivider()
         // Speed Limit / Custom FPS — caps emulation speed as a % of native
         // (100% ≈ 60fps NTSC / 50fps PAL). Only effective with the Frame
         // Limiter on. Driven by a preset index; stores the actual percent.
@@ -161,6 +169,44 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 ToggleBubble("Blit FPS", s.gamefixBlitInternalFps, modifier = Modifier.weight(1f)) {
                     apply(s.copy(enableGameFixes = true, gamefixBlitInternalFps = it))
                 }
+                ToggleBubble("FPU Multiply", s.gamefixFpuMul, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixFpuMul = it))
+                }
+            }
+            BubbleGridRow {
+                ToggleBubble("OPH Flag", s.gamefixOphFlag, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixOphFlag = it))
+                }
+                ToggleBubble("GIF FIFO", s.gamefixGifFifo, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixGifFifo = it))
+                }
+                ToggleBubble("DMA Busy", s.gamefixDmaBusy, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixDmaBusy = it))
+                }
+                ToggleBubble("VIF1 Stall", s.gamefixVif1Stall, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixVif1Stall = it))
+                }
+            }
+            BubbleGridRow {
+                ToggleBubble("I-Bit", s.gamefixIbit, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixIbit = it))
+                }
+                ToggleBubble("Full VU0 Sync", s.gamefixFullVu0Sync, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixFullVu0Sync = it))
+                }
+                ToggleBubble("VU Add-Sub", s.gamefixVuAddSub, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixVuAddSub = it))
+                }
+                ToggleBubble("VU Overflow", s.gamefixVuOverflow, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixVuOverflow = it))
+                }
+            }
+            BubbleGridRow {
+                ToggleBubble("Extra XGKICK", s.gamefixXgkick, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(enableGameFixes = true, gamefixXgkick = it))
+                }
+                Spacer(Modifier.weight(1f))
+                Spacer(Modifier.weight(1f))
                 Spacer(Modifier.weight(1f))
             }
         }
@@ -238,7 +284,9 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 ToggleBubble("Defer VU Writes", s.vuDeferredWrites, modifier = Modifier.weight(1f)) {
                     apply(s.copy(vuDeferredWrites = it))
                 }
-                Spacer(Modifier.weight(1f))
+                ToggleBubble("Skip Dupe Frames", s.skipDuplicateFrames, modifier = Modifier.weight(1f)) {
+                    apply(s.copy(skipDuplicateFrames = it))
+                }
                 Spacer(Modifier.weight(1f))
             }
         }

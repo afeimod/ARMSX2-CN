@@ -144,7 +144,9 @@ static bool OpenGSDevice(GSRendererType renderer, bool clear_state_on_fail, bool
 	bool okay = g_gs_device->Create(vsync_mode, allow_present_throttle);
 	if (okay)
 	{
+		Console.WriteLn("@@ANDROID_GL_INIT@@ stage=device_created");
 		okay = ImGuiManager::Initialize();
+		Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_mgr_done");
 		if (!okay)
 			Console.Error("Failed to initialize ImGuiManager");
 	}
@@ -258,6 +260,7 @@ static bool OpenGSRenderer(GSRendererType renderer, u8* basemem)
 	g_gs_renderer->ResetPCRTC();
 	g_gs_renderer->UpdateRenderFixes();
 	g_perfmon.Reset();
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=renderer_open_done");
 	return true;
 }
 

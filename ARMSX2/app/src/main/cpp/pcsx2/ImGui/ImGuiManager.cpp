@@ -137,6 +137,7 @@ bool ImGuiManager::Initialize()
 		pxFailRel("Failed to load font data");
 		return false;
 	}
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_fontdata_done");
 
 	s_global_scale = std::max(0.5f, g_gs_device->GetWindowScale() * (GSConfig.OsdScale / 100.0f));
 	s_scale_changed = false;
@@ -175,6 +176,7 @@ bool ImGuiManager::Initialize()
 
 	SetKeyMap();
 	SetStyle();
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_context_done");
 
 	const bool add_fullscreen_fonts = s_fullscreen_ui_was_initialized;
 	pxAssertRel(!FullscreenUI::IsInitialized(), "Fullscreen UI is not initialized on ImGui init");
@@ -191,8 +193,10 @@ bool ImGuiManager::Initialize()
 		UnloadFontData();
 		return false;
 	}
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_fonts_done");
 
 	NewFrame();
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_newframe_done");
 
 	// reinitialize fsui if it was previously enabled
 	if (add_fullscreen_fonts)
@@ -310,10 +314,20 @@ void ImGuiManager::NewFrame()
 		UpdateScale();
 	}
 
+	static bool s_logged_newframe = false;
+	if (!s_logged_newframe)
+		Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_corenewframe_begin w=%.0f h=%.0f", io.DisplaySize.x, io.DisplaySize.y);
 	ImGui::NewFrame();
+	if (!s_logged_newframe)
+		Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_corenewframe_done win=%p", static_cast<const void*>(ImGui::GetCurrentWindowRead()));
 
 	// Disable nav input on the implicit (Debug##Default) window. Otherwise we end up requesting keyboard
 	// focus when there's nothing there. We use GetCurrentWindowRead() because otherwise it'll make it visible.
+	if (!s_logged_newframe)
+	{
+		Console.WriteLn("@@ANDROID_GL_INIT@@ stage=imgui_getwindow_done");
+		s_logged_newframe = true;
+	}
 	ImGui::GetCurrentWindowRead()->Flags |= ImGuiWindowFlags_NoNavInputs;
 	s_imgui_wants_keyboard.store(io.WantCaptureKeyboard, std::memory_order_relaxed);
 	s_imgui_wants_mouse.store(io.WantCaptureMouse, std::memory_order_release);
@@ -400,6 +414,15 @@ void ImGuiManager::SetStyle()
 	style.ScrollbarRounding = 5.0f;
 
 	style.ScaleAllSizes(s_global_scale);
+
+	// ImGui 1.92 added ErrorCheckNewFrameSanityChecks() which asserts
+	// WindowMinSize >= 1 on every NewFrame. ScaleAllSizes() above multiplies our
+	// 1.0 base by s_global_scale, which is clamped to 0.5 on low-DPI handhelds
+	// (AYANEO Pocket S Mini, Retroid Pocket Mini, etc.) — that drops WindowMinSize
+	// to 0.5 and SIGABRTs on the first frame. This was the V9+ boot crash on those
+	// devices (older ImGui had no such assert). Floor it back to a valid value.
+	style.WindowMinSize.x = std::max(style.WindowMinSize.x, 1.0f);
+	style.WindowMinSize.y = std::max(style.WindowMinSize.y, 1.0f);
 }
 
 void ImGuiManager::SetKeyMap()

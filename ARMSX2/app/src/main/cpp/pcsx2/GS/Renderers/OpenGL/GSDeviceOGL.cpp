@@ -288,6 +288,10 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		Console.WriteLn("GL: Not using shader cache.");
 	}
 
+	// GL-ES init bisect markers (Adreno 650/740 boot crash). The crash is a
+	// silent driver fault with no bad-shader dump, so the LAST stage printed in
+	// the emulog before it cuts off pinpoints the faulting phase.
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=objects");
 	// because of fbo bindings below...
 	GLState::Clear();
 
@@ -586,6 +590,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		}
 	}
 
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=convert_present_merge_interlace_done");
 	// ****************************************************************
 	// Post processing
 	// ****************************************************************
@@ -593,7 +598,16 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 		return false;
 
 	// Image load store and GLSL 420pack is core in GL4.2, no need to check.
-	m_features.cas_sharpening = ((GLAD_GL_VERSION_4_2 && GLAD_GL_ARB_compute_shader) || GLAD_GL_ES_VERSION_3_2) && CreateCASPrograms();
+	// NOTE: CAS uses a desktop-GL compute shader (cas.glsl is "#version 420" +
+	// "#extension GL_ARB_compute_shader") — that source is invalid GLSL ES. On
+	// devices whose driver only gives a GL ES 3.2 context (e.g. Adreno 650 on the
+	// Retroid Pocket Mini, where the desktop 4.2 context request fails and we fall
+	// back to ES), feeding the ES compiler that shader hard-crashes the driver
+	// during GS init. So gate CAS to a real desktop-GL 4.2 context only; ES devices
+	// just go without the sharpening filter (TV/CRT present shaders are unaffected —
+	// they use the ES-aware "#version 320 es" header and compile fine).
+	m_features.cas_sharpening = (GLAD_GL_VERSION_4_2 && GLAD_GL_ARB_compute_shader) && CreateCASPrograms();
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=postproc_done");
 
 	// ****************************************************************
 	// rasterization configuration
@@ -648,11 +662,14 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	if (GLAD_GL_ARB_clip_control)
 		glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
 
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=date_raster_done");
 	// ****************************************************************
 	// HW renderer shader
 	// ****************************************************************
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=texturefx_begin");
 	if (!CreateTextureFX())
 		return false;
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=texturefx_done");
 
 	// ****************************************************************
 	// Pbo Pool allocation
@@ -682,6 +699,7 @@ bool GSDeviceOGL::Create(GSVSyncMode vsync_mode, bool allow_present_throttle)
 	static_assert(sizeof(OMDepthStencilSelector) == 1, "Wrong OMDepthStencilSelector size");
 	static_assert(sizeof(OMColorMaskSelector) == 1, "Wrong OMColorMaskSelector size");
 
+	Console.WriteLn("@@ANDROID_GL_INIT@@ stage=create_done");
 	return true;
 }
 
