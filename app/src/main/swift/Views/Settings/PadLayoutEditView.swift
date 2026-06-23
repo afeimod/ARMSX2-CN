@@ -292,25 +292,7 @@ struct PadLayoutEditView: View {
 
     @ViewBuilder
     private func skinToolbarItem() -> some View {
-        if context.gameIdentity == nil {
-            skinPickerMenuButton()
-        } else {
-            Menu {
-                Text("Skin follows this game's VPad setting")
-            } label: {
-                VStack(spacing: 0) {
-                    Image(systemName: "paintpalette.fill")
-                        .font(.body)
-                        .foregroundStyle(.white.opacity(0.72))
-                    Text("Skin")
-                        .font(.system(size: 7, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.78))
-                        .lineLimit(1)
-                        .frame(width: 44)
-                }
-                .frame(width: 46, height: 28)
-            }
-        }
+        skinPickerMenuButton()
     }
 
     private func layoutPresetMenuButton() -> some View {

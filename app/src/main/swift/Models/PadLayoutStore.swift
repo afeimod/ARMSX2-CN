@@ -74,7 +74,7 @@ final class ARMSX2BridgePadLayoutINIStore: PadLayoutINIStore {
 enum PadLayoutMetrics {
     static let minimumTouchLength: CGFloat = 55
     static let minControlScale: CGFloat = 0.5
-    static let maxControlScale: CGFloat = 4.0
+    static let maxControlScale: CGFloat = 7.0
 
     static func visibleLength(baseLength: CGFloat, visibleScale: CGFloat) -> CGFloat {
         baseLength * visibleScale
