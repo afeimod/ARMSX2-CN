@@ -55,25 +55,6 @@ private struct RetroAchievementEntry: Identifiable, Equatable {
     var isActiveChallenge: Bool { bucket == 6 || bucket == 7 }
 }
 
-struct CompatibilityPreset: Identifiable {
-    let id: String
-    let title: String
-    let systemImage: String
-}
-
-let compatibilityPresets: [CompatibilityPreset] = [
-    CompatibilityPreset(id: "off", title: "Off / Default", systemImage: "power"),
-    CompatibilityPreset(id: "cop1", title: "COP1 Everything Only", systemImage: "function"),
-    CompatibilityPreset(id: "loadstore", title: "COP1 + EE Load/Store", systemImage: "arrow.left.arrow.right"),
-    CompatibilityPreset(id: "mmi", title: "COP1 + EE MMI", systemImage: "rectangle.3.group"),
-    CompatibilityPreset(id: "cop2vu", title: "COP1 + EE COP2/VU Macro", systemImage: "cube.transparent"),
-    CompatibilityPreset(id: "multdiv", title: "COP1 + EE Mult/Div", systemImage: "multiply"),
-    CompatibilityPreset(id: "shifts", title: "COP1 + EE Shifts", systemImage: "arrow.left.and.right"),
-    CompatibilityPreset(id: "moves", title: "COP1 + EE Moves/HI-LO", systemImage: "arrow.triangle.swap"),
-    CompatibilityPreset(id: "integeralu", title: "COP1 + EE Integer ALU", systemImage: "plus.forwardslash.minus"),
-    CompatibilityPreset(id: "branches", title: "COP1 + EE Branches/Jumps", systemImage: "arrow.triangle.branch"),
-]
-
 private struct GameScreenSizePreferenceKey: PreferenceKey {
     static let defaultValue: CGSize = .zero
     static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
@@ -88,7 +69,6 @@ struct GameScreenView: View {
     @State private var settings = SettingsStore.shared
     @State private var layoutPresets = PadLayoutPresetStore.shared
     @State private var skinLibrary = VPadSkinLibraryStore.shared
-    @State private var fileImporter = FileImportHandler.shared
     @State private var userVirtualPadVisible = true
     @State private var externalControllerConnected = false
     @State private var fullScreen = false
@@ -97,18 +77,14 @@ struct GameScreenView: View {
     @State private var gameMenuAvailable = false
     @State private var showSaveStates = false
     @State private var showSpeedControl = false
-    @State private var showCompatibilityLab = false
     @State private var showPerGameSettings = false
-    @State private var showPNACHImporter = false
+    @State private var showCheatsManager = false
     @State private var showRetroAchievements = false
     @State private var showPadLayoutEditor = false
     @State private var showResetConfirmation = false
     @State private var runtimePerGameSettingsEntry: ISOEntry?
     @State private var runtimePerGameSettings: [String: Any]?
     @State private var runtimePadLayoutIdentity: PadLayoutGameIdentity?
-    @State private var compatibilityPresetKey = "off"
-    @State private var compatibilityIdentity = ""
-    @State private var compatibilityAutoPresets = true
     @State private var statusMessage: String? = nil
     @State private var statusMessageGeneration = 0
     @State private var statusMessageDismissTask: Task<Void, Never>?
@@ -201,10 +177,6 @@ struct GameScreenView: View {
             SpeedControlPanel(settings: settings)
                 .presentationDetents([.medium])
         }
-        .sheet(isPresented: $showCompatibilityLab) {
-            compatibilityLabPanel
-                .presentationDetents([.medium, .large])
-        }
         .sheet(isPresented: $showRetroAchievements) {
             RetroAchievementsGamePanel(settings: settings)
                 .presentationDetents([.medium, .large])
@@ -218,22 +190,13 @@ struct GameScreenView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             }
         }
-        .sheet(isPresented: $showPNACHImporter) {
-            ImportDocumentPicker(
-                allowedContentTypes: FileImportHandler.pnachContentTypes,
-                allowsMultipleSelection: true
-            ) { result in
-                showPNACHImporter = false
-                switch result {
-                case .success(let urls):
-                    let message = fileImporter.importPNACHURLs(urls, asCheat: true, presentsAlert: false)
-                    presentPNACHImportResult(message)
-                case .failure(let error):
-                    if !FileImportHandler.isUserCancelledPickerError(error) {
-                        fileImporter.presentImportResult(FileImportHandler.failedPNACHPickerMessage(errorDescription: error.localizedDescription))
-                    }
-                }
-            }
+        .sheet(isPresented: $showCheatsManager) {
+            CheatsPatchesManagerView(
+                isoName: ARMSX2Bridge.currentGameISOName() ?? "",
+                gameTitle: "",
+                launchContext: .inGame
+            )
+            .presentationDetents([.medium, .large])
         }
         .overlay(alignment: .bottom) {
             statusToastOverlay
@@ -276,9 +239,8 @@ struct GameScreenView: View {
         )
         .onChange(of: showSaveStates) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showSpeedControl) { _, _ in updateRuntimeOverlayPause() }
-        .onChange(of: showCompatibilityLab) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showPerGameSettings) { _, _ in updateRuntimeOverlayPause() }
-        .onChange(of: showPNACHImporter) { _, _ in updateRuntimeOverlayPause() }
+        .onChange(of: showCheatsManager) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showRetroAchievements) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showPadLayoutEditor) { _, _ in updateRuntimeOverlayPause() }
         .onChange(of: showResetConfirmation) { _, _ in updateRuntimeOverlayPause() }
@@ -372,15 +334,6 @@ struct GameScreenView: View {
 
             Divider()
 
-            Button {
-                presentQuickMenuPanel("compatibility_lab") {
-                    refreshCompatibilityState()
-                    showCompatibilityLab = true
-                }
-            } label: {
-                Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
-            }
-
             if gameMenuAvailable {
                 Button {
                     presentQuickMenuPanel("per_game_settings") {
@@ -433,11 +386,11 @@ struct GameScreenView: View {
                 }
 
                 Button {
-                    presentQuickMenuPanel("pnach_import") {
-                        showPNACHImporter = true
+                    presentQuickMenuPanel("cheats_patches") {
+                        showCheatsManager = true
                     }
                 } label: {
-                    Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
+                    Label(settings.localized("Cheats & Patches"), systemImage: "rectangle.stack.badge.plus")
                 }
 
                 Button {
@@ -528,146 +481,6 @@ struct GameScreenView: View {
 
     // MARK: - Runtime Panels
 
-    private var compatibilityLabPanel: some View {
-        NavigationStack {
-            Form {
-                compatibilityStatusSection
-                compatibilityResetSection
-                compatibilityFlagsSection
-                if !compatibilityIdentity.isEmpty {
-                    compatibilityForgetSection
-                }
-            }
-            .navigationTitle(settings.localized("Compatibility Lab"))
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(settings.localized("Done")) {
-                        showCompatibilityLab = false
-                    }
-                }
-            }
-            .onAppear(perform: refreshCompatibilityState)
-        }
-    }
-
-    private var compatibilityStatusSection: some View {
-        let currentPreset = compatibilityPreset(for: compatibilityPresetKey)
-        return Section {
-            Toggle(isOn: Binding(
-                get: { compatibilityAutoPresets },
-                set: { newValue in
-                    compatibilityAutoPresets = newValue
-                    ARMSX2Bridge.setCompatibilityAutoGamePresetsEnabled(newValue)
-                    refreshCompatibilityState()
-                }
-            )) {
-                Label(settings.localized("Auto Game Presets"), systemImage: "sparkles")
-            }
-
-            LabeledContent(settings.localized("Current Mode")) {
-                Text(settings.localized(currentPreset.title))
-                    .foregroundStyle(.secondary)
-                    .multilineTextAlignment(.trailing)
-            }
-
-            if !compatibilityIdentity.isEmpty {
-                LabeledContent(settings.localized("Current Game")) {
-                    Text(compatibilityIdentity)
-                        .foregroundStyle(.secondary)
-                }
-            } else {
-                Text(settings.localized("Start a game to remember presets per title."))
-                    .foregroundStyle(.secondary)
-            }
-        } header: {
-            Text(settings.localized("Status"))
-        } footer: {
-            Text(settings.localized("Auto Game Presets applies known safe defaults. Manual flags below are remembered for the current game when a game is running."))
-        }
-    }
-
-    private var compatibilityResetSection: some View {
-        Section {
-            Button {
-                applyCompatibilityPreset(compatibilityPreset(for: "off"))
-            } label: {
-                Label(settings.localized("Use Default / Clear Flags"), systemImage: "power")
-            }
-            .foregroundStyle(.primary)
-        } header: {
-            Text(settings.localized("Reset"))
-        } footer: {
-            Text(settings.localized("Use this when testing is done or a game behaves worse with compatibility flags enabled."))
-        }
-    }
-
-    private var compatibilityFlagsSection: some View {
-        Section {
-            compatibilityLabToggle(
-                "COP1EverythingOnly",
-                title: "COP1 Everything Only",
-                systemImage: "function"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusLoadStore",
-                title: "COP1 Everything + EE Load/Store",
-                systemImage: "arrow.left.arrow.right"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMMI",
-                title: "COP1 Everything + EE MMI",
-                systemImage: "rectangle.3.group"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusCOP2VU",
-                title: "COP1 Everything + EE COP2/VU Macro",
-                systemImage: "cube.transparent"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMultDiv",
-                title: "COP1 Everything + EE Mult/Div",
-                systemImage: "multiply"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusShifts",
-                title: "COP1 Everything + EE Shifts",
-                systemImage: "arrow.left.and.right"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusMoves",
-                title: "COP1 Everything + EE Moves/HI-LO",
-                systemImage: "arrow.triangle.swap"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusIntegerALU",
-                title: "COP1 Everything + EE Integer ALU",
-                systemImage: "plus.forwardslash.minus"
-            )
-            compatibilityLabToggle(
-                "COP1EverythingPlusBranches",
-                title: "COP1 Everything + EE Branches/Jumps",
-                systemImage: "arrow.triangle.branch"
-            )
-        } header: {
-            Text(settings.localized("Manual Compatibility Flags"))
-        } footer: {
-            Text(settings.localized("Toggle one or more flags when a game needs compatibility help. Changing any flag switches this game to Custom Advanced Flags."))
-        }
-    }
-
-    private var compatibilityForgetSection: some View {
-        Section {
-            Button(role: .destructive) {
-                let identity = compatibilityIdentity
-                ARMSX2Bridge.forgetCompatibilityPresetForCurrentGame()
-                refreshCompatibilityState()
-                presentStatusMessage("\(settings.localized("Compatibility preset reset for")) \(identity)")
-            } label: {
-                Label(settings.localized("Forget This Game's Override"), systemImage: "trash")
-            }
-        }
-    }
-
     @ViewBuilder
     private var runtimePerGameSettingsContent: some View {
         if let runtimePerGameSettingsEntry {
@@ -728,7 +541,7 @@ struct GameScreenView: View {
     }
 
     private func updateRuntimeOverlayPause() {
-        let shouldPause = showSaveStates || showSpeedControl || showCompatibilityLab || showPerGameSettings || showPNACHImporter || showPadLayoutEditor || showResetConfirmation
+        let shouldPause = showSaveStates || showSpeedControl || showPerGameSettings || showCheatsManager || showPadLayoutEditor || showResetConfirmation
         NSLog("@@RUNTIME_OVERLAY_PAUSE@@ should=%d active=%d vm=%d", shouldPause ? 1 : 0, runtimeOverlayPauseActive ? 1 : 0, ARMSX2Bridge.isVMRunning() ? 1 : 0)
         guard runtimeOverlayPauseActive != shouldPause else { return }
 
@@ -751,7 +564,6 @@ struct GameScreenView: View {
         if runtimePadLayoutIdentity != identity {
             runtimePadLayoutIdentity = identity
         }
-        refreshCompatibilityState()
     }
 
     private func refreshExternalControllerConnectionState() {
@@ -829,59 +641,6 @@ struct GameScreenView: View {
             .replacingOccurrences(of: "_", with: "-")
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .uppercased()
-    }
-
-    // MARK: - Compatibility Helpers
-
-    private func refreshCompatibilityState() {
-        let preset = ARMSX2Bridge.compatibilityPresetForCurrentGame()
-        let identity = ARMSX2Bridge.compatibilityIdentityForCurrentGame()
-        let autoPresets = ARMSX2Bridge.isCompatibilityAutoGamePresetsEnabled()
-
-        if compatibilityPresetKey != preset {
-            compatibilityPresetKey = preset
-        }
-        if compatibilityIdentity != identity {
-            compatibilityIdentity = identity
-        }
-        if compatibilityAutoPresets != autoPresets {
-            compatibilityAutoPresets = autoPresets
-        }
-    }
-
-    private func compatibilityPreset(for id: String) -> CompatibilityPreset {
-        if let preset = compatibilityPresets.first(where: { $0.id == id }) {
-            return preset
-        }
-
-        return CompatibilityPreset(id: "custom", title: "Custom Advanced Flags", systemImage: "slider.horizontal.3")
-    }
-
-    private func applyCompatibilityPreset(_ preset: CompatibilityPreset) {
-        let rememberForCurrentGame = !compatibilityIdentity.isEmpty
-        ARMSX2Bridge.setCompatibilityPreset(preset.id, rememberForCurrentGame: rememberForCurrentGame)
-        refreshCompatibilityState()
-
-        if rememberForCurrentGame {
-            presentStatusMessage("\(settings.localized(preset.title)) \(settings.localized("saved for")) \(compatibilityIdentity)")
-        } else {
-            presentStatusMessage("\(settings.localized("Compatibility preset set to")) \(settings.localized(preset.title))")
-        }
-    }
-
-    private func compatibilityLabToggle(_ key: String, title: String, systemImage: String) -> some View {
-        Toggle(isOn: Binding(
-            get: { ARMSX2Bridge.getJITBisectFlag(key, defaultValue: false) },
-            set: {
-                ARMSX2Bridge.setJITBisectFlag(key, value: $0)
-                compatibilityPresetKey = "custom"
-                if !compatibilityIdentity.isEmpty {
-                    presentStatusMessage("\(settings.localized("Custom compatibility flags saved for")) \(compatibilityIdentity)")
-                }
-            }
-        )) {
-            Label(settings.localized(title), systemImage: systemImage)
-        }
     }
 
     // MARK: - Actions
@@ -1125,22 +884,6 @@ struct GameScreenView: View {
 
     private func presentImportantStatusMessage(_ message: String) {
         presentStatusMessage(message, displayDuration: Self.importantStatusDisplayDuration)
-    }
-
-    private func presentPNACHImportResult(_ message: String) {
-        if Self.isPNACHImportSuccessMessage(message) {
-            presentStatusMessage(message)
-        } else {
-            fileImporter.presentImportResult(message)
-        }
-    }
-
-    private static func isPNACHImportSuccessMessage(_ message: String) -> Bool {
-        let lines = message
-            .split(separator: "\n")
-            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return !lines.isEmpty && lines.allSatisfy { $0.hasPrefix("PNACH imported") }
     }
 
     // MARK: - Virtual Pad

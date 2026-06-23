@@ -72,7 +72,6 @@ struct GameListView: View {
     @State private var showRestartAlert = false
     @State private var showStopAlert = false
     @State private var showCoverTemplateEditor = false
-    @State private var showPNACHImporter = false
     @State private var showGameReplacementAlert = false
     @State private var coverTemplateDraft = CoverStore.defaultCoverURLTemplate
     @State private var pendingGameName: String = ""
@@ -81,11 +80,10 @@ struct GameListView: View {
     @State private var pendingCoverGameName: String?
     @State private var pendingCoverPhotoGameName: String?
     @State private var selectedCoverPhotoItem: PhotosPickerItem?
-    @State private var pendingPNACHGameName: String?
     @State private var gameInfoTarget: ISOEntry?
     @State private var gameSettingsTarget: ISOEntry?
-    @State private var gameCompatibilityTarget: ISOEntry?
     @State private var discLinkTarget: ISOEntry?
+    @State private var cheatsManagerTarget: ISOEntry?
     @State private var pendingDeleteGame: ISOEntry?
     @State private var pendingDeleteDataGame: ISOEntry?
     @State private var gameActionTitle = ""
@@ -436,28 +434,6 @@ struct GameListView: View {
                 pendingCoverPhotoGameName = nil
                 importCoverPhoto(photoItem, forGameNamed: gameName)
             }
-            .sheet(isPresented: $showPNACHImporter) {
-                ImportDocumentPicker(
-                    allowedContentTypes: FileImportHandler.pnachContentTypes,
-                    allowsMultipleSelection: true
-                ) { result in
-                    showPNACHImporter = false
-                    switch result {
-                    case .success(let urls):
-                        if let pendingPNACHGameName {
-                            fileImporter.importPNACHURLs(urls, forISO: pendingPNACHGameName, asCheat: true)
-                        } else {
-                            fileImporter.presentImportResult(FileImportHandler.pnachImportNeedsGameMessage)
-                        }
-                        pendingPNACHGameName = nil
-                    case .failure(let error):
-                        if !FileImportHandler.isUserCancelledPickerError(error) {
-                            fileImporter.presentImportResult(FileImportHandler.failedPNACHPickerMessage(errorDescription: error.localizedDescription))
-                        }
-                        pendingPNACHGameName = nil
-                    }
-                }
-            }
             .sheet(item: $gameInfoTarget) { game in
                 GameInfoPanel(game: game, coverStore: coverStore)
                     .presentationDetents([.medium, .large])
@@ -469,16 +445,21 @@ struct GameListView: View {
                     .presentationBackground(.regularMaterial)
                     .presentationCornerRadius(34)
             }
-            .sheet(item: $gameCompatibilityTarget) { game in
-                GameCompatibilityPanel(game: game)
-                    .presentationDetents([.medium, .large])
-            }
             .sheet(item: $discLinkTarget) { game in
                 DiscLinkPicker(discs: games.filter { !$0.isELF && $0.id != game.id }) { selected in
                     ARMSX2Bridge.setLinkedDiscPath(selected?.fileURL?.path ?? selected?.bootName, forELF: game.bootName)
                     loadGames()
                 }
                 .presentationDetents([.medium, .large])
+            }
+            .sheet(item: $cheatsManagerTarget) { game in
+                CheatsPatchesManagerView(
+                    isoName: game.bootName,
+                    gameTitle: game.name,
+                    launchContext: .library
+                )
+                    .presentationDetents([.large])
+                    .presentationDragIndicator(.visible)
             }
         }
 	        .onAppear {
@@ -581,6 +562,26 @@ struct GameListView: View {
         }
     }
 
+    /// Clean display title for the running game, preferring the library entry over the raw path.
+    private func displayTitle(forRunningName name: String) -> String {
+        if name == "BIOS" {
+            return settings.localized("BIOS Only")
+        }
+        if let entry = games.first(where: { $0.bootName == name || $0.name == name }) {
+            let title = entry.metadata["title"]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return title.isEmpty ? entry.name : title
+        }
+        return Self.cleanGameFileName(name)
+    }
+
+    /// Last path component with its disc extension (`.iso`, `.bin`, `.cue`, …) removed,
+    /// used when no matching library entry is available.
+    private static func cleanGameFileName(_ value: String) -> String {
+        let fileName = (value as NSString).lastPathComponent
+        guard !fileName.isEmpty else { return value }
+        return (fileName as NSString).deletingPathExtension
+    }
+
     private func vmStatusSection(gameName: String) -> some View {
         Section {
             // Resume row — tap anywhere to return to game
@@ -595,9 +596,11 @@ struct GameListView: View {
                         Text(settings.localized("Now Running"))
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                        Text(gameName == "BIOS" ? settings.localized("BIOS Only") : gameName)
+                        Text(displayTitle(forRunningName: gameName))
                             .font(.body)
                             .fontWeight(.semibold)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                     Spacer()
                     Text(settings.localized("Resume"))
@@ -818,9 +821,10 @@ struct GameListView: View {
                 Text(settings.localized("Now Running"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Text(gameName == "BIOS" ? settings.localized("BIOS Only") : gameName)
+                Text(displayTitle(forRunningName: gameName))
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
+                    .truncationMode(.tail)
             }
             Spacer()
             Button(settings.localized("Resume")) {
@@ -855,7 +859,7 @@ struct GameListView: View {
             Text(settings.localized("Now Running"))
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            Text(gameName == "BIOS" ? settings.localized("BIOS Only") : gameName)
+            Text(displayTitle(forRunningName: gameName))
                 .font((metrics.isCompact ? Font.subheadline : Font.headline).weight(.semibold))
                 .lineLimit(2)
                 .multilineTextAlignment(.center)
@@ -910,20 +914,11 @@ struct GameListView: View {
         }
 
         Button {
-            presentMenuPanel("compatibility_lab") {
-                gameCompatibilityTarget = game
+            presentMenuPanel("cheats_patches") {
+                cheatsManagerTarget = game
             }
         } label: {
-            Label(settings.localized("Compatibility Lab"), systemImage: "wand.and.stars")
-        }
-
-		Button {
-			presentMenuPanel("pnach_import") {
-				pendingPNACHGameName = game.bootName
-				showPNACHImporter = true
-			}
-		} label: {
-            Label(settings.localized("Import PNACH / 60 FPS Patch"), systemImage: "wand.and.stars")
+            Label(settings.localized("Cheats & Patches"), systemImage: "rectangle.stack.badge.plus")
         }
 
         Menu {
@@ -1475,122 +1470,6 @@ private struct GameInfoPanel: View {
     }
 }
 
-private struct GameCompatibilityPanel: View {
-    @Environment(\.dismiss) private var dismiss
-    @State private var settings = SettingsStore.shared
-    @State private var selectedPreset: String
-    @State private var identity: String
-    @State private var statusMessage: String?
-
-    let game: ISOEntry
-
-    init(game: ISOEntry) {
-        self.game = game
-        _selectedPreset = State(initialValue: ARMSX2Bridge.compatibilityPreset(forISO: game.bootName))
-        _identity = State(initialValue: ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName))
-    }
-
-    var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    LabeledContent(settings.localized("Current Game")) {
-                        Text(identity.isEmpty ? settings.localized("Unknown") : identity)
-                            .foregroundStyle(.secondary)
-                    }
-                    LabeledContent(settings.localized("Current Mode")) {
-                        Text(settings.localized(presetTitle(selectedPreset)))
-                            .foregroundStyle(.secondary)
-                    }
-                } header: {
-                    Text(settings.localized("Status"))
-                } footer: {
-                    Text(settings.localized("Presets are saved for this game and apply on the next boot/reset. Use Off / Default when a preset makes rendering or stability worse."))
-                }
-
-                Section(settings.localized("Presets")) {
-                    ForEach(compatibilityPresets) { preset in
-                        Button {
-                            apply(preset)
-                        } label: {
-                            HStack {
-                                Label(settings.localized(preset.title), systemImage: preset.systemImage)
-                                Spacer()
-                                if selectedPreset == preset.id {
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                        .foregroundStyle(.primary)
-                    }
-                }
-
-                Section {
-                    ForEach(advancedPresets) { preset in
-                        Toggle(isOn: Binding(
-                            get: { ARMSX2Bridge.compatibilityFlag(preset.id, forISO: game.bootName) },
-                            set: { enabled in
-                                ARMSX2Bridge.setCompatibilityFlag(preset.id, enabled: enabled, forISO: game.bootName)
-                                selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
-                                identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
-                                statusMessage = "\(settings.localized("Custom compatibility flags saved for")) \(identity)"
-                            }
-                        )) {
-                            Label(settings.localized(preset.title), systemImage: preset.systemImage)
-                        }
-                    }
-                } header: {
-                    Text(settings.localized("Advanced Custom Flags"))
-                } footer: {
-                    Text(settings.localized("Toggle one or more flags when one preset is not enough. Changing any flag switches this game to Custom Advanced Flags."))
-                }
-
-                Section {
-                    Button(role: .destructive) {
-                        ARMSX2Bridge.forgetCompatibilityPreset(forISO: game.bootName)
-                        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
-                        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
-                        statusMessage = settings.localized("Compatibility preset reset for this game.")
-                    } label: {
-                        Label(settings.localized("Forget This Game's Override"), systemImage: "trash")
-                    }
-                }
-
-                if let statusMessage {
-                    Section {
-                        Text(statusMessage)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .navigationTitle(settings.localized("Compatibility Lab"))
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button(settings.localized("Done")) {
-                        dismiss()
-                    }
-                }
-            }
-        }
-    }
-
-    private func apply(_ preset: CompatibilityPreset) {
-        ARMSX2Bridge.setCompatibilityPreset(preset.id, forISO: game.bootName)
-        selectedPreset = ARMSX2Bridge.compatibilityPreset(forISO: game.bootName)
-        identity = ARMSX2Bridge.compatibilityIdentity(forISO: game.bootName)
-        statusMessage = "\(settings.localized(preset.title)) \(settings.localized("saved for this game. Reset or relaunch to apply."))"
-    }
-
-    private func presetTitle(_ id: String) -> String {
-        compatibilityPresets.first(where: { $0.id == id })?.title ?? "Custom Advanced Flags"
-    }
-
-    private var advancedPresets: [CompatibilityPreset] {
-        compatibilityPresets.filter { $0.id != "off" }
-    }
-}
-
 struct PerGameSettingsPanel: View {
     @Environment(\.dismiss) private var dismiss
     @State private var settings = SettingsStore.shared
@@ -1687,6 +1566,7 @@ struct PerGameSettingsPanel: View {
     @State private var enableGameFixes: Bool
     @State private var enableGameDBHardwareFixes: Bool
     @State private var statusMessage: String?
+    @State private var showCheatsManager = false
 
     init(
         game: ISOEntry,
@@ -2149,11 +2029,12 @@ struct PerGameSettingsPanel: View {
                     }
                 }
 
-                Section(settings.localized("Patches & Cheats")) {
-                    Toggle(settings.localized("Enable PNACH Cheats"), isOn: $enableCheats)
-                        .disabled(!enabled)
-                    Toggle(settings.localized("GameDB PNACH Patches"), isOn: $enablePatches)
-                        .disabled(!enabled)
+                Section(settings.localized("Cheats & Patches")) {
+                    Button {
+                        showCheatsManager = true
+                    } label: {
+                        Label(settings.localized("Cheats & Patches"), systemImage: "rectangle.stack.badge.plus")
+                    }
                     Toggle(settings.localized("GameDB Core Fixes"), isOn: $enableGameFixes)
                         .disabled(!enabled)
                     Toggle(settings.localized("GameDB Graphics Fixes"), isOn: $enableGameDBHardwareFixes)
@@ -2198,6 +2079,13 @@ struct PerGameSettingsPanel: View {
             PadLayoutEditView(
                 onDismiss: { showPadLayoutEditor = false },
                 context: perGamePadLayoutEditorContext
+            )
+        }
+        .fullScreenCover(isPresented: $showCheatsManager) {
+            CheatsPatchesManagerView(
+                isoName: game.bootName,
+                gameTitle: game.name,
+                launchContext: savesToRunningGame ? .inGame : .library
             )
         }
     }

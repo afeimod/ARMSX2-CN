@@ -1876,6 +1876,58 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         NSLog(@"[ARMSX2Bridge] Game settings save error: %@", ARMSX2NSStringFromStdString(error.GetDescription()));
 }
 
+static NSArray<NSString*>* ARMSX2PatchEnableListForIdentity(const std::string& serial, u32 crc,
+                                                             NSString* section, NSString* key)
+{
+    if (serial.empty() || crc == 0)
+        return @[];
+
+    const std::string settingsPath = VMManager::GetGameSettingsPath(serial, crc);
+    INISettingsInterface si(settingsPath);
+    if (!si.Load())
+        return @[];
+
+    const std::vector<std::string> values = si.GetStringList(section.UTF8String ?: "", key.UTF8String ?: "");
+    NSMutableArray<NSString*>* result = [NSMutableArray arrayWithCapacity:values.size()];
+    for (const std::string& value : values)
+    {
+        NSString* name = ARMSX2NSStringFromStdString(value);
+        if (name.length > 0)
+            [result addObject:name];
+    }
+    return result;
+}
+
+static void ARMSX2SetPatchEnableListForIdentity(NSArray<NSString*>* values, const std::string& serial, u32 crc,
+                                                NSString* section, NSString* key)
+{
+    if (serial.empty() || crc == 0)
+        return;
+
+    FileSystem::CreateDirectoryPath(EmuFolders::GameSettings.c_str(), false);
+    const std::string settingsPath = VMManager::GetGameSettingsPath(serial, crc);
+    INISettingsInterface si(settingsPath);
+    si.Load();
+
+    std::vector<std::string> list;
+    list.reserve(values.count);
+    for (NSString* value in values)
+    {
+        if (value.length > 0)
+            list.push_back(value.UTF8String);
+    }
+
+    if (list.empty())
+        si.DeleteValue(section.UTF8String ?: "", key.UTF8String ?: "");
+    else
+        si.SetStringList(section.UTF8String ?: "", key.UTF8String ?: "", list);
+
+    Error error;
+    si.Save(&error);
+    // NSLog(@"[ARMSX2Bridge] Patch enable list saved serial=%@ crc=%08X section=%@ count=%lu",
+    //       ARMSX2NSStringFromStdString(serial), (unsigned int)crc, section, (unsigned long)list.size());
+}
+
 @implementation ARMSX2Bridge
 
 + (UIView *)gameRenderView {
@@ -3461,10 +3513,9 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 #pragma mark - PNACH cheats/patches
 
 + (nullable NSString *)pnachPathForCurrentGameAsCheat:(BOOL)asCheat {
-    if (asCheat && (ARMSX2RetroAchievementsHardcoreActive() || EmuConfig.Achievements.HardcoreMode)) {
-        ARMSX2LogRetroAchievementsHardcoreBlock("pnach_cheat_import_current_game");
-        return nil;
-    }
+    // Note: Hardcore Mode does not block locating/creating cheat files here. Cheat
+    // download/import only stores the file; the PCSX2 core refuses to apply cheats
+    // while Hardcore is active, and the Swift toggle gates enabling them.
 
     std::string serial;
     u32 crc = 0;
@@ -3477,10 +3528,8 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
 }
 
 + (nullable NSString *)pnachPathForISO:(nonnull NSString *)isoName asCheat:(BOOL)asCheat {
-    if (asCheat && (ARMSX2RetroAchievementsHardcoreActive() || EmuConfig.Achievements.HardcoreMode)) {
-        ARMSX2LogRetroAchievementsHardcoreBlock("pnach_cheat_import_game");
-        return nil;
-    }
+    // Note: Hardcore Mode does not block locating/creating cheat files here. See
+    // pnachPathForCurrentGameAsCheat: above; the core gates application, not storage.
 
     NSString* path = ARMSX2ResolveISOPath(isoName);
     if (path.length == 0) {
@@ -3507,6 +3556,38 @@ static void ARMSX2WriteGameSettingsForIdentity(const std::string& serial,
         Patch::ReloadPatches(serial, crc, true, true, true, true);
         Patch::UpdateActivePatches(true, true, true, true);
     }, false);
+}
+
++ (NSArray<NSString *> *)patchEnableListForISO:(NSString *)isoName section:(NSString *)section key:(NSString *)key {
+    NSString* path = ARMSX2ResolveISOPath(isoName);
+    if (path.length == 0) return @[];
+
+    GameList::Entry entry;
+    if (!GameList::PopulateEntryFromPath(path.UTF8String, &entry) || entry.crc == 0) return @[];
+    return ARMSX2PatchEnableListForIdentity(entry.serial, entry.crc, section, key);
+}
+
++ (NSArray<NSString *> *)patchEnableListForCurrentGameSection:(NSString *)section key:(NSString *)key {
+    std::string serial;
+    u32 crc = 0;
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) return @[];
+    return ARMSX2PatchEnableListForIdentity(serial, crc, section, key);
+}
+
++ (void)setPatchEnableList:(NSArray<NSString *> *)values forISO:(NSString *)isoName section:(NSString *)section key:(NSString *)key {
+    NSString* path = ARMSX2ResolveISOPath(isoName);
+    if (path.length == 0) return;
+
+    GameList::Entry entry;
+    if (!GameList::PopulateEntryFromPath(path.UTF8String, &entry) || entry.crc == 0) return;
+    ARMSX2SetPatchEnableListForIdentity(values, entry.serial, entry.crc, section, key);
+}
+
++ (void)setPatchEnableListForCurrentGame:(NSArray<NSString *> *)values section:(NSString *)section key:(NSString *)key {
+    std::string serial;
+    u32 crc = 0;
+    if (!ARMSX2GetCurrentSaveStateIdentity(&serial, &crc)) return;
+    ARMSX2SetPatchEnableListForIdentity(values, serial, crc, section, key);
 }
 
 #pragma mark - Memory cards

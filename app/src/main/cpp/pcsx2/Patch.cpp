@@ -159,10 +159,18 @@ void Patch::TrimPatchLine(std::string& buffer)
 		buffer.clear();
 	}
 
-	// check for comments at the end of a line
-	const std::string::size_type pos = buffer.find("//");
-	if (pos != std::string::npos)
-		buffer.erase(pos);
+	// Strip trailing // comments only at line start or after whitespace (keeps http:// intact).
+	for (std::string::size_type pos = buffer.find("//"); pos != std::string::npos;
+	     pos = buffer.find("//", pos + 2))
+	{
+		// The strncmp above already cleared lines beginning with "//", so pos >= 1 here.
+		const char prev = buffer[pos - 1];
+		if (prev == ' ' || prev == '\t' || prev == '\v' || prev == '\f')
+		{
+			buffer.erase(pos);
+			break;
+		}
+	}
 }
 
 bool Patch::ContainsPatchName(const std::vector<PatchGroup>& patch_list, const std::string_view patch_name)
@@ -584,30 +592,39 @@ std::string Patch::GetPnachFilename(const std::string_view serial, u32 crc, bool
 
 void Patch::ReloadEnabledLists()
 {
+	// RetroAchievements Hardcore Mode disables all user .pnach content: cheats AND patches.
+	// Patches can skip cutscenes or otherwise affect achievement legitimacy, so while Hardcore
+	// is active neither enable list is loaded and previously-enabled entries do not apply.
+	const bool hardcore_active = Achievements::IsHardcoreModeActive();
+
 	const std::vector<std::string> prev_enabled_cheats = std::move(s_enabled_cheats);
-	if (EmuConfig.EnableCheats && !Achievements::IsHardcoreModeActive())
+	if (EmuConfig.EnableCheats && !hardcore_active)
 		s_enabled_cheats = Host::GetStringListSetting(CHEATS_CONFIG_SECTION, PATCH_ENABLE_CONFIG_KEY);
 	else
 		s_enabled_cheats = {};
 
-	const std::vector<std::string> prev_enabled_patches = std::exchange(s_enabled_patches, Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_ENABLE_CONFIG_KEY));
+	const std::vector<std::string> prev_enabled_patches = std::exchange(s_enabled_patches,
+		hardcore_active ? std::vector<std::string>() : Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_ENABLE_CONFIG_KEY));
 	const std::vector<std::string> disabled_patches = Host::GetStringListSetting(PATCHES_CONFIG_SECTION, PATCH_DISABLE_CONFIG_KEY);
 
-	// Name based matching for widescreen/NI settings.
-	if (EmuConfig.EnableWideScreenPatches)
+	// Name based matching for widescreen/NI settings (also blocked under Hardcore).
+	if (!hardcore_active)
 	{
-		if (std::none_of(s_enabled_patches.begin(), s_enabled_patches.end(),
-				[](const std::string& it) { return (it == WS_PATCH_NAME); }))
+		if (EmuConfig.EnableWideScreenPatches)
 		{
-			s_enabled_patches.emplace_back(WS_PATCH_NAME);
+			if (std::none_of(s_enabled_patches.begin(), s_enabled_patches.end(),
+					[](const std::string& it) { return (it == WS_PATCH_NAME); }))
+			{
+				s_enabled_patches.emplace_back(WS_PATCH_NAME);
+			}
 		}
-	}
-	if (EmuConfig.EnableNoInterlacingPatches)
-	{
-		if (std::none_of(s_enabled_patches.begin(), s_enabled_patches.end(),
-				[](const std::string& it) { return (it == NI_PATCH_NAME); }))
+		if (EmuConfig.EnableNoInterlacingPatches)
 		{
-			s_enabled_patches.emplace_back(NI_PATCH_NAME);
+			if (std::none_of(s_enabled_patches.begin(), s_enabled_patches.end(),
+					[](const std::string& it) { return (it == NI_PATCH_NAME); }))
+			{
+				s_enabled_patches.emplace_back(NI_PATCH_NAME);
+			}
 		}
 	}
 

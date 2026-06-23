@@ -6,8 +6,9 @@ import Foundation
 import UniformTypeIdentifiers
 import UIKit
 
+@MainActor
 @Observable
-final class FileImportHandler: @unchecked Sendable {
+final class FileImportHandler {
     static let shared = FileImportHandler()
 
     struct ImportedGame: Sendable {
@@ -152,56 +153,9 @@ final class FileImportHandler: @unchecked Sendable {
         return lines.joined(separator: "\n")
     }
 
-    @discardableResult
-    func importPNACHURLs(_ urls: [URL], asCheat: Bool = true, presentsAlert: Bool = true) -> String {
-        if asCheat && Self.retroAchievementsHardcoreEnabledOrActive() {
-            if presentsAlert {
-                presentImportResult(Self.pnachCheatBlockedByHardcoreMessage)
-            }
-            return Self.pnachCheatBlockedByHardcoreMessage
-        }
-
-        let destinationPath = ARMSX2Bridge.pnachPathForCurrentGame(asCheat: asCheat)
-        let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
-        return finishPNACHImport(results, presentsAlert: presentsAlert)
-    }
-
-    @discardableResult
-    func importPNACHURLs(_ urls: [URL], forISO isoName: String, asCheat: Bool = true, presentsAlert: Bool = true) -> String {
-        if asCheat && Self.retroAchievementsHardcoreEnabledOrActive() {
-            if presentsAlert {
-                presentImportResult(Self.pnachCheatBlockedByHardcoreMessage)
-            }
-            return Self.pnachCheatBlockedByHardcoreMessage
-        }
-
-        let destinationPath = ARMSX2Bridge.pnachPath(forISO: isoName, asCheat: asCheat)
-        let results = urls.map { importPNACHFile($0, destinationPath: destinationPath, asCheat: asCheat) }
-        return finishPNACHImport(results, presentsAlert: presentsAlert)
-    }
-
     func presentImportResult(_ message: String) {
         lastImportMessage = message
         showImportAlert = true
-    }
-
-    private func finishPNACHImport(_ results: [ImportResult], presentsAlert: Bool) -> String {
-        let messages = results.map { result -> String in
-            switch result {
-            case .success(let message, _):
-                return message
-            case .unsupported(let message):
-                return message
-            case .failure(let message):
-                return message
-            }
-        }
-
-        let message = messages.isEmpty ? "No PNACH files imported." : messages.joined(separator: "\n")
-        if presentsAlert {
-            presentImportResult(message)
-        }
-        return message
     }
 
     private enum ImportResult {
@@ -298,56 +252,39 @@ final class FileImportHandler: @unchecked Sendable {
     }
 
     private func importPNACHFile(_ url: URL, destinationPath: String?, asCheat: Bool) -> ImportResult {
-        let accessing = url.startAccessingSecurityScopedResource()
-        defer { if accessing { url.stopAccessingSecurityScopedResource() } }
-
         let fileName = url.lastPathComponent
-        let ext = url.pathExtension.lowercased()
-        if !Self.pnachExtensions.contains(ext) {
+        if !Self.pnachExtensions.contains(url.pathExtension.lowercased()) {
             NSLog("[ARMSX2 iOS Import] PNACH file has non-standard extension, attempting text import: %@", fileName)
         }
 
-        guard !(asCheat && Self.retroAchievementsHardcoreEnabledOrActive()) else {
-            return .failure(Self.pnachCheatBlockedByHardcoreMessage)
-        }
-
-        guard let destinationPath, !destinationPath.isEmpty else {
+        guard let name = ARMSX2Bridge.currentGameISOName(), !name.isEmpty else {
             return .failure(Self.pnachImportNeedsGameMessage)
         }
 
-        let destinationURL = URL(fileURLWithPath: destinationPath)
-        do {
-            let data = try Data(contentsOf: url)
-            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii) else {
-                return .failure(Self.unreadablePNACHImportMessage(for: fileName))
-            }
+        let accessing = url.startAccessingSecurityScopedResource()
+        let data = try? Data(contentsOf: url)
+        if accessing { url.stopAccessingSecurityScopedResource() }
 
-            let patchLines = Self.normalizedPNACHPatchLines(from: text)
-            guard patchLines.contains(where: { $0.hasPrefix("patch=") }) else {
-                return .failure(Self.failedPNACHImportMessage(for: fileName, errorDescription: "No valid patch lines found."))
-            }
+        guard let data, let text = (String(data: data, encoding: .utf8) ?? String(data: data, encoding: .ascii)) else {
+            return .failure(Self.unreadablePNACHImportMessage(for: fileName))
+        }
 
-            var normalized = patchLines.joined(separator: "\n")
-            if !normalized.hasSuffix("\n") {
-                normalized.append("\n")
-            }
-
-            try FileManager.default.createDirectory(at: destinationURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if FileManager.default.fileExists(atPath: destinationURL.path) {
-                try FileManager.default.removeItem(at: destinationURL)
-            }
-            try normalized.write(to: destinationURL, atomically: true, encoding: .utf8)
-
-            if asCheat {
-                ARMSX2Bridge.setINIBool("EmuCore", key: "EnableCheats", value: true)
-            }
-            ARMSX2Bridge.reloadPatches()
-
-            NSLog("[ARMSX2 iOS Import] PNACH imported: %@ -> %@", fileName, destinationURL.path)
-            return .success("PNACH imported as \(destinationURL.lastPathComponent)")
-        } catch {
-            NSLog("[ARMSX2 iOS Import] PNACH failed: %@ -> %@ error=%@", fileName, destinationURL.path, error.localizedDescription)
-            return .failure(Self.failedPNACHImportMessage(for: fileName, errorDescription: error.localizedDescription))
+        // Wrap headerless (legacy) patches so the import stays a distinct, manageable entry
+        // instead of being absorbed into an existing section (matches the manager import path).
+        let installText = PnachParser.wrappingLegacyPatches(text, header: PatchStore.importLabel(for: url))
+        let outcome = PatchStore.shared.writePatch(text: installText, forISO: name, asCheat: asCheat, autoEnable: true, source: .local)
+        switch outcome {
+        case .success:
+            NSLog("[ARMSX2 iOS Import] PNACH imported: %@", fileName)
+            return .success("PNACH imported for \(name)")
+        case .invalid(let reason):
+            return .failure(Self.failedPNACHImportMessage(for: fileName, errorDescription: reason))
+        case .blockedByHardcore:
+            return .failure(Self.pnachCheatBlockedByHardcoreMessage)
+        case .noIdentity:
+            return .failure(Self.pnachImportNeedsGameMessage)
+        case .writeFailed(let reason):
+            return .failure(Self.failedPNACHImportMessage(for: fileName, errorDescription: reason))
         }
     }
 
@@ -393,13 +330,6 @@ final class FileImportHandler: @unchecked Sendable {
         "ARMSX2 could not import \(fileName). Try importing it from the matching Games, BIOS, or PNACH patch option."
     }
 
-    private static func retroAchievementsHardcoreEnabledOrActive() -> Bool {
-        let state = ARMSX2Bridge.retroAchievementsState()
-        let active = (state["hardcoreActive"] as? NSNumber)?.boolValue ?? false
-        let preference = (state["hardcorePreference"] as? NSNumber)?.boolValue ?? false
-        return active || preference || ARMSX2Bridge.isRetroAchievementsHardcoreActive()
-    }
-
     private static func unreadablePNACHImportMessage(for fileName: String) -> String {
         "\(fileName) is not a readable PNACH patch. PNACH patches need to be UTF-8 or ASCII text."
     }
@@ -417,23 +347,5 @@ final class FileImportHandler: @unchecked Sendable {
             return last
         }
         return "\(formats.dropLast().joined(separator: ", ")), or \(last)"
-    }
-
-    private static func normalizedPNACHPatchLines(from text: String) -> [String] {
-        let normalized = text
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-
-        return normalized.components(separatedBy: "\n").compactMap { rawLine in
-            let line = rawLine.trimmingCharacters(in: .whitespaces)
-            // Skip empty lines
-            guard !line.isEmpty else { return nil }
-            // Skip bracketed section headers like [Cheat Name]
-            if line.count > 2, line.first == "[", line.last == "]" {
-                return nil
-            }
-            // Preserve everything else (patch= lines, comments, gametitle, etc.)
-            return line
-        }
     }
 }

@@ -265,6 +265,26 @@ typedef void (^ARMSX2RetroAchievementsCompletion)(BOOL success, NSString * _Nonn
 + (nullable NSString *)pnachPathForISO:(nonnull NSString *)isoName asCheat:(BOOL)asCheat NS_SWIFT_NAME(pnachPath(forISO:asCheat:));
 + (void)reloadPatches;
 
+// Per-game patch/cheat enable lists (stored in the per-game INI under [Cheats]/Enable
+// and [Patches]/Enable, matching the PCSX2 patch loader). Used by the Cheats & Patches
+// manager to toggle named patch entries without rewriting .pnach files.
++ (nonnull NSArray<NSString *> *)patchEnableListForISO:(nonnull NSString *)isoName
+                                               section:(nonnull NSString *)section
+                                                  key:(nonnull NSString *)key
+        NS_SWIFT_NAME(patchEnableList(forISO:section:key:));
++ (nonnull NSArray<NSString *> *)patchEnableListForCurrentGameSection:(nonnull NSString *)section
+                                                                  key:(nonnull NSString *)key
+        NS_SWIFT_NAME(patchEnableListForCurrentGame(section:key:));
++ (void)setPatchEnableList:(nonnull NSArray<NSString *> *)values
+                   forISO:(nonnull NSString *)isoName
+                 section:(nonnull NSString *)section
+                    key:(nonnull NSString *)key
+        NS_SWIFT_NAME(setPatchEnableList(_:forISO:section:key:));
++ (void)setPatchEnableListForCurrentGame:(nonnull NSArray<NSString *> *)values
+                                 section:(nonnull NSString *)section
+                                     key:(nonnull NSString *)key
+        NS_SWIFT_NAME(setPatchEnableListForCurrentGame(_:section:key:));
+
 // Memory card management
 + (nonnull NSString *)memoryCardDirectory;
 + (nonnull NSArray<NSString *> *)availableMemoryCards;

@@ -235,7 +235,7 @@ struct EmulatorSettingsView: View {
                 Text(settings.localized("Changes take effect on next VM boot."))
             }
 
-            Section(settings.localized("Patches & Cheats")) {
+            Section {
                 Toggle(settings.localized("GameDB Automatic Fixes"), isOn: Binding(
                     get: { settings.enableGameFixes && settings.enableGameDBHardwareFixes },
                     set: { enabled in
@@ -250,9 +250,13 @@ struct EmulatorSettingsView: View {
                 Toggle(settings.localized("Widescreen Patches"), isOn: $settings.enableWidescreenPatches)
                 Toggle(settings.localized("No-Interlacing Patches"), isOn: $settings.enableNoInterlacingPatches)
 
-                Text(settings.localized("GameDB Core Fixes covers timing, clamps, and gamefixes. GameDB Graphics Fixes covers renderer-specific hardware fixes; turn it off globally or per-game if a title looks worse on Metal. PNACH cheats and 60 FPS patches can be imported from the in-game quick menu or from a game's long-press menu."))
+                Text(settings.localized("GameDB Core Fixes covers timing, clamps, and gamefixes. GameDB Graphics Fixes covers renderer-specific hardware fixes; turn it off globally or per-game if a title looks worse on Metal. Use Cheats & Patches from the in-game quick menu or a game's long-press menu to import and manage patch files."))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            } header: {
+                Text(settings.localized("Patches & Cheats"))
+            } footer: {
+                Text(settings.localized("Changes take effect on next VM boot."))
             }
 
             Section {

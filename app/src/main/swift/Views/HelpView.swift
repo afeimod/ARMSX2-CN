@@ -66,10 +66,6 @@ private let helpData: [HelpSection] = [
             answer: "Enable GameDB patches for built-in compatibility fixes. PNACH cheats can be imported from the in-game quick menu; ARMSX2 iOS renames them to the current game's Serial_CRC.pnach and keeps // comments compatible with the core parser."
         ),
         HelpItem(
-            question: "Compatibility presets",
-            answer: "The in-game quick menu can remember a Compatibility Lab preset per game, so titles like God of War, Budokai, or Naruto do not require manually switching patch modes every launch. Auto Game Presets is enabled by default; use Forget Current Game Preset to reset one title back to the built-in/default behavior."
-        ),
-        HelpItem(
             question: "Memory cards",
             answer: "The Memory Cards settings page can create 8 MB, 16 MB, 32 MB, 64 MB, or folder memory cards, then assign them to Slot 1 or Slot 2. Slot changes apply on next boot."
         ),

@@ -3118,7 +3118,17 @@ namespace Host
     bool ShouldPreferHostFileSelector() { return false; }
     void OnCoverDownloaderOpenRequested() {}
     void OnCreateMemoryCardOpenRequested() {}
-    void OnAchievementsHardcoreModeChanged(bool) { ARMSX2_PostRetroAchievementsStateChanged(); }
+    void OnAchievementsHardcoreModeChanged(bool) {
+        ARMSX2_PostRetroAchievementsStateChanged();
+        // Re-evaluate .pnach enable lists now: ReloadEnabledLists gates cheats and patches on
+        // Hardcore, so previously-enabled entries stop applying (or resume) the moment Hardcore
+        // toggles, without waiting for the next patch reload.
+        if (VMManager::HasValidVM()) {
+            RunOnCPUThread([]() {
+                VMManager::ReloadPatches(false, true, false, true);
+            }, false);
+        }
+    }
     void SetMouseLock(bool) {}
     int LocaleSensitiveCompare(std::string_view lhs, std::string_view rhs) { return lhs.compare(rhs); }
     void OpenURL(std::string_view) {}
