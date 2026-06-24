@@ -113,6 +113,17 @@ void SPU2::CreateOutputStream()
 	else if (!s_output_muted)
 		SPU2::SaveOutputVolume();
 
+	// Carry the OLD stream's actual paused state across the recreate instead of
+	// reading the live VMManager state. Audio was muting after using the in-game
+	// menu (save-state load / applying fixes): those run inside a transient
+	// ScopedVMPause, so VMManager::GetState() reads Paused and the freshly built
+	// stream was created paused BEFORE it ever started — and a never-started stream
+	// paused immediately doesn't reliably resume, so sound stayed muted once the
+	// menu closed. Preserving the prior stream's paused flag keeps an audibly-
+	// running game running through the recreate. (No prior stream → fall back to VM
+	// state, the original first-boot behaviour.)
+	const bool was_paused = s_output_stream ? s_output_stream->IsPaused()
+	                                        : (VMManager::GetState() == VMState::Paused);
 	const u32 sample_rate = GetConsoleSampleRate();
 	s_output_stream.reset();
 
@@ -130,7 +141,7 @@ void SPU2::CreateOutputStream()
 
 	SPU2::UpdateOutputVolume();
 	s_output_stream->SetNominalRate(GetNominalRate());
-	s_output_stream->SetPaused(VMManager::GetState() == VMState::Paused);
+	s_output_stream->SetPaused(was_paused);
 }
 
 void SPU2::UpdateSampleRate()

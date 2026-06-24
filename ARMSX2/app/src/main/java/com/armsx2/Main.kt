@@ -7,10 +7,8 @@ import android.content.SharedPreferences
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.os.Process
 import android.os.SystemClock
-import android.provider.Settings
 import android.view.InputDevice
 import android.view.KeyEvent
 import android.view.KeyCharacterMap
@@ -127,75 +125,6 @@ val eeJitTests = mutableStateOf("")
 val vifTests = mutableStateOf("")
 val eeSeqTests = mutableStateOf("")
 
-/**
- * Gate UI shown when the user's system folder is outside the app-private
- * sandbox and MANAGE_EXTERNAL_STORAGE hasn't been granted. Blocks the main
- * emulator UI until the user either flips the toggle in Settings or opts
- * to fall back to the app-private folder.
- */
-@androidx.compose.runtime.Composable
-fun AllFilesAccessScreen(onGrant: () -> Unit, onUseAppPrivate: () -> Unit) {
-    Box(
-        Modifier.fillMaxSize().background(Colors.surface.value),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(
-            Modifier.fillMaxSize().padding(32.dp),
-            verticalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                "Storage Access Required",
-                color = Color.White,
-                fontSize = 26.sp,
-                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
-            )
-            Spacer(Modifier.size(12.dp))
-            Text(
-                "Your chosen system folder is outside the app's private storage. " +
-                "Android requires the \"All files access\" permission to read and write " +
-                "memory cards, save states, shaders, and logs there.",
-                color = Color.LightGray,
-                fontSize = 14.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
-            Spacer(Modifier.size(24.dp))
-            androidx.compose.material3.Button(
-                onClick = onGrant,
-                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                    containerColor = Colors.pasx2_blue,
-                    contentColor = Color.White,
-                ),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 18.dp, vertical = 10.dp),
-            ) {
-                Text("Grant Access")
-            }
-            Spacer(Modifier.size(12.dp))
-            androidx.compose.material3.Button(
-                onClick = onUseAppPrivate,
-                colors = androidx.compose.material3.ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF333333),
-                    contentColor = Color.White,
-                ),
-                shape = androidx.compose.foundation.shape.RoundedCornerShape(8.dp),
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(
-                    horizontal = 18.dp, vertical = 10.dp),
-            ) {
-                Text("Use App-Private Folder Instead")
-            }
-            Spacer(Modifier.size(20.dp))
-            Text(
-                "Tip: after granting, return here — access takes effect immediately.",
-                color = Color(0xFF888888),
-                fontSize = 12.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
-            )
-        }
-    }
-}
-
 class Main: ComponentActivity() {
     private var lastUiNavCode = 0
     private var lastUiNavAt = 0L
@@ -259,60 +188,6 @@ class Main: ComponentActivity() {
          *  is when Vulkan::LoadVulkanLibrary reads the pinned path. */
         val customDriverId = mutableStateOf<String?>(null)
 
-        /**
-         * Tracks Android 11+ "All files access" (MANAGE_EXTERNAL_STORAGE)
-         * grant. Required when the user's `systemDir` points outside the
-         * app-private sandbox: emucore writes memcards / savestates /
-         * configs / shaders / patches.zip / logs via raw `fopen`/`mkdir`,
-         * which scoped storage rejects with EACCES even when the SAF
-         * persistable URI was granted. Refreshed on Activity.onResume so
-         * a return-from-Settings flips this true automatically.
-         *
-         * Always true on pre-Android 11 (scoped storage doesn't apply).
-         */
-        val allFilesAccessGranted = mutableStateOf(true)
-
-        /** True iff Build.VERSION.SDK_INT >= R AND not granted. Pre-R the
-         *  legacy WRITE_EXTERNAL_STORAGE grant covers things, so we never
-         *  prompt. Used by the UI to decide whether to show the grant
-         *  screen. */
-        fun needsAllFilesAccess(): Boolean {
-            return Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
-                   !Environment.isExternalStorageManager()
-        }
-
-        /** Returns true iff the resolved system dir is the app-private
-         *  externalFilesDir (or unset → defaults to it). When this is
-         *  true the MANAGE_EXTERNAL_STORAGE grant isn't needed; emucore
-         *  writes are inside the scoped sandbox. */
-        fun systemDirIsAppPrivate(context: Context): Boolean {
-            val resolved = systemDirPosix() ?: return true
-            val privateRoot = context.getExternalFilesDir(null)?.absolutePath ?: return false
-            return resolved.startsWith(privateRoot)
-        }
-
-        /** Open Settings → "All files access" for this app so the user
-         *  can flip the toggle. Returns true if the intent launched. */
-        fun requestAllFilesAccess(context: Context): Boolean {
-            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
-            return try {
-                val intent = Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION)
-                intent.data = Uri.parse("package:${context.packageName}")
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                context.startActivity(intent)
-                true
-            } catch (_: Exception) {
-                // Fallback to the all-apps version of the screen on devices
-                // whose ROM rejects the package-targeted variant.
-                try {
-                    val intent = Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
-                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(intent)
-                    true
-                } catch (_: Exception) { false }
-            }
-        }
-
         private val eDispatcher = Executors.newSingleThreadExecutor().asCoroutineDispatcher()
         private val eScope = CoroutineScope(eDispatcher)
 
@@ -332,13 +207,33 @@ class Main: ComponentActivity() {
          * Android build can't translate the tree URI (rare). Caller
          * falls back to the app's externalFilesDir in that case.
          *
-         * Caveat: emucore's POSIX FileSystem APIs require the resolved
-         * path to be writable. On Android 11+ that's usually only true
-         * for app-owned scoped paths. Folders the user picks elsewhere
-         * may translate fine but fail on write — that's a SAF-vs-POSIX
-         * gap, not a translation bug.
+         * Caveat: emucore's POSIX FileSystem APIs require the resolved path to
+         * be writable without broad shared-storage privileges. On modern
+         * Android, that generally means app-private storage.
          */
-        fun systemDirPosix(): String? = resolveTreeUriToPosix(systemDir.value)
+        fun systemDirPosix(): String? {
+            val v = systemDir.value ?: return null
+            // Volume-choice model stores an absolute app-specific path directly
+            // (e.g. the SD card's Android/data/<pkg>/files). Legacy installs may
+            // still hold a SAF tree-URI string; resolve those the old way.
+            return if (v.startsWith("content://")) resolveTreeUriToPosix(v) else v
+        }
+
+        /** App-specific data dir on a removable/secondary volume (SD card),
+         *  e.g. /storage/<volId>/Android/data/<pkg>/files. Always raw-writable
+         *  by the native core with NO permission under scoped storage, which is
+         *  why it works on the Play build where arbitrary folders cannot.
+         *  getExternalFilesDirs()[0] is primary/internal; [1..] are removable
+         *  volumes (entries may be null while a card is unmounting). Returns the
+         *  first usable secondary path, or null when no SD card is present. */
+        fun sdCardDataDir(context: Context): String? {
+            val dirs = context.getExternalFilesDirs(null)
+            for (i in 1 until dirs.size) {
+                val d = dirs[i] ?: continue
+                return d.absolutePath
+            }
+            return null
+        }
 
         /** Directory holding the configured BIOS file, used by
          *  NativeApp.initializeOnce to point EmuFolders::Bios at the real
@@ -372,14 +267,11 @@ class Main: ComponentActivity() {
          * access. Creates a `.armsx2-write-probe` file, deletes it,
          * returns true on success.
          *
-         * Catches the scoped-storage trap that bit users picking a
-         * non-app-private folder without the MANAGE_EXTERNAL_STORAGE
-         * grant: Android lets the SAF tree-URI permission survive the
-         * picker, so reads work, but raw `fopen`/`mkdir` from emucore
-         * fails with EACCES — which then crashes the VM during memcard
-         * / savestate / config generation. We probe up-front so the
-         * wizard can refuse to advance until either the grant lands or
-         * the user picks the app-private fallback.
+         * Catches the scoped-storage trap: Android lets the SAF tree-URI
+         * permission survive the picker, so reads work, but raw `fopen`/`mkdir`
+         * from emucore can still fail with EACCES during memcard / savestate /
+         * config generation. We probe up-front so the wizard can refuse to
+         * advance and keep writable emulator data in app-private storage.
          */
         fun validateSystemDirWritable(posixPath: String): Boolean {
             return try {
@@ -764,16 +656,12 @@ class Main: ComponentActivity() {
         }
 
         /** Resolved root that bundled APK assets (resources/, bios/) are
-         *  copied to. If the user picked a non-app-private systemDir, we
-         *  copy there so emucore — which reads via POSIX from the same
-         *  EmuFolders root — finds them at the expected paths
-         *  (e.g. <systemDir>/resources/shaders/opengl/convert.glsl).
-         *  Otherwise falls back to getExternalFilesDir(null). Requires
-         *  MANAGE_EXTERNAL_STORAGE for the non-app-private case; the
-         *  AllFilesAccessScreen gate ensures that's granted before the
-         *  emulator UI is reachable. */
+         *  copied to. This prefers a custom systemDir only when it resolves to
+         *  a writable POSIX path; otherwise it falls back to app-private
+         *  storage. Game folders are separate and accessed through SAF. */
         fun assetCopyRoot(context: Context): String {
-            return systemDirPosix()
+            val custom = systemDirPosix()
+            return custom?.takeIf { validateSystemDirWritable(it) }
                 ?: context.getExternalFilesDir(null)?.absolutePath
                 ?: context.dataDir.absolutePath
         }
@@ -1028,6 +916,10 @@ class Main: ComponentActivity() {
                 var _abs = 90f // Joystic test value
                 _abs = min(_abs, 100f)
                 pad_force = (_abs * 32766.0f / 100).toInt()
+            } else {
+                // Pressure modifier: soft (~50%) press for pressure-capable
+                // buttons while the modifier is held; 0 (full press) otherwise.
+                pad_force = com.armsx2.ui.touch.TouchControls.pressureRangeFor(p_keycode)
             }
             NativeApp.setPadButton(p_keycode, pad_force, true)
         } else if (p_action == KeyEventType.KeyUp || p_action == KeyEventType.Unknown) {
@@ -1074,7 +966,6 @@ class Main: ComponentActivity() {
         renderer.value = prefs.getString("renderer", "auto") ?: "auto"
         upscale.value = readUpscalePref()
         customDriverId.value = prefs.getString("customDriverId", null)?.takeIf { it.isNotEmpty() }
-        allFilesAccessGranted.value = !needsAllFilesAccess()
         surface.value = SurfaceCallbacks(this)
         WindowCompat.setDecorFitsSystemWindows(window, false)
         WindowInsetsControllerCompat(window, window.decorView).let { controller ->
@@ -1115,8 +1006,6 @@ class Main: ComponentActivity() {
         }
         handleExternalLaunchIntent(intent)
         setContent {
-            val ctx = androidx.compose.ui.platform.LocalContext.current
-
             // First-time setup deferral: when the wizard finishes and
             // setupComplete flips to true, kick off the heavy emucore
             // init now that `Main.systemDir` reflects the user's pick.
@@ -1140,29 +1029,8 @@ class Main: ComponentActivity() {
             // Setup wizard runs once. After it persists prefs and flips
             // setupComplete the main emulator UI takes over. Re-entering
             // setup requires clearing app data (or wiping the prefs key).
-            //
-            // Permission gate: if the user picked a system folder outside
-            // the app-private sandbox (e.g. /storage/emulated/0/ARMSX2/),
-            // emucore's POSIX writes need MANAGE_EXTERNAL_STORAGE. Block
-            // the main UI behind a grant-request screen until the user
-            // toggles it on in Settings — onResume will flip the state
-            // and let the main UI through automatically.
-            val needsGate = setupComplete.value &&
-                !allFilesAccessGranted.value &&
-                !systemDirIsAppPrivate(ctx)
             if (!setupComplete.value || setupEditorVisible.value) {
                 SetupImpl.SetupWindow()
-            } else if (needsGate) {
-                AllFilesAccessScreen(
-                    onGrant = { requestAllFilesAccess(ctx) },
-                    onUseAppPrivate = {
-                        // Drop the user's chosen systemDir and fall back to
-                        // app-private. emucore reverts to writing under
-                        // getExternalFilesDir on next VM boot.
-                        systemDir.value = null
-                        prefs.edit().remove("systemDir").apply()
-                    },
-                )
             } else if (setupComplete.value) {
                 WindowImpl.Window {
                     if (surface.value != null) {
@@ -1327,6 +1195,22 @@ class Main: ComponentActivity() {
         // the binder. Normal nav resumes the moment capture ends.
         if (ControllerMappings.padCapturing.value) {
             return super.dispatchKeyEvent(event)
+        }
+        // Pressure modifier (hold): while the bound button is down, pressure-capable
+        // PS2 buttons report a soft press (see sendKeyAction / TouchControls). Consume
+        // it so it's neither forwarded to the PS2 nor fired as a one-shot hotkey.
+        // Single-button binding only (combos keep their normal hotkey behaviour).
+        run {
+            val pm = ControllerMappings.SysHotkey.PRESSURE_MOD
+            val pmKey = ControllerMappings.hotkeyCode(pm)
+            if (pmKey != KeyEvent.KEYCODE_UNKNOWN && kc == pmKey &&
+                ControllerMappings.hotkeyModCode(pm) == KeyEvent.KEYCODE_UNKNOWN) {
+                when (event.action) {
+                    KeyEvent.ACTION_DOWN -> com.armsx2.ui.touch.TouchControls.pressureModifierHeld.value = true
+                    KeyEvent.ACTION_UP -> com.armsx2.ui.touch.TouchControls.pressureModifierHeld.value = false
+                }
+                return true
+            }
         }
         // Memory-card dialog (opened from the library). Touch mode blocks Compose
         // D-pad focus, so it's driven by the manual nav model (same as the
@@ -1543,6 +1427,9 @@ class Main: ComponentActivity() {
             // release). heldKeys still carries the modifier either way.
             val matchKeys = if (down) heldKeys else heldKeys + kc
             when (ControllerMappings.matchHotkey(kc, matchKeys)) {
+                // Pressure modifier is a hold, handled (and consumed) earlier in
+                // dispatchKeyEvent; it never reaches this one-shot action switch.
+                ControllerMappings.SysHotkey.PRESSURE_MOD -> {}
                 ControllerMappings.SysHotkey.MENU -> {
                     if (down) com.armsx2.ui.InGameOverlay.toggle()
                     return true
@@ -1624,6 +1511,19 @@ class Main: ComponentActivity() {
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        // While (re)binding a pad button or a hotkey, the physical D-pad on many
+        // handhelds (AYN Odin 3, RP6, etc.) arrives HERE as a HAT *axis*, never as
+        // a key in dispatchKeyEvent — so the capture (which only listens for key
+        // events) never saw it, and the HAT instead navigated the settings UI. When
+        // a capture is armed, translate the HAT direction into a synthetic D-pad
+        // KeyEvent and route it through dispatchKeyEvent (which reaches both the pad
+        // capture in Compose and the hotkey capture in dispatchKeyEvent), and
+        // consume the motion so nothing navigates.
+        if (ControllerMappings.padCapturing.value || ControllerMappings.captureHotkey.value != null) {
+            return handleCaptureMotion(ev)
+        }
+        captureHatX = 0
+        captureHatY = 0
         if (com.armsx2.ui.MemoryCardManager.visible.value) {
             handleMemcardControllerMotion(ev)
             return true
@@ -1837,6 +1737,35 @@ class Main: ComponentActivity() {
         }
     }
 
+    // Last HAT direction seen during an active capture, so a held D-pad binds once
+    // (on the neutral→direction transition) instead of repeating. Reset to 0 on any
+    // non-capture motion event so each capture session starts fresh.
+    private var captureHatX = 0
+    private var captureHatY = 0
+
+    /** During a pad/hotkey (re)bind, turn a HAT-axis D-pad press into a synthetic
+     *  D-pad KeyEvent routed through the normal capture path. Always consumes the
+     *  motion so the D-pad/stick can't navigate the UI while capturing. */
+    private fun handleCaptureMotion(ev: MotionEvent): Boolean {
+        val dx = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_X))
+        val dy = uiHatDirection(ev.getAxisValue(MotionEvent.AXIS_HAT_Y))
+        var code = 0
+        if (dx != captureHatX && dx != 0)
+            code = if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT
+        else if (dy != captureHatY && dy != 0)
+            code = if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP
+        captureHatX = dx
+        captureHatY = dy
+        if (code != 0) {
+            // Re-enter dispatchKeyEvent (not super) so it reaches the hotkey
+            // capture (dispatchKeyEvent) AND, while padCapturing, falls through to
+            // Compose's onPreviewKeyEvent which records the pad bind.
+            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
+            dispatchKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
+        }
+        return true
+    }
+
     private fun uiHatDirection(value: Float): Int = when {
         value > UI_HAT_DEAD -> 1
         value < -UI_HAT_DEAD -> -1
@@ -1927,15 +1856,6 @@ class Main: ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleExternalLaunchIntent(intent)
-    }
-
-    override fun onResume() {
-        // Refresh the All-Files-Access state — the user may have just
-        // returned from Settings after granting (or revoking) the
-        // MANAGE_EXTERNAL_STORAGE toggle. The setContent block reads
-        // this to decide whether to show the grant screen.
-        allFilesAccessGranted.value = !needsAllFilesAccess()
-        super.onResume()
     }
 
     override fun onDestroy() {

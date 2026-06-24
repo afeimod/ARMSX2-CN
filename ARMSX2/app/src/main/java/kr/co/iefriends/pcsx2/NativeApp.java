@@ -64,10 +64,14 @@ public class NativeApp {
 			externalFilesDir = context.getDataDir();
 		}
 
-		// DataRoot: prefer the user-chosen system folder (SAF tree URI in
-		// the `systemDir` pref, resolved to POSIX by Main.systemDirPosix).
-		// Falls back to externalFilesDir when unset / unresolvable.
+		// DataRoot: prefer the user-chosen system folder only when the SAF tree
+		// URI resolves to a POSIX path that native code can actually write.
+		// Falls back to externalFilesDir when unset, unresolvable, or blocked
+		// by scoped storage.
 		String chosen = Main.Companion.systemDirPosix();
+		if (chosen != null && !Main.Companion.validateSystemDirWritable(chosen)) {
+			chosen = null;
+		}
 		String dataPath = (chosen != null) ? chosen : externalFilesDir.getAbsolutePath();
 
 		// BIOS folder: the directory that actually holds the configured BIOS

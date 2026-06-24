@@ -77,6 +77,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
+import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.request.ImageRequest
 import com.armsx2.R
@@ -1629,12 +1630,15 @@ object GamesList {
             if (coverUrl != null) {
                 val use3d = CoverArtStyle.use3d.value // re-key cache on style change
                 val coverFile = remember(game.serial, game.platform, use3d) { coverFileFor(context, game) }
-                val localCoverReady = remember(coverFile?.absolutePath) {
-                    mutableStateOf(coverFile?.let { it.exists() && it.length() > 0L } == true)
-                }
+                // Resolve the local cover entirely off the main thread — the
+                // exists()/length() stat and any download previously ran during
+                // composition, hitching the scroll as tiles streamed in.
+                val localCoverReady = remember(coverFile?.absolutePath) { mutableStateOf(false) }
                 LaunchedEffect(coverUrl, coverFile?.absolutePath) {
-                    if (!localCoverReady.value && coverFile != null) {
-                        localCoverReady.value = mirrorCoverToFile(coverUrl, coverFile)
+                    val file = coverFile ?: return@LaunchedEffect
+                    localCoverReady.value = withContext(Dispatchers.IO) {
+                        if (file.exists() && file.length() > 0L) true
+                        else mirrorCoverToFile(coverUrl, file)
                     }
                 }
                 // SubcomposeAsyncImage so we can render a real fallback
@@ -1655,27 +1659,45 @@ object GamesList {
                     GamePlatform.PS1 -> ContentScale.Fit
                 }
                 val coverModel: Any = if (localCoverReady.value && coverFile != null) coverFile else coverUrl
-                SubcomposeAsyncImage(
-                    model = ImageRequest.Builder(context)
-                        .data(coverModel)
-                        .crossfade(true)
-                        .build(),
-                    contentDescription = "${game.title} cover",
-                    contentScale = scale,
-                    alignment = Alignment.Center,
-                    modifier = Modifier.fillMaxSize(),
-                    loading = { CoverLoadingTile() },
-                    error = { NoCoverTile(missingSerial = false) },
-                )
+                // AsyncImage, NOT SubcomposeAsyncImage: the latter sub-composes per
+                // tile and, paired with the animated CircularProgressIndicator
+                // loading slot, made the library scroll janky once a lot of games
+                // were on screen (continuous invalidation per loading tile). AsyncImage
+                // has no per-item subcomposition and downsamples to the tile size; the
+                // Box's dark background shows during load (no spinner), and on a 404 we
+                // flip to the no-cover fallback once via onError.
+                val coverFailed = remember(coverModel) { mutableStateOf(false) }
+                if (coverFailed.value) {
+                    NoCoverTile(missingSerial = false)
+                } else {
+                    AsyncImage(
+                        model = ImageRequest.Builder(context)
+                            .data(coverModel)
+                            .crossfade(true)
+                            .build(),
+                        contentDescription = "${game.title} cover",
+                        contentScale = scale,
+                        alignment = Alignment.Center,
+                        modifier = Modifier.fillMaxSize(),
+                        onError = { coverFailed.value = true },
+                    )
+                }
             } else {
                 NoCoverTile(missingSerial = true)
             }
         }
     }
 
+    // The data root is fixed for the session after setup, and Main.assetCopyRoot
+    // can do a write-probe / JNI call — far too costly to run per cover tile during
+    // a scroll. Cache the covers dir so coverFileFor stays cheap (no composition I/O).
+    @Volatile private var cachedCoversDir: File? = null
+    private fun coversDir(context: Context): File =
+        cachedCoversDir ?: File(Main.assetCopyRoot(context), "covers").also { cachedCoversDir = it }
+
     private fun coverFileFor(context: Context, game: GameInfo): File? {
         val serial = game.serial ?: return null
-        val coversDir = File(Main.assetCopyRoot(context), "covers")
+        val coversDir = coversDir(context)
         // Cache each style separately so toggling 2D/3D doesn't reuse the
         // wrong cached image.
         return if (CoverArtStyle.use3d.value)

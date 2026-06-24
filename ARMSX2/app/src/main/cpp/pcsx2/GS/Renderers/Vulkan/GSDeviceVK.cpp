@@ -2786,6 +2786,25 @@ bool GSDeviceVK::CheckFeatures()
 	// Basic. The pre-sync code drove the same extension differently and was
 	// fine; until that interplay is root-caused, take the barrier path, which
 	// renders correctly. (A/B-verified 2026-06-10 on Adreno 840.)
+	// Mali (ARM, vendorID 0x13B5): the hardware dual-source blend unit (INV_SRC1_COLOR,
+	// used for the blend-mix destination blends PCSX2 emits below Maximum accuracy)
+	// mis-renders on these drivers → white-band / blowout corruption on translucency and
+	// bloom unless the user forces Maximum blending. These GPUs also expose none of the
+	// coherent in-shader RT-read extensions (rasterization_order / feedback_loop_layout /
+	// fragment_shader_interlock), so framebuffer fetch is no help either — an earlier
+	// attempt to enable it only dropped the per-draw barriers and still corrupted (the
+	// HW dual-source path was still taken). Fix: select the Mali runtime GPU profile so
+	// the shared blend path's alpha_mali_custom_set (GSRendererHW.cpp) forces these alpha
+	// blends through the in-shader SW-blend path — reading Cd via the texture-barrier full
+	// barriers and never touching the broken HW unit. This is the exact workaround the
+	// OpenGL renderer already uses for Mali; on Vulkan we reach Cd via barriers instead of
+	// GL_ARM_shader_framebuffer_fetch. Its only cross-platform effect is enabling that one
+	// blend workaround (the GL-shader GPU_PROFILE_MALI defines are not used by the VK path).
+	if (m_device_properties.vendorID == 0x13B5u)
+		SetRuntimeGPUProfile(RuntimeGpuProfile::Mali);
+
+	// framebuffer_fetch stays disabled: the leading false also covers the Adreno-840
+	// rasterization-order stale-read issue described above. Mali must use the barrier path.
 	m_features.framebuffer_fetch = false &&
 		m_optional_extensions.vk_ext_rasterization_order_attachment_access && !GSConfig.DisableFramebufferFetch;
 	m_features.texture_barrier = GSConfig.OverrideTextureBarriers != 0;

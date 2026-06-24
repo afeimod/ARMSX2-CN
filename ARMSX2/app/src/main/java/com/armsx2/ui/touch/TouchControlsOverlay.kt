@@ -95,6 +95,8 @@ fun TouchControlsOverlay() {
         }
         val layout = TouchControls.activeLayout.value
         var facePressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
+        var lShoulderPressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
+        var rShoulderPressed by remember { mutableStateOf<Set<TouchButtonId>>(emptySet()) }
 
         // Tap-to-reveal settings cog (top-right). Hidden entirely when on-screen
         // controls are set to Never, so it can't sit on top of R1 (use a
@@ -186,9 +188,13 @@ fun TouchControlsOverlay() {
         }
 
         val faceMulti = !edit && TouchControls.faceMultiTouch.value
-        if (!faceMulti && facePressed.isNotEmpty()) {
-            facePressed = emptySet()
+        if (!faceMulti) {
+            if (facePressed.isNotEmpty()) facePressed = emptySet()
+            if (lShoulderPressed.isNotEmpty()) lShoulderPressed = emptySet()
+            if (rShoulderPressed.isNotEmpty()) rShoulderPressed = emptySet()
         }
+        // Buttons currently held via any of the multi-touch hit-test layers.
+        val multiPressed = facePressed + lShoulderPressed + rShoulderPressed
         for (cfg in layout.buttons) {
             if (!cfg.enabled && !edit) continue
             val size = cfg.sizeDp.dp
@@ -205,11 +211,12 @@ fun TouchControlsOverlay() {
                     TouchButtonId.Kind.DPAD -> DpadWidget(cfg, edit)
                     TouchButtonId.Kind.STICK -> StickWidget(cfg, edit)
                     TouchButtonId.Kind.PAUSE -> PauseWidget(cfg, edit)
+                    TouchButtonId.Kind.PRESSURE -> PressureButtonWidget(cfg, edit)
 	                    else -> ButtonWidget(
 	                        cfg = cfg,
 	                        edit = edit,
-	                        inputEnabled = !(faceMulti && cfg.id.kind == TouchButtonId.Kind.FACE),
-	                        forcedPressed = faceMulti && cfg.id in facePressed,
+	                        inputEnabled = !(faceMulti && isMultiTouchKind(cfg.id.kind)),
+	                        forcedPressed = faceMulti && cfg.id in multiPressed,
 	                    )
                 }
             }
@@ -225,6 +232,28 @@ fun TouchControlsOverlay() {
 	                onPressedChange = { facePressed = it },
 	            )
 	        }
+
+        if (faceMulti) {
+            // Shoulder triggers: one multi-touch hit-test layer per side so L1+L2
+            // (or L2+R2, or a trigger + face button) all register at once. Split by
+            // side to keep each bounding box tight (no overlap with the d-pad/sticks).
+            FaceMultiTouchLayer(
+                buttons = layout.buttons.filter {
+                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac < 0.5f
+                },
+                widthPx = widthPx,
+                heightPx = heightPx,
+                onPressedChange = { lShoulderPressed = it },
+            )
+            FaceMultiTouchLayer(
+                buttons = layout.buttons.filter {
+                    it.enabled && it.id.kind == TouchButtonId.Kind.SHOULDER && it.xFrac >= 0.5f
+                },
+                widthPx = widthPx,
+                heightPx = heightPx,
+                onPressedChange = { rShoulderPressed = it },
+            )
+        }
 
         if (edit) {
             EditToolbar(
@@ -346,7 +375,56 @@ private fun drawableFor(id: TouchButtonId, pressed: Boolean): Int = when (id) {
     TouchButtonId.R3       -> if (pressed) R.drawable.pad_r3_pressed       else R.drawable.pad_r3
     // DPad / sticks render their own composed sprites; PAUSE renders none.
     TouchButtonId.DPAD, TouchButtonId.L_STICK, TouchButtonId.R_STICK,
-    TouchButtonId.PAUSE -> R.drawable.pad_cross
+    TouchButtonId.PAUSE, TouchButtonId.PRESSURE -> R.drawable.pad_cross
+}
+
+/** Pressure-sensitivity modifier button. Emits no PS2 keycode; while held it
+ *  sets TouchControls.pressureModifierHeld so pressure-capable buttons report a
+ *  soft (~50%) press. Tints blue while held. */
+@Composable
+private fun PressureButtonWidget(cfg: TouchButtonCfg, edit: Boolean) {
+    val held = TouchControls.pressureModifierHeld.value
+    val opacity = TouchControls.opacity.value
+    val mod = Modifier
+        .fillMaxSize()
+        .let {
+            if (edit) it.editGestures(cfg)
+            else it.pointerInput(cfg.id) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val ev = awaitPointerEvent()
+                        val change = ev.changes.firstOrNull() ?: continue
+                        if (!change.pressed) continue
+                        TouchControls.pressureModifierHeld.value = true
+                        TouchControls.noteTouchInteraction()
+                        while (true) {
+                            val next = awaitPointerEvent()
+                            val nc = next.changes.firstOrNull { it.id == change.id }
+                            if (nc == null || !nc.pressed) break
+                        }
+                        TouchControls.pressureModifierHeld.value = false
+                    }
+                }
+            }
+        }
+    Box(modifier = mod, contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .clip(CircleShape)
+                .background(Color(if (held) 0xFF3A6EA5 else 0xFF1A1A1A).copy(alpha = opacity))
+                .border(1.dp, Color.White.copy(alpha = 0.35f * opacity), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                "P½",
+                color = Color.White.copy(alpha = opacity),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        if (edit) EditAdornment(cfg.id)
+    }
 }
 
 @Composable
@@ -780,8 +858,16 @@ private fun releaseStick(codes: StickCodes, last: StickEmit) {
 /* -------------------------------------------------------------------- */
 
 private fun sendDigital(keycode: Int, pressed: Boolean) {
-    NativeApp.setPadButton(keycode, 0, pressed)
+    // Pressure modifier: send a soft (~50%) range for pressure-capable buttons
+    // while the modifier is held; 0 (full press) otherwise. native-lib.cpp's
+    // setPadButton turns the range into a 0..1 pressure value.
+    val range = if (pressed) TouchControls.pressureRangeFor(keycode) else 0
+    NativeApp.setPadButton(keycode, range, pressed)
 }
+
+/** Buttons covered by the multi-touch hit-test layers: face diamond + shoulders. */
+private fun isMultiTouchKind(kind: TouchButtonId.Kind): Boolean =
+    kind == TouchButtonId.Kind.FACE || kind == TouchButtonId.Kind.SHOULDER
 
 /** Press/release pointerInput for a single digital button. Emits the
  *  keycode on down, releases on up or pointer cancel. */
@@ -891,7 +977,7 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             }
             ToolbarChip("Reset") { TouchControls.resetActiveToDefault() }
             ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
-            ToolbarChip(if (TouchControls.faceMultiTouch.value) "Face Multi On" else "Face Multi Off") {
+            ToolbarChip(if (TouchControls.faceMultiTouch.value) "Multi-Touch On" else "Multi-Touch Off") {
                 TouchControls.setFaceMultiTouch(!TouchControls.faceMultiTouch.value)
             }
         }

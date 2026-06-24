@@ -64,7 +64,33 @@ object TouchControls {
     /** When enabled, the face-button diamond has a shared hit layer so a
      *  single thumb can slide/press between Cross/Square/Circle/Triangle and
      *  emit overlapping button presses. */
+    // Multi-touch hit-test layer for face + shoulder buttons (lets you press
+    // several at once / roll between them). Persisted under KEY_FACE_MULTI.
     val faceMultiTouch = mutableStateOf(false)
+
+    /** Held-state for the DS2 pressure-sensitivity modifier. While true, the
+     *  pressure-capable buttons report ~50% pressure (PCSX2's
+     *  DEFAULT_PRESSURE_MODIFIER) for soft presses (MGS, GTA). Driven by the
+     *  on-screen PRESSURE button and the bound physical button. */
+    val pressureModifierHeld = mutableStateOf(false)
+
+    /** ~50% of the native 0..32767 range → state≈0.5 in setPadButton. */
+    const val PRESSURE_HALF_RANGE = 16383
+
+    // PS2 DualShock2 pressure-sensitive inputs (keycodes match native-lib.cpp's
+    // setPadButton map): d-pad, face buttons, L1/L2/R1/R2. Start/Select/L3/R3 are
+    // digital-only, so the modifier never touches them.
+    private val PRESSURE_KEYCODES = setOf(
+        19, 20, 21, 22,        // d-pad up/down/left/right
+        96, 97, 99, 100,       // cross/circle/square/triangle
+        102, 103, 104, 105,    // L1/R1/L2/R2
+    )
+
+    /** Range to send for [keycode] given the current modifier state: a reduced
+     *  (soft) range while the modifier is held on a pressure-capable button,
+     *  else 0 (full press). */
+    fun pressureRangeFor(keycode: Int): Int =
+        if (pressureModifierHeld.value && keycode in PRESSURE_KEYCODES) PRESSURE_HALF_RANGE else 0
 
     /** On-screen touch controls visibility. 0 = Never show (for physical-
      *  controls devices like the RP6 — also hides the settings cog so nothing
@@ -260,9 +286,14 @@ enum class TouchButtonId(val label: String, val keycode: Int, val kind: Kind) {
     // fired on accidental presses in empty space mid-game. Emits no pad
     // keycode (0 = unused); renders nothing in play mode, shows an
     // outlined "PAUSE" box in edit mode so it can be moved/resized.
-    PAUSE("Pause", 0, Kind.PAUSE);
+    PAUSE("Pause", 0, Kind.PAUSE),
 
-    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE }
+    // Pressure-sensitivity modifier. Emits no PS2 keycode; while held it sets
+    // TouchControls.pressureModifierHeld so pressure-capable buttons report a
+    // soft (~50%) press. Rendered by PressureButtonWidget.
+    PRESSURE("P½", 0, Kind.PRESSURE);
+
+    enum class Kind { FACE, SHOULDER, MENU, DPAD, STICK, PAUSE, PRESSURE }
 }
 
 /** Position + size for a single widget. xFrac / yFrac are anchor-point
@@ -362,6 +393,10 @@ data class TouchLayout(val buttons: List<TouchButtonCfg>) {
                 // (0.10) and the face diamond (0.86), on their shared row,
                 // clear of the sticks (y 0.80) and Start/Select (y 0.92).
                 TouchButtonCfg(TouchButtonId.PAUSE,    0.48f, 0.50f, 120f),
+                // Pressure-modifier button — tucked under the D-pad (left side),
+                // clear of the action. Hold it, then press a face/shoulder/d-pad
+                // button for a ~50% (soft) press. Movable in overlay edit mode.
+                TouchButtonCfg(TouchButtonId.PRESSURE, 0.10f, 0.78f, 44f),
             ),
         )
     }

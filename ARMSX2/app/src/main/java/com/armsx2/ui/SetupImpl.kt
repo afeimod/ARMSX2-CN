@@ -128,13 +128,19 @@ object SetupImpl {
     // -------- System dir setup state --------
     private val systemDirUri = mutableStateOf<Uri?>(null)
     private val systemDirDisplay = mutableStateOf<String?>(null)
-    /** Sentinel: user explicitly picked the app-private fallback instead
-     *  of a SAF folder. Treated as a valid "done" state for advancing
-     *  past the system-dir step on first-run. */
-    private val systemDirUseDefault = mutableStateOf(false)
+    /** Sentinel: the app-private fallback is the active system-dir choice
+     *  (vs. a SAF folder). Treated as a valid "done" state for advancing
+     *  past the system-dir step. DEFAULTS TRUE: app-private needs no
+     *  permission and is the only reliable writable root now that
+     *  MANAGE_EXTERNAL_STORAGE is gone (Play compliance). Without this,
+     *  a fresh first-run leaves appFolderReady()=false — and since a custom
+     *  folder now always fails the writability probe, "Let's Go" could never
+     *  enable, stranding new users on the setup screen. resetForReentry()
+     *  and a custom-folder pick override this as appropriate. */
+    private val systemDirUseDefault = mutableStateOf(true)
     /** Surface message shown on the system-dir page when validation fails
-     *  (typically scoped-storage write rejection on a non-app-private
-     *  folder without MANAGE_EXTERNAL_STORAGE). null = no error. */
+     *  (typically scoped-storage write rejection on a non-app-private folder).
+     *  null = no error. */
     private val systemDirError = mutableStateOf<String?>(null)
 
     // -------- ROMs dirs setup state --------
@@ -198,11 +204,10 @@ object SetupImpl {
 
         val bios = scannedBioses.getOrNull(idx) ?: return null
 
-        // Write under the active data root (custom system folder when chosen,
-        // else app-private) so the BIOS lives alongside memcards/saves/configs
-        // instead of being pinned to app-private. assetCopyRoot resolves to the
-        // user's systemDir post-pick, which the setup already validated as
-        // writable; falls back to externalFilesDir otherwise.
+        // Write under the active data root so the BIOS lives alongside
+        // memcards/saves/configs instead of being pinned to app-private.
+        // assetCopyRoot accepts only a custom systemDir that resolves to a
+        // writable native path, and falls back to externalFilesDir otherwise.
         val biosDir = File(Main.assetCopyRoot(context), "bios").apply { mkdirs() }
         val outFile = File(biosDir, bios.displayName)
 
@@ -350,31 +355,16 @@ object SetupImpl {
             return Main.systemDir.value
         }
 
-        // Validate POSIX writability BEFORE persisting. The SAF
-        // tree-URI grant lets us read, but emucore's FileSystem APIs
-        // hit raw fopen/mkdir which scoped storage rejects on
-        // Android 11+ unless MANAGE_EXTERNAL_STORAGE is granted.
-        // Without this gate, the wizard finishes happily, the user
-        // boots a game, and emucore SIGSEGVs trying to gen memcards
-        // / savestates / configs in a non-writable dir.
+        // Validate POSIX writability BEFORE persisting. The SAF tree-URI grant
+        // lets us read, but emucore's FileSystem APIs hit raw fopen/mkdir for
+        // memcards, savestates, configs, and shader data. On modern Android,
+        // those writes are only reliable in app-private storage unless the
+        // picked folder resolves to a real native-writable path.
         val posix = Main.resolveTreeUriToPosix(uri.toString())
-        if (posix != null && !Main.validateSystemDirWritable(posix)) {
-            // Auto-open the grant screen on Android 11+ so the user can
-            // toggle the permission with one tap. Activity.onResume will
-            // refresh allFilesAccessGranted; user re-clicks Next.
-            if (Main.needsAllFilesAccess()) {
-                Main.requestAllFilesAccess(context)
-                systemDirError.value = "Can't write to that folder. Grant " +
-                    "All Files Access (just opened in Settings), then tap Next again. " +
-                    "Or use the App-Private Folder option below."
-            } else {
-                // Permission already granted (or pre-Android-11) but the
-                // path still rejected writes — likely a removable / SD-
-                // card path the device doesn't surface as POSIX. Push
-                // the user to the fallback.
-                systemDirError.value = "That folder isn't writable from native code. " +
-                    "Pick a different folder or use the App-Private Folder option below."
-            }
+        if (posix == null || !Main.validateSystemDirWritable(posix)) {
+            systemDirError.value = "That folder can't be used for writable emulator data on this Android version. " +
+                "Use the App-Private Folder for memory cards, save states, and configs; " +
+                "game folders can still be added from SD card on the ROM folder step."
             return null
         }
 
@@ -494,20 +484,32 @@ object SetupImpl {
         configuredBiosInfo.value = if (existingBios != null) probeExistingBios(existingBios) else null
 
         val existingSystem = Main.systemDir.value
-        if (existingSystem != null) {
-            try {
-                val uri = Uri.parse(existingSystem)
-                systemDirUri.value = uri
-                systemDirDisplay.value = uri.lastPathSegment ?: existingSystem
-            } catch (_: Exception) {
+        when {
+            existingSystem == null -> {
                 systemDirUri.value = null
                 systemDirDisplay.value = null
+                systemDirUseDefault.value = true
             }
-        } else {
-            systemDirUri.value = null
-            systemDirDisplay.value = null
+            existingSystem.startsWith("content://") -> {
+                // Legacy SAF custom folder from an older build.
+                try {
+                    val uri = Uri.parse(existingSystem)
+                    systemDirUri.value = uri
+                    systemDirDisplay.value = uri.lastPathSegment ?: existingSystem
+                    systemDirUseDefault.value = false
+                } catch (_: Exception) {
+                    systemDirUri.value = null
+                    systemDirDisplay.value = null
+                    systemDirUseDefault.value = true
+                }
+            }
+            else -> {
+                // SD card app-specific absolute path (volume-choice model).
+                systemDirUri.value = null
+                systemDirDisplay.value = "SD Card"
+                systemDirUseDefault.value = false
+            }
         }
-        systemDirUseDefault.value = false
         systemDirError.value = null
 
         // Pre-load saved ROMs list. Each URI is parsed best-effort —
@@ -524,7 +526,7 @@ object SetupImpl {
     private fun pageTitle(): String = when (setupState.value) {
         0 -> "Welcome"
         1 -> "Choose renderer"
-        2 -> "Select system folder"
+        2 -> "System data folder"
         3 -> "Select your BIOS"
         4 -> "Select ROMs folder"
         else -> ""
@@ -532,7 +534,7 @@ object SetupImpl {
 
     /** Label for the page-local action button (in the nav row). null = no button. */
     private fun midButtonLabel(): String? = when (setupState.value) {
-        2 -> if (systemDirUri.value == null) "Pick System Folder" else "Pick a different folder"
+        2 -> if (systemDirUri.value == null) "Pick Custom Folder" else "Pick a different folder"
         // Use the URI presence (not the in-memory list) so the label says
         // "Pick a different folder" immediately on re-entry when we already
         // have a remembered biosDir, even before the auto-rescan finishes.
@@ -574,26 +576,6 @@ object SetupImpl {
     @Composable
     fun SetupWindow() {
         val context = LocalContext.current
-        val systemLauncher = rememberLauncherForActivityResult(
-            contract = ActivityResultContracts.OpenDocumentTree()
-        ) { treeUri: Uri? ->
-            if (treeUri == null) return@rememberLauncherForActivityResult
-            // System folder needs read+write — emucore writes memcards,
-            // save states, and config there.
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    treeUri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            } catch (_: SecurityException) { /* already persisted */ }
-            systemDirUri.value = treeUri
-            systemDirDisplay.value = treeUri.lastPathSegment ?: treeUri.toString()
-            // Picking a fresh folder cancels the app-private opt-in and
-            // clears any prior validation error so the user gets a fresh
-            // shot at the writability probe on Next.
-            systemDirUseDefault.value = false
-            systemDirError.value = null
-            refreshAllowNext()
-        }
         val biosLauncher = rememberLauncherForActivityResult(
             contract = ActivityResultContracts.OpenDocumentTree()
         ) { treeUri: Uri? ->
@@ -713,13 +695,34 @@ object SetupImpl {
                                 allowNext.value = true
                             },
                             onUseDefaultSystem = {
+                                // "Internal" = the app-private folder on the main device
+                                // (getExternalFilesDir(null)). Clear any prior SD pick.
                                 systemDirUseDefault.value = true
                                 systemDirUri.value = null
                                 systemDirDisplay.value = null
                                 systemDirError.value = null
+                                Main.systemDir.value = null
+                                Main.prefs.edit().remove("systemDir").apply()
                                 refreshAllowNext()
                             },
-                            onPickSystem = { systemLauncher.launch(null) },
+                            onPickSystem = {
+                                // Volume choice: point the data root at the SD card's
+                                // app-specific dir (raw-writable, no permission). Arbitrary
+                                // folders aren't possible without all-files access, which we
+                                // avoid for Play compliance.
+                                val sd = Main.sdCardDataDir(context)
+                                if (sd == null) {
+                                    systemDirError.value = "No SD card detected. Memory cards, save states, " +
+                                        "and configs will stay on Internal storage."
+                                } else {
+                                    Main.systemDir.value = sd
+                                    Main.prefs.edit().putString("systemDir", sd).apply()
+                                    systemDirUseDefault.value = false
+                                    systemDirDisplay.value = "SD Card"
+                                    systemDirError.value = null
+                                }
+                                refreshAllowNext()
+                            },
                             onPickBiosFolder = { openBiosFlow() },
                             onPickRoms = { romsLauncher.launch(null) },
                             onRemoveRoms = {
@@ -945,15 +948,15 @@ object SetupImpl {
                     item {
                         SetupStepCard(
                             step = "1.",
-                            title = "Select App Folder",
-                            description = "Pick a folder for memory cards, save states, and configs. You can also use the app-private default.",
+                            title = "App Data Folder",
+                            description = "Where memory cards, save states, and configs are stored. Internal uses your main device storage; SD Card uses a memory card if one is present. (Game ROMs are added separately.)",
                             ready = appFolderReady(),
                             status = appFolderStatus(),
                             visual = SetupVisual.Folder,
-                            onClick = onPickSystem,
-                            primaryLabel = "Select Folder",
+                            onClick = onUseDefaultSystem,
+                            primaryLabel = "SD Card",
                             onPrimary = onPickSystem,
-                            secondaryLabel = "Use Default",
+                            secondaryLabel = "Internal",
                             onSecondary = onUseDefaultSystem,
                         )
                     }
@@ -1071,7 +1074,7 @@ object SetupImpl {
                         .size(width = maxWidth * 0.50f, height = maxHeight * 0.032f),
                 )
                 SetupMiniButton(
-                    text = "Default",
+                    text = "Internal",
                     modifier = Modifier
                         .offset(x = maxWidth * 0.68f, y = maxHeight * 0.252f)
                         .size(width = maxWidth * 0.20f, height = maxHeight * 0.038f),
@@ -1448,7 +1451,7 @@ object SetupImpl {
 
     private fun appFolderStatus(): String {
         if (systemDirUseDefault.value || (Main.systemDir.value == null && Main.setupComplete.value)) {
-            return "Default app-private folder"
+            return "Internal storage (main device)"
         }
         return systemDirDisplay.value
             ?: Main.systemDir.value?.let { runCatching { Uri.parse(it).lastPathSegment }.getOrNull() ?: it }
@@ -2211,17 +2214,15 @@ object SetupImpl {
     private fun SetupSystemDirContent() {
         Column(Modifier.fillMaxSize()) {
             Text(
-                "Pick the folder ARMSX2 should use for system files (memory cards, save states, configs). " +
-                "Defaults to Android/data/com.armsx2/files when unset.",
+                "ARMSX2 stores memory cards, save states, configs, and shader data in app-private storage by default. " +
+                "Use a custom folder only if Android exposes it as a native-writable path. " +
+                "Game folders can still be added from SD card on the ROM folder step.",
                 fontSize = 14.sp, color = Color.LightGray,
                 modifier = Modifier.padding(bottom = 12.dp),
             )
 
             // Validation error banner — surfaces the scoped-storage write
-            // rejection so the user knows why Next refused. The grant
-            // intent has already been launched at this point on
-            // Android 11+; the user just needs to flip the toggle and
-            // re-tap Next.
+            // rejection so the user knows why Next refused the custom folder.
             val err = systemDirError.value
             if (err != null) {
                 Row(
@@ -2269,12 +2270,12 @@ object SetupImpl {
                     Column(Modifier.weight(1f)) {
                         Text("Using App-Private Folder", color = Color.White, fontSize = 13.sp,
                             fontWeight = FontWeight.Bold)
-                        Text("Android/data/com.armsx2/files",
+                        Text("App-private Android/data folder",
                             color = Color.LightGray, fontSize = 11.sp)
                     }
                 }
             } else {
-                Text("No system folder selected yet — use the Pick System Folder button below.",
+                Text("No system data folder selected yet. Use the app-private default or pick a custom folder.",
                     color = Color.LightGray)
             }
 
