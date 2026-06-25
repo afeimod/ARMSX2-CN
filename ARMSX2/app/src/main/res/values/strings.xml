@@ -1,3 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- App identity -->
     <string name="app_name">ARMSX2</string>
+
+    <!-- ============================================================
+         Main.kt — toast / status messages
+         ============================================================ -->
+    <string name="main_toast_save_slot">Save slot %1$d</string>
+    <string name="main_toast_resolution">Resolution %1$dx</string>
+    <string name="main_toast_texture_dump_on">Texture dumping ON</string>
+    <string name="main_toast_texture_dump_off">Texture dumping OFF</string>
+
+    <!-- ============================================================
+         GamesList.kt
+         ============================================================ -->
+    <string name="games_list_scan_choose_folder_first">Choose a game folder first</string>
+    <string name="games_list_scan_already_running">Library scan already running</string>
+    <string name="games_list_scan_starting">Scanning library…</string>
+    <string name="games_list_bg_imported">Library background imported</string>
+    <string name="games_list_bg_import_failed">Could not import background</string>
+    <string name="games_list_bg_reset">Library background reset</string>
+    <string name="games_list_scanning_roms">Scanning ROMs…</string>
+    <string name="games_list_no_serial">No serial</string>
+    <string name="games_list_no_cover">No cover</string>
+
+    <!-- ============================================================
+         SetupImpl.kt — first-run setup wizard
+         ============================================================ -->
+    <string name="setup_welcome_title">Welcome to ARMSX2 setup!</string>
+    <string name="setup_welcome_hint">Hit Next to get started</string>
+    <string name="setup_loading_drivers">Loading driver list…</string>
+    <string name="setup_installing">Installing…</string>
+    <string name="setup_active">✓ Active</string>
+    <string name="setup_select">Select</string>
+    <string name="setup_install">Install</string>
+    <string name="setup_scanning">Scanning…</string>
+    <string name="setup_selected_label">Selected:</string>
+    <string name="setup_app_private_title">Using App-Private Folder</string>
+    <string name="setup_app_private_subtitle">App-private Android/data folder</string>
+    <string name="setup_app_private_empty">No system data folder selected yet. Use the app-private default or pick a custom folder.</string>
+    <string name="setup_remove">Remove</string>
+    <string name="setup_close">Close</string>
+
+    <!-- ============================================================
+         MemoryCardManager.kt
+         ============================================================ -->
+    <string name="memcard_close">Close</string>
+    <string name="memcard_import_file">Import File</string>
+    <string name="memcard_import_folder">Import Folder</string>
+    <string name="memcard_use_default_slots">Use Default Slots</string>
+    <string name="memcard_refresh">Refresh</string>
+    <string name="memcard_new_title">New Memory Card</string>
+    <string name="memcard_card_name_label">Card name (A to type)</string>
+    <string name="memcard_type_label">Type</string>
+    <string name="memcard_size_label">Size</string>
+    <string name="memcard_create">Create</string>
+    <string name="memcard_slot_1">Slot 1</string>
+    <string name="memcard_slot_2">Slot 2</string>
+    <string name="memcard_imported">Memory card imported</string>
+    <string name="memcard_folder_imported">Folder memory card imported</string>
+    <string name="memcard_default_slots_enabled">Default memory-card slots enabled</string>
+
+    <!-- ============================================================
+         SaveStatePicker.kt
+         ============================================================ -->
+    <string name="savestate_autosave_on_exit">Auto-save on exit</string>
+    <string name="savestate_cancel">CANCEL</string>
+    <string name="savestate_back">Back</string>
+
+    <!-- ============================================================
+         AchievementsLoginPanel.kt
+         ============================================================ -->
+    <string name="ach_login_username_label">Username (A to type)</string>
+    <string name="ach_login_password_label">Password (A to type)</string>
+
+    <!-- ============================================================
+         InGameOverlay.kt — top-right badge
+         ============================================================ -->
+    <string name="overlay_app_badge">ARMSX2</string>
+
+    <!-- ============================================================
+         Settings — common controls
+         ============================================================ -->
+    <string name="settings_save">Save</string>
+    <string name="settings_cancel">Cancel</string>
+    <string name="settings_address">Address</string>
+    <string name="settings_name">Name</string>
+    <string name="settings_pnach_body">PNACH patch= lines</string>
+    <string name="settings_execute">Execute</string>
+
+    <!-- ============================================================
+         settings/NetworkTab.kt
+         ============================================================ -->
+    <string name="settings_network_help_main">Sockets + Auto is the normal Android setup. Advanced fields mirror PCSX2\'s DEV9 INI keys for games that need custom DHCP/DNS behavior.</string>
+    <string name="settings_network_help_hdd">A bare name (e.g. DEV9hdd.raw) lives in the data folder and is auto-created (8 GiB sparse) on first boot. Enter a full path to point at an existing image. This is saved here, so it won\'t reset on reboot.</string>
+    <string name="settings_network_hdd_image_title">HDD Image</string>
+    <string name="settings_network_hdd_image_label">HDD image</string>
+
+    <!-- ============================================================
+         settings/PatchesTab.kt
+         ============================================================ -->
+    <string name="settings_patches_title">Patch codes</string>
+    <string name="settings_patches_warning_yes">YES</string>
+    <string name="settings_patches_warning_no">NO</string>
+    <string name="settings_patches_warning_dont_ask">DON\'T ASK AGAIN</string>
+    <string name="settings_patches_select_all">Select all</string>
+    <string name="settings_patches_none">None</string>
+    <string name="settings_patches_apply">APPLY</string>
+    <string name="settings_patches_cancel">CANCEL</string>
+
+    <!-- ============================================================
+         settings/PerformanceTab.kt
+         ============================================================ -->
+    <string name="settings_perf_preset_help">Tap a preset. Optimal = safe for most games. Fast = aggressive (EE cycle skip + fast CDVD) for low-end devices; may glitch some. Tweaking any speedhack below un-highlights both (custom).</string>
+    <string name="settings_perf_gamefix_help">Compatibility shortcuts. Leave Game Fixes off unless a game needs one of the fixes below.</string>
+
+    <!-- ============================================================
+         Toolbar / Tests button
+         ============================================================ -->
+    <string name="toolbar_value_empty">—</string>
 </resources>

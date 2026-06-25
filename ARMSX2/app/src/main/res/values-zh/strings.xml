@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App identity -->
+    <string name="app_name">ARMSX2</string>
+
+    <!-- ============================================================
+         Main.kt — toast / status messages
+         ============================================================ -->
+    <string name="main_toast_save_slot">存档槽 %1$d</string>
+    <string name="main_toast_resolution">分辨率 %1$dx</string>
+    <string name="main_toast_texture_dump_on">纹理导出已开启</string>
+    <string name="main_toast_texture_dump_off">纹理导出已关闭</string>
+
+    <!-- ============================================================
+         GamesList.kt
+         ============================================================ -->
+    <string name="games_list_scan_choose_folder_first">请先选择游戏文件夹</string>
+    <string name="games_list_scan_already_running">正在扫描游戏中</string>
+    <string name="games_list_scan_starting">正在扫描游戏库…</string>
+    <string name="games_list_bg_imported">游戏库背景已导入</string>
+    <string name="games_list_bg_import_failed">无法导入背景</string>
+    <string name="games_list_bg_reset">游戏库背景已重置</string>
+    <string name="games_list_scanning_roms">正在扫描 ROM…</string>
+    <string name="games_list_no_serial">无序列号</string>
+    <string name="games_list_no_cover">无封面</string>
+
+    <!-- ============================================================
+         SetupImpl.kt — 首次启动设置向导
+         ============================================================ -->
+    <string name="setup_welcome_title">欢迎使用 ARMSX2 设置向导！</string>
+    <string name="setup_welcome_hint">点击下一步开始</string>
+    <string name="setup_loading_drivers">正在加载驱动列表…</string>
+    <string name="setup_installing">安装中…</string>
+    <string name="setup_active">✓ 已激活</string>
+    <string name="setup_select">选择</string>
+    <string name="setup_install">安装</string>
+    <string name="setup_scanning">扫描中…</string>
+    <string name="setup_selected_label">已选：</string>
+    <string name="setup_app_private_title">使用应用私有目录</string>
+    <string name="setup_app_private_subtitle">应用私有 Android/data 目录</string>
+    <string name="setup_app_private_empty">尚未选择系统数据目录。可使用应用私有默认目录，或自定义目录。</string>
+    <string name="setup_remove">移除</string>
+    <string name="setup_close">关闭</string>
+
+    <!-- ============================================================
+         MemoryCardManager.kt
+         ============================================================ -->
+    <string name="memcard_close">关闭</string>
+    <string name="memcard_import_file">导入文件</string>
+    <string name="memcard_import_folder">导入文件夹</string>
+    <string name="memcard_use_default_slots">使用默认槽位</string>
+    <string name="memcard_refresh">刷新</string>
+    <string name="memcard_new_title">新记忆卡</string>
+    <string name="memcard_card_name_label">记忆卡名称（按 A 输入）</string>
+    <string name="memcard_type_label">类型</string>
+    <string name="memcard_size_label">大小</string>
+    <string name="memcard_create">创建</string>
+    <string name="memcard_slot_1">槽位 1</string>
+    <string name="memcard_slot_2">槽位 2</string>
+    <string name="memcard_imported">已导入记忆卡</string>
+    <string name="memcard_folder_imported">已导入文件夹记忆卡</string>
+    <string name="memcard_default_slots_enabled">已启用默认记忆卡槽位</string>
+
+    <!-- ============================================================
+         SaveStatePicker.kt
+         ============================================================ -->
+    <string name="savestate_autosave_on_exit">退出时自动保存</string>
+    <string name="savestate_cancel">取消</string>
+    <string name="savestate_back">返回</string>
+
+    <!-- ============================================================
+         AchievementsLoginPanel.kt
+         ============================================================ -->
+    <string name="ach_login_username_label">用户名（按 A 输入）</string>
+    <string name="ach_login_password_label">密码（按 A 输入）</string>
+
+    <!-- ============================================================
+         InGameOverlay.kt
+         ============================================================ -->
+    <string name="overlay_app_badge">ARMSX2</string>
+
+    <!-- ============================================================
+         Settings — common controls
+         ============================================================ -->
+    <string name="settings_save">保存</string>
+    <string name="settings_cancel">取消</string>
+    <string name="settings_address">地址</string>
+    <string name="settings_name">名称</string>
+    <string name="settings_pnach_body">PNACH patch= 行</string>
+    <string name="settings_execute">执行</string>
+
+    <!-- ============================================================
+         settings/NetworkTab.kt
+         ============================================================ -->
+    <string name="settings_network_help_main">Sockets + Auto 是 Android 上的常规配置。高级字段对应 PCSX2 的 DEV9 INI 键，给需要自定义 DHCP/DNS 行为的游戏使用。</string>
+    <string name="settings_network_help_hdd">仅填文件名（例如 DEV9hdd.raw）时，会放到数据目录并在首次启动时自动创建（8 GiB 稀疏文件）。填完整路径可指向已有镜像。这里保存的路径在重启后不会重置。</string>
+    <string name="settings_network_hdd_image_title">硬盘镜像</string>
+    <string name="settings_network_hdd_image_label">硬盘镜像</string>
+
+    <!-- ============================================================
+         settings/PatchesTab.kt
+         ============================================================ -->
+    <string name="settings_patches_title">补丁码</string>
+    <string name="settings_patches_warning_yes">是</string>
+    <string name="settings_patches_warning_no">否</string>
+    <string name="settings_patches_warning_dont_ask">不再询问</string>
+    <string name="settings_patches_select_all">全选</string>
+    <string name="settings_patches_none">无</string>
+    <string name="settings_patches_apply">应用</string>
+    <string name="settings_patches_cancel">取消</string>
+
+    <!-- ============================================================
+         settings/PerformanceTab.kt
+         ============================================================ -->
+    <string name="settings_perf_preset_help">点击预设。Optimal 对多数游戏都安全；Fast 是激进的（EE 跳周期 + 快速 CDVD），适合低端设备，但部分游戏可能出错。在下方修改任一加速项都会取消两个预设的高亮（视为自定义）。</string>
+    <string name="settings_perf_gamefix_help">兼容性开关。除非游戏需要下面的某项修复，否则保持 Game Fixes 关闭。</string>
+
+    <!-- ============================================================
+         Toolbar / Tests button
+         ============================================================ -->
+    <string name="toolbar_value_empty">—</string>
+</resources>
