@@ -1,6 +1,8 @@
 package com.armsx2.ui.toolbar
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -65,7 +67,7 @@ class TestsButton : ToolbarButton() {
             isAllPass(value) -> Color(0xFF4ADE80)
             else -> Color(0xFFFF6B6B)
         }
-        Text("$label: ${value.ifEmpty { "—" }}", color = tint)
+        Text("$label: ${value.ifEmpty { stringResource(R.string.toolbar_value_empty) }}", color = tint)
     }
 
     /** Result strings come back as "passed/total" from NativeApp.onTestResults. */

@@ -1,5 +1,8 @@
 package com.armsx2.ui.settings
 
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ScrollState
@@ -380,7 +383,7 @@ fun PatchesTab(state: MutableState<Settings>) {
             containerColor = Colors.surfaceColor,
             titleContentColor = Color.White,
             textContentColor = Color.White,
-            title = { Text("Patch codes") },
+            title = { Text(stringResource(R.string.settings_patches_title)) },
             text = {
                 Text(
                     "Using patch codes can have unpredictable effects on games, causing " +
@@ -394,7 +397,7 @@ fun PatchesTab(state: MutableState<Settings>) {
                 )
             },
             confirmButton = {
-                TextButton(onClick = { showPatchWarning = false; startBrowse() }) { Text("YES") }
+                TextButton(onClick = { showPatchWarning = false; startBrowse() }) { Text(stringResource(R.string.settings_patches_warning_yes)) }
             },
             dismissButton = {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -402,8 +405,8 @@ fun PatchesTab(state: MutableState<Settings>) {
                         Main.prefs.edit().putBoolean("patchCodesWarnAck", true).apply()
                         showPatchWarning = false
                         startBrowse()
-                    }) { Text("DON'T ASK AGAIN") }
-                    TextButton(onClick = { showPatchWarning = false }) { Text("NO") }
+                    }) { Text(stringResource(R.string.settings_patches_warning_dont_ask)) }
+                    TextButton(onClick = { showPatchWarning = false }) { Text(stringResource(R.string.settings_patches_warning_no)) }
                 }
             },
         )
@@ -425,8 +428,8 @@ fun PatchesTab(state: MutableState<Settings>) {
             text = {
                 Column(modifier = Modifier.heightIn(max = 380.dp).verticalScroll(rememberScrollState())) {
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        TextButton(onClick = { res.entries.indices.forEach { selected[it] = true } }) { Text("Select all") }
-                        TextButton(onClick = { selected.clear() }) { Text("None") }
+                        TextButton(onClick = { res.entries.indices.forEach { selected[it] = true } }) { Text(stringResource(R.string.settings_patches_select_all)) }
+                        TextButton(onClick = { selected.clear() }) { Text(stringResource(R.string.settings_patches_none)) }
                     }
                     res.entries.forEachIndexed { i, e ->
                         Row(
@@ -451,8 +454,8 @@ fun PatchesTab(state: MutableState<Settings>) {
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = { applySelected() }) { Text("APPLY") } },
-            dismissButton = { TextButton(onClick = { browseResult = null }) { Text("CANCEL") } },
+            confirmButton = { TextButton(onClick = { applySelected() }) { Text(stringResource(R.string.settings_patches_apply)) } },
+            dismissButton = { TextButton(onClick = { browseResult = null }) { Text(stringResource(R.string.settings_patches_cancel)) } },
         )
     }
 
@@ -656,7 +659,7 @@ private fun ManualPnachDialog(
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Name") },
+                    label = { Text(stringResource(R.string.settings_name)) },
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
                     colors = tfColors,
@@ -666,7 +669,7 @@ private fun ManualPnachDialog(
                 OutlinedTextField(
                     value = body,
                     onValueChange = { body = it },
-                    label = { Text("PNACH patch= lines") },
+                    label = { Text(stringResource(R.string.settings_pnach_body)) },
                     minLines = 6,
                     maxLines = 10,
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
@@ -681,7 +684,7 @@ private fun ManualPnachDialog(
                 enabled = body.isNotBlank(),
                 onClick = { execute() },
             ) {
-                Text("Execute", color = if (body.isNotBlank()) Colors.pasx2_blue else Color(0xFF777777))
+                Text(stringResource(R.string.settings_execute), color = if (body.isNotBlank()) Colors.pasx2_blue else Color(0xFF777777))
             }
         },
         dismissButton = {

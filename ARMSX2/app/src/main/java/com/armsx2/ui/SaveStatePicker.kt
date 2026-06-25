@@ -1,5 +1,8 @@
 package com.armsx2.ui
 
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
+
 import android.graphics.BitmapFactory
 import android.widget.Toast
 import androidx.compose.foundation.Image
@@ -254,7 +257,7 @@ object SaveStatePicker {
     ) {
         var autoSave by remember { mutableStateOf(Main.prefs.getBoolean("autoSaveOnExit", false)) }
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text("Auto-save on exit", color = Color.White, fontSize = 12.sp)
+            Text(stringResource(R.string.savestate_autosave_on_exit), color = Color.White, fontSize = 12.sp)
             Spacer(Modifier.width(6.dp))
             Switch(
                 checked = autoSave,
@@ -311,7 +314,7 @@ object SaveStatePicker {
             title = { Text(title, fontWeight = FontWeight.Bold, fontSize = 15.sp) },
             text = { Text(message, fontSize = 13.sp) },
             confirmButton = { TextButton(onClick = onConfirm) { Text(confirmLabel) } },
-            dismissButton = { TextButton(onClick = onDismiss) { Text("CANCEL") } },
+            dismissButton = { TextButton(onClick = onDismiss) { Text(stringResource(R.string.savestate_cancel)) } },
         )
     }
 
@@ -504,7 +507,7 @@ object SaveStatePicker {
                 .padding(horizontal = 14.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text("Back", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text(stringResource(R.string.savestate_back), color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
         }
     }
 }

@@ -1,5 +1,7 @@
 package com.armsx2.ui
 
+import com.armsx2.R
+
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -63,6 +65,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -1487,10 +1490,10 @@ object SetupImpl {
     @Composable
     fun Welcome() {
         Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.Center) {
-            Text("Welcome to ARMSX2 setup!", Modifier.align(Alignment.CenterHorizontally),
+            Text(stringResource(R.string.setup_welcome_title), Modifier.align(Alignment.CenterHorizontally),
                 fontSize = 28.sp, color = Color.White, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            Text("Hit Next to get started", Modifier.align(Alignment.CenterHorizontally),
+            Text(stringResource(R.string.setup_welcome_hint), Modifier.align(Alignment.CenterHorizontally),
                 fontSize = 14.sp, color = Color.LightGray)
         }
     }
@@ -1835,7 +1838,7 @@ object SetupImpl {
                         .clickable { showDriverBrowser.value = false }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
-                    Text("Close", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.setup_close), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
             Text(
@@ -1871,7 +1874,7 @@ object SetupImpl {
                             color = Colors.pasx2_blue,
                         )
                         Spacer(Modifier.width(12.dp))
-                        Text("Loading driver list…", color = Color.White, fontSize = 13.sp)
+                        Text(stringResource(R.string.setup_loading_drivers), color = Color.White, fontSize = 13.sp)
                     }
                 }
                 list.isEmpty() -> {
@@ -2000,7 +2003,7 @@ object SetupImpl {
                             color = Colors.pasx2_blue,
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Installing…", color = Color(0xFFCCCCCC), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.setup_installing), color = Color(0xFFCCCCCC), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 active -> {
@@ -2014,7 +2017,7 @@ object SetupImpl {
                             .padding(vertical = 7.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("✓ Active", color = Color(0xFF9ED49E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.setup_active), color = Color(0xFF9ED49E), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 installed -> {
@@ -2030,7 +2033,7 @@ object SetupImpl {
                             .padding(vertical = 7.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("Select", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.setup_select), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
                 else -> {
@@ -2043,7 +2046,7 @@ object SetupImpl {
                             .padding(vertical = 7.dp),
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text("Install", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.setup_install), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -2107,7 +2110,7 @@ object SetupImpl {
                             color = Colors.pasx2_blue,
                         )
                         Spacer(Modifier.width(12.dp))
-                        Text("Scanning…", color = Color.White)
+                        Text(stringResource(R.string.setup_scanning), color = Color.White)
                     }
                 }
                 biosScanError.value != null -> {
@@ -2253,7 +2256,7 @@ object SetupImpl {
                     Text("📁", fontSize = 24.sp)
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Selected:", color = Color.LightGray, fontSize = 12.sp)
+                        Text(stringResource(R.string.setup_selected_label), color = Color.LightGray, fontSize = 12.sp)
                         Text(display, color = Color.White, fontSize = 14.sp)
                     }
                 }
@@ -2268,14 +2271,14 @@ object SetupImpl {
                     Text("✅", fontSize = 22.sp)
                     Spacer(Modifier.width(8.dp))
                     Column(Modifier.weight(1f)) {
-                        Text("Using App-Private Folder", color = Color.White, fontSize = 13.sp,
+                        Text(stringResource(R.string.setup_app_private_title), color = Color.White, fontSize = 13.sp,
                             fontWeight = FontWeight.Bold)
-                        Text("App-private Android/data folder",
+                        Text(stringResource(R.string.setup_app_private_subtitle),
                             color = Color.LightGray, fontSize = 11.sp)
                     }
                 }
             } else {
-                Text("No system data folder selected yet. Use the app-private default or pick a custom folder.",
+                Text(stringResource(R.string.setup_app_private_empty),
                     color = Color.LightGray)
             }
 
@@ -2369,7 +2372,7 @@ object SetupImpl {
                     .clickable(onClick = onRemove)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
             ) {
-                Text("Remove", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.setup_remove), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
             }
         }
     }

@@ -1455,9 +1455,11 @@ class Main: ComponentActivity() {
                 ControllerMappings.SysHotkey.TEXTURE_DUMP -> {
                     if (down) {
                         val on = runCatching { NativeApp.toggleTextureDumping() }.getOrDefault(false)
+                        // L10N: localized via res/values{-zh}/strings.xml
                         android.widget.Toast.makeText(
                             this,
-                            if (on) "Texture dumping ON" else "Texture dumping OFF",
+                            if (on) getString(R.string.main_toast_texture_dump_on)
+                            else getString(R.string.main_toast_texture_dump_off),
                             android.widget.Toast.LENGTH_SHORT,
                         ).show()
                     }
@@ -1497,7 +1499,8 @@ class Main: ComponentActivity() {
     private fun cycleSaveSlot() {
         val next = (Main.currentSaveSlot.value + 1) % 10
         Main.currentSaveSlot.value = next
-        android.widget.Toast.makeText(this, "Save slot $next", android.widget.Toast.LENGTH_SHORT).show()
+        // L10N: save-slot toast
+        android.widget.Toast.makeText(this, getString(R.string.main_toast_save_slot, next), android.widget.Toast.LENGTH_SHORT).show()
     }
 
     /** Step the internal resolution multiplier up/down (1x..5x), apply live. */
@@ -1507,7 +1510,8 @@ class Main: ComponentActivity() {
         Main.upscale.value = nf
         runCatching { NativeApp.renderUpscalemultiplier(nf) }
         runCatching { Main.prefs.edit().putFloat("upscaleFloat", nf).apply() }
-        android.widget.Toast.makeText(this, "Resolution ${next}x", android.widget.Toast.LENGTH_SHORT).show()
+        // L10N: resolution toast
+        android.widget.Toast.makeText(this, getString(R.string.main_toast_resolution, next), android.widget.Toast.LENGTH_SHORT).show()
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {

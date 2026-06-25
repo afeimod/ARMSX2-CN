@@ -1,5 +1,8 @@
 package com.armsx2.ui
 
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -125,7 +128,7 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
             OutlinedTextField(
                 value = user,
                 onValueChange = { if (!inFlight) user = it.trim() },
-                label = { Text("Username (A to type)") },
+                label = { Text(stringResource(R.string.ach_login_username_label)) },
                 singleLine = true,
                 enabled = !inFlight,
                 colors = tfColors,
@@ -141,7 +144,7 @@ fun AchievementsLoginPanel(onClose: () -> Unit) {
             OutlinedTextField(
                 value = pass,
                 onValueChange = { if (!inFlight) pass = it },
-                label = { Text("Password (A to type)") },
+                label = { Text(stringResource(R.string.ach_login_password_label)) },
                 singleLine = true,
                 enabled = !inFlight,
                 visualTransformation = PasswordVisualTransformation(),

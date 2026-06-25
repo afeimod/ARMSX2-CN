@@ -1,5 +1,8 @@
 package com.armsx2.ui
 
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
+
 import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Image
@@ -1486,7 +1489,7 @@ object InGameOverlay {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text("ARMSX2", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.overlay_app_badge), color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
                 Text(versionString, color = Color(0xFF888888), fontSize = 11.sp)
             }
             Spacer(Modifier.width(8.dp))

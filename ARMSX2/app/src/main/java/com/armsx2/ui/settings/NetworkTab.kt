@@ -1,6 +1,8 @@
 package com.armsx2.ui.settings
 
 import androidx.compose.foundation.ScrollState
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
@@ -68,7 +70,7 @@ fun NetworkTab(state: MutableState<Settings>) {
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
-        HelpText("Sockets + Auto is the normal Android setup. Advanced fields mirror PCSX2's DEV9 INI keys for games that need custom DHCP/DNS behavior.")
+        HelpText(stringResource(R.string.settings_network_help_main))
 
         ToggleRow("Enable DEV9 Ethernet", s.dev9EthEnable) {
             val currentDevice = s.dev9EthDevice.ifEmpty { "Auto" }
@@ -157,7 +159,7 @@ fun NetworkTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(dev9HddFile = it.ifEmpty { "DEV9hdd.raw" })) },
             onReset = { apply(s.copy(dev9HddFile = "DEV9hdd.raw")) },
         )
-        HelpText("A bare name (e.g. DEV9hdd.raw) lives in the data folder and is auto-created (8 GiB sparse) on first boot. Enter a full path to point at an existing image. This is saved here, so it won't reset on reboot.")
+        HelpText(stringResource(R.string.settings_network_help_hdd))
     }
 }
 
@@ -174,17 +176,17 @@ private fun EditableTextRow(label: String, value: String, onChange: (String) -> 
                     value = draft,
                     onValueChange = { draft = it },
                     singleLine = true,
-                    label = { Text("Address") },
+                    label = { Text(stringResource(R.string.settings_address)) },
                 )
             },
             confirmButton = {
                 TextButton(onClick = {
                     onChange(draft.trim())
                     editing = false
-                }) { Text("Save") }
+                }) { Text(stringResource(R.string.settings_save)) }
             },
             dismissButton = {
-                TextButton(onClick = { editing = false }) { Text("Cancel") }
+                TextButton(onClick = { editing = false }) { Text(stringResource(R.string.settings_cancel)) }
             },
         )
     }
@@ -257,7 +259,7 @@ private fun HddFileRow(fileName: String, onChange: (String) -> Unit, onReset: ()
     if (editing) {
         AlertDialog(
             onDismissRequest = { editing = false },
-            title = { Text("HDD Image") },
+            title = { Text(stringResource(R.string.settings_network_hdd_image_title)) },
             text = {
                 Column {
                     Text(
@@ -270,7 +272,7 @@ private fun HddFileRow(fileName: String, onChange: (String) -> Unit, onReset: ()
                         value = draft,
                         onValueChange = { draft = it },
                         singleLine = true,
-                        label = { Text("HDD image") },
+                        label = { Text(stringResource(R.string.settings_network_hdd_image_label)) },
                     )
                 }
             },
@@ -278,10 +280,10 @@ private fun HddFileRow(fileName: String, onChange: (String) -> Unit, onReset: ()
                 TextButton(onClick = {
                     onChange(draft.trim())
                     editing = false
-                }) { Text("Save") }
+                }) { Text(stringResource(R.string.settings_save)) }
             },
             dismissButton = {
-                TextButton(onClick = { editing = false }) { Text("Cancel") }
+                TextButton(onClick = { editing = false }) { Text(stringResource(R.string.settings_cancel)) }
             },
         )
     }
@@ -295,7 +297,7 @@ private fun HddFileRow(fileName: String, onChange: (String) -> Unit, onReset: ()
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("HDD Image", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                Text(stringResource(R.string.settings_network_hdd_image_title), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                 Text(fileName, color = Color(0xFFAAAAAA), fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
             Text(

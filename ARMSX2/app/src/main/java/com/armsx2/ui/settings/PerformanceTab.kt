@@ -1,6 +1,8 @@
 package com.armsx2.ui.settings
 
 import androidx.compose.foundation.ScrollState
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
@@ -58,7 +60,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
                 onChange = { when (it) { 0 -> apply(safe); 1 -> apply(fast) } },
             )
         }
-        HelpText("Tap a preset. Optimal = safe for most games. Fast = aggressive (EE cycle skip + fast CDVD) for low-end devices; may glitch some. Tweaking any speedhack below un-highlights both (custom).")
+        HelpText(stringResource(R.string.settings_perf_preset_help))
         SettingsDivider()
         IntSliderRow(
             label = "EE Cycle Rate",
@@ -160,7 +162,7 @@ fun PerformanceTab(state: MutableState<Settings>) {
             onChange = { apply(s.copy(frameSkip = it)) },
         )
         SettingsDivider()
-        HelpText("Compatibility shortcuts. Leave Game Fixes off unless a game needs one of the fixes below.")
+        HelpText(stringResource(R.string.settings_perf_gamefix_help))
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             BubbleGridRow {
                 ToggleBubble("Skip BIOS", s.enableFastBoot, modifier = Modifier.weight(1f)) {

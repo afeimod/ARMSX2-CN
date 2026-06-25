@@ -3,6 +3,7 @@ package com.armsx2.ui
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
+import com.armsx2.R
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -70,6 +71,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -664,11 +666,11 @@ object GamesList {
             add("Scan" to {
                 when {
                     romsDirs.isEmpty() ->
-                        Toast.makeText(context, "Choose a game folder first", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.games_list_scan_choose_folder_first), Toast.LENGTH_SHORT).show()
                     scanning.value ->
-                        Toast.makeText(context, "Library scan already running", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.games_list_scan_already_running), Toast.LENGTH_SHORT).show()
                     else -> {
-                        Toast.makeText(context, "Scanning library...", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(context, context.getString(R.string.games_list_scan_starting), Toast.LENGTH_SHORT).show()
                         lastScannedRoms.value = null
                         scanRoms(context, romsDirs, romsKey)
                     }
@@ -1354,9 +1356,9 @@ object GamesList {
         if (ok) {
             Main.prefs.edit().putString(KEY_LIBRARY_BACKGROUND, outFile.absolutePath).apply()
             customBackgroundPath.value = outFile.absolutePath
-            Toast.makeText(context, "Library background imported", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.games_list_bg_imported), Toast.LENGTH_SHORT).show()
         } else {
-            Toast.makeText(context, "Could not import background", Toast.LENGTH_LONG).show()
+            Toast.makeText(context, context.getString(R.string.games_list_bg_import_failed), Toast.LENGTH_LONG).show()
         }
     }
 
@@ -1364,7 +1366,7 @@ object GamesList {
         customBackgroundPath.value?.let { runCatching { File(it).delete() } }
         customBackgroundPath.value = null
         Main.prefs.edit().remove(KEY_LIBRARY_BACKGROUND).apply()
-        Toast.makeText(context, "Library background reset", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, context.getString(R.string.games_list_bg_reset), Toast.LENGTH_SHORT).show()
     }
 
     @Composable
@@ -1389,7 +1391,7 @@ object GamesList {
                 color = Colors.pasx2_blue,
             )
             Spacer(Modifier.width(12.dp))
-            Text("Scanning ROMs…", color = Color.White)
+            Text(stringResource(R.string.games_list_scanning_roms), color = Color.White)
         }
     }
 
@@ -1852,10 +1854,10 @@ object GamesList {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 if (missingSerial) {
                     Text("?", color = Color(0xFF8A4A4A), fontSize = 56.sp)
-                    Text("No serial", color = Color(0xFF8A4A4A), fontSize = 10.sp)
+                    Text(stringResource(R.string.games_list_no_serial), color = Color(0xFF8A4A4A), fontSize = 10.sp)
                 } else {
                     Text("📀", color = Color(0xFF3F3F3F), fontSize = 56.sp)
-                    Text("No cover", color = Color(0xFF6F6F6F), fontSize = 10.sp)
+                    Text(stringResource(R.string.games_list_no_cover), color = Color(0xFF6F6F6F), fontSize = 10.sp)
                 }
             }
         }

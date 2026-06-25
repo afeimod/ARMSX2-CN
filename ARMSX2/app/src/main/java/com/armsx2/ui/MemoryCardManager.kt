@@ -1,6 +1,7 @@
 package com.armsx2.ui
 
 import android.content.Context
+import com.armsx2.R
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
@@ -44,6 +45,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -138,7 +140,7 @@ object MemoryCardManager {
                         colors = darkButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Close")
+                        Text(stringResource(R.string.memcard_close))
                     }
                 }
 
@@ -159,7 +161,7 @@ object MemoryCardManager {
                         colors = ps2ButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Import File")
+                        Text(stringResource(R.string.memcard_import_file))
                     }
                     Button(
                         onClick = { folderLauncher.launch(null) },
@@ -167,7 +169,7 @@ object MemoryCardManager {
                         colors = ps2ButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Import Folder")
+                        Text(stringResource(R.string.memcard_import_folder))
                     }
                     Button(
                         onClick = {
@@ -181,7 +183,7 @@ object MemoryCardManager {
                         colors = ps2ButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Use Default Slots")
+                        Text(stringResource(R.string.memcard_use_default_slots))
                     }
                     Button(
                         onClick = { refresh(context) },
@@ -189,7 +191,7 @@ object MemoryCardManager {
                         colors = darkButtonColors(),
                         shape = RoundedCornerShape(8.dp),
                     ) {
-                        Text("Refresh")
+                        Text(stringResource(R.string.memcard_refresh))
                     }
                 }
 
@@ -206,7 +208,7 @@ object MemoryCardManager {
                             .background(Color(0xFF151515), RoundedCornerShape(8.dp))
                             .padding(12.dp),
                     ) {
-                        Text("New Memory Card", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(stringResource(R.string.memcard_new_title), color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
                         Spacer(Modifier.height(8.dp))
                         Box(
                             Modifier
@@ -220,7 +222,7 @@ object MemoryCardManager {
                                 value = newName,
                                 onValueChange = { newName = it },
                                 singleLine = true,
-                                label = { Text("Card name (A to type)") },
+                                label = { Text(stringResource(R.string.memcard_card_name_label)) },
                                 colors = OutlinedTextFieldDefaults.colors(
                                     focusedTextColor = Color.White,
                                     unfocusedTextColor = Color.White,
@@ -234,7 +236,7 @@ object MemoryCardManager {
                             )
                         }
                         Spacer(Modifier.height(10.dp))
-                        Text("Type", color = Color(0xFF999999), fontSize = 12.sp)
+                        Text(stringResource(R.string.memcard_type_label), color = Color(0xFF999999), fontSize = 12.sp)
                         Spacer(Modifier.height(4.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             SelectChip("File", newType == 1, "mc:typefile") { newType = 1 }
@@ -242,7 +244,7 @@ object MemoryCardManager {
                         }
                         if (newType == 1) {
                             Spacer(Modifier.height(10.dp))
-                            Text("Size", color = Color(0xFF999999), fontSize = 12.sp)
+                            Text(stringResource(R.string.memcard_size_label), color = Color(0xFF999999), fontSize = 12.sp)
                             Spacer(Modifier.height(4.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 SelectChip("8 MB", newSize == 1, "mc:size8") { newSize = 1 }
@@ -276,7 +278,7 @@ object MemoryCardManager {
                             colors = ps2ButtonColors(),
                             shape = RoundedCornerShape(8.dp),
                         ) {
-                            Text("Create")
+                            Text(stringResource(R.string.memcard_create))
                         }
                     }
                 }
@@ -334,7 +336,7 @@ object MemoryCardManager {
                                         .height(32.dp)
                                         .controllerFocusable("mc:slot1:${file.name}", onConfirm = { assignSlot(context, 1, file) }),
                                 ) {
-                                    Text("Slot 1", fontSize = 11.sp)
+                                    Text(stringResource(R.string.memcard_slot_1), fontSize = 11.sp)
                                 }
                                 Spacer(Modifier.width(6.dp))
                                 Button(
@@ -345,7 +347,7 @@ object MemoryCardManager {
                                         .height(32.dp)
                                         .controllerFocusable("mc:slot2:${file.name}", onConfirm = { assignSlot(context, 2, file) }),
                                 ) {
-                                    Text("Slot 2", fontSize = 11.sp)
+                                    Text(stringResource(R.string.memcard_slot_2), fontSize = 11.sp)
                                 }
                             }
                         }
@@ -381,7 +383,7 @@ object MemoryCardManager {
             } ?: error("Could not open selected file")
             setDefaultSlots()
             status.value = "Imported Slot 1 as ${outFile.name}."
-            Toast.makeText(context, "Memory card imported", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.memcard_imported), Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             status.value = "Import failed: ${e.message ?: "unknown error"}"
             Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
@@ -409,7 +411,7 @@ object MemoryCardManager {
 
             if (assignSlot(context, 1, dest)) {
                 status.value = "Imported folder card ${dest.name} to Slot 1."
-                Toast.makeText(context, "Folder memory card imported", Toast.LENGTH_SHORT).show()
+                Toast.makeText(context, context.getString(R.string.memcard_folder_imported), Toast.LENGTH_SHORT).show()
             }
         } catch (e: Exception) {
             status.value = "Folder import failed: ${e.message ?: "unknown error"}"
@@ -422,7 +424,7 @@ object MemoryCardManager {
         try {
             setDefaultSlots()
             status.value = "Default memory-card slots enabled."
-            Toast.makeText(context, "Default memory-card slots enabled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, context.getString(R.string.memcard_default_slots_enabled), Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
             status.value = "Could not update memory-card settings: ${e.message ?: "unknown error"}"
             Toast.makeText(context, status.value, Toast.LENGTH_LONG).show()
