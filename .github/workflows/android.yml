@@ -161,6 +161,33 @@ jobs:
             printf '%-30s %s\n' "$d" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo 'NO_GIT')"
           done
 
+      - name: Bridge shaderc third_party case mismatches
+        # cmake/SearchForStuff.cmake hardcodes the path with capital
+        # letters:
+        #   SHADERC_SPIRV_TOOLS_DIR   = .../shaderc/third_party/SPIRV-Tools
+        #   SHADERC_SPIRV_HEADERS_DIR = .../shaderc/third_party/SPIRV-Headers
+        # but shaderc's own DEPS file (and git-sync-deps) clones them
+        # lowercase: spirv-tools, spirv-headers. Without these symlinks
+        # the IS_DIRECTORY checks in shaderc/third_party/CMakeLists.txt
+        # fail and configure bombs out with the misleading
+        # "SPIRV-Tools was not found" message.
+        working-directory: ARMSX2/app/src/main/cpp/3rdparty/shaderc/third_party
+        run: |
+          set -e
+          for pair in 'spirv-tools:SPIRV-Tools' 'spirv-headers:SPIRV-Headers'; do
+            src="${pair%%:*}"
+            dst="${pair##*:}"
+            if [ -d "$src" ] && [ ! -e "$dst" ]; then
+              ln -s "$src" "$dst"
+              echo "linked $dst -> $src"
+            elif [ -e "$dst" ] && [ ! -L "$dst" ]; then
+              echo "WARN: $dst exists and is not a symlink; left untouched"
+            else
+              echo "skip $dst (already exists or no source)"
+            fi
+          done
+          ls -la SPIRV-Tools SPIRV-Headers 2>/dev/null || true
+
       - name: Diagnose shaderc cmake configure
         # The shaderc/third_party/CMakeLists.txt FATAL_ERRORs with
         # "SPIRV-Tools was not found" because the add_subdirectory of
