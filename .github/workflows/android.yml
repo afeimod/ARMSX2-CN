@@ -98,16 +98,30 @@ jobs:
         run: echo "sdk.dir=${ANDROID_SDK_ROOT}" > ARMSX2/local.properties
 
       - name: Decode release keystore
-        if: ${{ env.BUILD_TYPE == 'Release' && secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        # NB: keep `if` free of `secrets.*` — the secrets context is
+        # not available in `if` expressions on PRs from forks, which
+        # makes the workflow fail to even start evaluating. The
+        # actual guard is in the shell below.
+        if: env.BUILD_TYPE == 'Release'
         run: |
+          set -e
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret — falling back to debug signing config"
+            exit 0
+          fi
           mkdir -p ~/.gradle
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ~/.gradle/release.keystore
           ls -la ~/.gradle/release.keystore
 
       - name: Inject signing config
-        if: ${{ env.BUILD_TYPE == 'Release' && secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        if: env.BUILD_TYPE == 'Release'
         working-directory: ARMSX2
         run: |
+          set -e
+          if [ ! -f /root/.gradle/release.keystore ]; then
+            echo "release.keystore not present — skipping signing config injection"
+            exit 0
+          fi
           cat >> gradle.properties <<EOF
           ARMSX2_RELEASE_STORE_FILE=/root/.gradle/release.keystore
           ARMSX2_RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
