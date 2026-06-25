@@ -119,4 +119,286 @@
          Toolbar / Tests button
          ============================================================ -->
     <string name="toolbar_value_empty">—</string>
+
+    <!-- ============================================================
+         settings/AudioTab.kt
+         ============================================================ -->
+    <string name="audio_section_title">PS2 audio (SPU2) output. Volume/mute apply instantly; the rest reapply the moment you change them.</string>
+    <string name="audio_volume">Volume</string>
+    <string name="audio_mute">Mute</string>
+    <string name="audio_time_stretch">Time Stretch</string>
+    <string name="audio_time_stretch_help">Keeps audio pitch stable when emulation speed varies. Off = a bit less CPU, but pitch/clock can drift.</string>
+    <string name="audio_buffer">Audio Buffer</string>
+    <string name="audio_buffer_help">Bigger buffer = fewer crackles/dropouts but more latency. Raise this if audio stutters on low-end devices.</string>
+    <string name="audio_output_latency">Output Latency</string>
+    <string name="audio_output_latency_help">Target output latency. Lower is more responsive; higher is safer against dropouts.</string>
+    <string name="audio_ff_volume">Fast-Forward Volume</string>
+    <string name="audio_ff_volume_help">Output volume while fast-forwarding.</string>
+
+    <!-- ============================================================
+         settings/FixesTab.kt
+         ============================================================ -->
+    <string name="fixes_section_hardware">Hardware Fixes</string>
+    <string name="fixes_section_upscaling">Upscaling Fixes</string>
+    <string name="fixes_section_display">Display Fixes</string>
+    <string name="fixes_display_help">PCRTC / presentation fixes for the displayed image. Anti-Blur is on by default; the rest are off unless a game needs them.</string>
+    <string name="fixes_anti_blur">Anti-Blur</string>
+    <string name="fixes_anti_blur_help">Reduces the blur PCSX2 adds to mimic the PS2\'s blend. On by default.</string>
+    <string name="fixes_screen_offsets">Screen Offsets</string>
+    <string name="fixes_screen_offsets_help">Applies the PCRTC screen offsets (centres the image like real hardware).</string>
+    <string name="fixes_show_overscan">Show Overscan</string>
+    <string name="fixes_show_overscan_help">Shows the overscan border area some games render into.</string>
+    <string name="fixes_disable_interlace_offset">Disable Interlace Offset</string>
+    <string name="fixes_disable_interlace_offset_help">Removes the interlace field offset; can stop shimmer but may add combing.</string>
+    <string name="fixes_sync_to_host_refresh">Sync To Host Refresh</string>
+    <string name="fixes_sync_to_host_refresh_help">Paces emulation to your screen\'s refresh rate for smoother scrolling.</string>
+    <string name="fixes_disable_framebuffer_fetch">Disable Framebuffer Fetch</string>
+    <string name="fixes_disable_framebuffer_fetch_help">Disables the framebuffer-fetch blending path. Diagnostic / compatibility.</string>
+    <string name="fixes_override_texture_barriers">Override Texture Barriers</string>
+    <string name="fixes_override_texture_barriers_help">Forces the renderer\'s texture-barrier support on/off. Auto is recommended.</string>
+    <string name="fixes_hw_accurate_alpha_test">HW Accurate Alpha Test</string>
+    <string name="fixes_hw_accurate_alpha_test_help">More accurate hardware alpha testing. Fixes some transparency artifacts; small speed cost.</string>
+    <string name="fixes_disable_vertex_shader_expand">Disable Vertex Shader Expand</string>
+    <string name="fixes_disable_vertex_shader_expand_help">Forces CPU vertex expansion instead of the vertex shader. Renderer-init — restart the game to apply.</string>
+    <string name="fixes_use_blit_swap_chain">Use Blit Swap Chain</string>
+    <string name="fixes_use_blit_swap_chain_help">Uses a blit present model instead of flip. Renderer-init — restart the game to apply.</string>
+    <string name="fixes_disable_shader_cache">Disable Shader Cache</string>
+    <string name="fixes_disable_shader_cache_help">Don\'t cache compiled shaders to disk (recompiles each launch). Renderer-init — restart the game to apply.</string>
+    <string name="fixes_integer_scaling">Integer Scaling</string>
+    <string name="fixes_integer_scaling_help">Scales the image by whole-number factors for crisp, even pixels.</string>
+    <string name="fixes_dithering">Dithering</string>
+    <string name="fixes_dithering_help">Reduces colour banding. Unscaled matches the PS2 most closely.</string>
+    <string name="fixes_vsync_queue_size">Vsync Queue Size</string>
+    <string name="fixes_vsync_queue_size_help">Frames the GS thread may queue ahead. Higher can smooth pacing; adds latency.</string>
+    <string name="fixes_upscaling_help">Only active when upscaling above Native. They reduce alignment/seam/colour artifacts at the cost of speed.</string>
+    <string name="fixes_half_pixel_offset">Half-Pixel Offset</string>
+    <string name="fixes_half_pixel_offset_help">Fixes shifted or blurry geometry/textures in some upscaled games.</string>
+    <string name="fixes_round_sprite">Round Sprite</string>
+    <string name="fixes_round_sprite_help">Rounds sprite coordinates to reduce seams or lines in 2D elements.</string>
+    <string name="fixes_bilinear_filter">Bilinear Filter</string>
+    <string name="fixes_bilinear_filter_help">Changes bilinear filtering behavior for upscaled textures.</string>
+    <string name="fixes_vertical_stretch">Vertical Stretch</string>
+    <string name="fixes_vertical_stretch_help">Fixes vertical lines/gaps in some 2D games when upscaling.</string>
+    <string name="fixes_merge_sprites">Merge Sprites</string>
+    <string name="fixes_merge_sprites_help">Merges adjacent post-process sprites to remove seams.</string>
+    <string name="fixes_force_even_sprite_positions">Force Even Sprite Positions</string>
+    <string name="fixes_force_even_sprite_positions_help">Forces even sprite/texture positions (UserHacks_ForceEvenSpritePosition).</string>
+    <string name="fixes_palette_texture">Palette Texture</string>
+    <string name="fixes_palette_texture_help">Draws palette textures at native res to fix colour issues when upscaling.</string>
+    <string name="fixes_texture_offset_x">Texture Offset X</string>
+    <string name="fixes_texture_offset_x_help">Horizontal texture-coordinate offset. 0 unless a game needs it.</string>
+    <string name="fixes_texture_offset_y">Texture Offset Y</string>
+    <string name="fixes_texture_offset_y_help">Vertical texture-coordinate offset. 0 unless a game needs it.</string>
+    <string name="fixes_force_user_hacks">Force User Hacks</string>
+    <string name="fixes_force_user_hacks_help">Force-enables the PCSX2 hardware-fix layer (UserHacks).</string>
+    <string name="fixes_alpha_prite">Alpha Sprite</string>
+    <string name="fixes_alpha_prite_help">Helps some sprite/alpha effects update correctly; can cost performance.</string>
+    <string name="fixes_rt_sampling">RT Sampling</string>
+    <string name="fixes_rt_sampling_help">Helps effects that sample from render targets; can alter or slow rendering.</string>
+    <string name="fixes_clut_render">CLUT Render</string>
+    <string name="fixes_clut_render_help">Palette handling hack for games with broken colours or CLUT effects.</string>
+    <string name="fixes_sprite_bandwidth">Sprite Bandwidth</string>
+    <string name="fixes_sprite_bandwidth_help">CPU sprite-render bandwidth limit. Useful only for specific sprite glitches.</string>
+    <string name="fixes_sprite_cpu">Sprite CPU</string>
+    <string name="fixes_sprite_cpu_help">Renders selected sprite work on CPU to fix difficult hardware-renderer issues.</string>
+    <string name="fixes_cpu_clut">CPU CLUT</string>
+    <string name="fixes_cpu_clut_help">Renders CLUTs on the CPU to fix palette/colour issues in some games.</string>
+    <string name="fixes_depth_zfb">Depth ZFB</string>
+    <string name="fixes_depth_zfb_help">Depth-buffer hack that can reduce z-fighting in some hardware-rendered games.</string>
+    <string name="fixes_palette_conversion">Palette Conversion</string>
+    <string name="fixes_palette_conversion_help">Does palette conversion on the GPU. Can help or hurt depending on the game.</string>
+    <string name="fixes_fb_conversion">FB Conversion</string>
+    <string name="fixes_fb_conversion_help">Converts framebuffer formats on the CPU to fix specific effects.</string>
+    <string name="fixes_flush_rt_after_draw">Flush RT After Draw</string>
+    <string name="fixes_flush_rt_after_draw_help">Flushes render targets back to memory when closing them.</string>
+    <string name="fixes_preload_frame_data">Preload Frame Data</string>
+    <string name="fixes_preload_frame_data_help">Uploads the previous frame\'s data before drawing. Fixes some effects.</string>
+    <string name="fixes_texture_inside_rt">Texture Inside RT</string>
+    <string name="fixes_texture_inside_rt_help">Estimates the used texture region. Helps games that read odd regions.</string>
+    <string name="fixes_command_buffer">Command Buffer</string>
+    <string name="fixes_command_buffer_help">Buffers draws before submitting. Can help a few games; diagnostic.</string>
+    <string name="fixes_disable_depth_conversion">Disable Depth Conversion</string>
+    <string name="fixes_disable_depth_conversion_help">Disables depth emulation. Faster but breaks many games — last resort.</string>
+    <string name="fixes_disable_invalidation">Disable Invalidation</string>
+    <string name="fixes_disable_invalidation_help">Disables partial texture-cache source invalidation.</string>
+    <string name="fixes_skip_above">Skip Draw Start</string>
+    <string name="fixes_skip_above_help">First draw call to skip (UserHacks_SkipDraw). 0 = off. Advanced.</string>
+    <string name="fixes_skip_below">Skip Draw End</string>
+    <string name="fixes_skip_below_help">Last draw call to skip. 0 = off. Advanced.</string>
+    <string name="fixes_gpu_busy_wait">GPU Busy Wait</string>
+    <string name="fixes_gpu_busy_wait_help">Busy-waits the GPU on readbacks to reduce stalls. Can raise power use.</string>
+    <string name="fixes_cpu_busy_wait">CPU Busy Wait</string>
+    <string name="fixes_cpu_busy_wait_help">Busy-waits the CPU on readbacks to reduce stalls. Can raise power use.</string>
+    <string name="fixes_sw_auto_flush">SW Auto Flush</string>
+    <string name="fixes_sw_auto_flush_help">Software-renderer auto-flush. On by default for correctness.</string>
+    <string name="fixes_sw_mipmap">SW Mipmap</string>
+    <string name="fixes_sw_mipmap_help">Software-renderer mipmapping. On by default.</string>
+    <string name="fixes_sw_threads">SW Threads</string>
+    <string name="fixes_sw_threads_help">Extra worker threads for the software renderer. 0 = single-threaded.</string>
+    <string name="fixes_sw_tile_height">SW Tile Height</string>
+    <string name="fixes_sw_tile_height_help">Software-renderer tile height per thread. Default 4. Restart the game to apply.</string>
+
+    <!-- ============================================================
+         settings/HotkeysTab.kt
+         ============================================================ -->
+    <string name="hotkeys_section_title">Controller hotkeys</string>
+    <string name="hotkeys_section_help">Bind physical buttons (back paddles work too) to in-game actions — the bindings live in this tab and persist across sessions.</string>
+    <string name="hotkeys_clear">Clear</string>
+    <string name="hotkeys_capture_hint">Press 1 button, or 2 together…</string>
+    <string name="hotkeys_not_set">Not set</string>
+
+    <!-- ============================================================
+         settings/OverlayTab.kt
+         ============================================================ -->
+    <string name="overlay_section_help">Show or hide parts of the performance overlay. Turning GPU off also reduces the overlay\'s polling cost.</string>
+    <string name="overlay_show_gpu">GPU usage (saves perf when off)</string>
+    <string name="overlay_show_cpu">CPU usage</string>
+    <string name="overlay_show_vps">VPS (vblanks/sec)</string>
+    <string name="overlay_show_internal_res">Internal resolution</string>
+    <string name="overlay_show_gs_stats">GS statistics</string>
+    <string name="overlay_show_frame_times">Frame times graph</string>
+
+    <!-- ============================================================
+         settings/PadTab.kt
+         ============================================================ -->
+    <string name="pad_section_help">Tap an action, then press a physical controller button.</string>
+    <string name="pad_reset_mappings">Reset Controller Mappings</string>
+    <string name="pad_section_hotkeys">Hotkeys</string>
+    <string name="pad_section_touch">On-screen controls</string>
+    <string name="pad_touch_help">On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings trigger).</string>
+    <string name="pad_touch_never">Never</string>
+    <string name="pad_touch_auto">Auto</string>
+    <string name="pad_button_capture_hint">Press a button...</string>
+
+    <!-- ============================================================
+         settings/RecompilerTab.kt
+         ============================================================ -->
+    <string name="recomp_section_help">Disabling a recompiler drops to interpreter — debug only, expect a heavy slowdown.</string>
+    <string name="recomp_ee">EE (R5900)</string>
+    <string name="recomp_iop">IOP (R3000)</string>
+    <string name="recomp_fastmem">Fastmem</string>
+
+    <!-- ============================================================
+         settings/RendererBackendSection.kt
+         ============================================================ -->
+    <string name="renderer_graphics_api">Graphics API</string>
+    <string name="renderer_apply_restart">Apply &amp; Restart</string>
+    <string name="renderer_api_auto">Auto</string>
+    <string name="renderer_api_opengl">OpenGL</string>
+    <string name="renderer_api_vulkan">Vulkan</string>
+    <string name="renderer_api_software">Software</string>
+    <string name="renderer_api_help">Graphics API / driver changes apply on the next renderer start.</string>
+    <string name="renderer_import_failed">Couldn\'t import that file. It needs an AdrenoToolsDrivers-style .zip (meta.json + libvulkan_freedreno.so).</string>
+    <string name="renderer_gpu_driver">GPU Driver</string>
+    <string name="renderer_gpu_driver_help">Replace the system Vulkan driver with Mesa Turnip or another Adreno driver. Recommended for Adreno-6xx/7xx GPUs.</string>
+    <string name="renderer_driver_default">Default</string>
+    <string name="renderer_driver_system">System Vulkan driver</string>
+    <string name="renderer_driver_installed">Installed</string>
+    <string name="renderer_driver_importing">Importing…</string>
+    <string name="renderer_driver_import_zip">Import .zip</string>
+    <string name="renderer_driver_hide_online">Hide online</string>
+    <string name="renderer_driver_browse_online">Browse online</string>
+    <string name="renderer_driver_network_failed">Couldn\'t reach github.com/K11MCH1/AdrenoToolsDrivers. Check your connection and try again.</string>
+    <string name="renderer_driver_loading">Loading driver list…</string>
+    <string name="renderer_driver_install_failed">Install failed for %1$s. The download or extract step errored — try again.</string>
+    <string name="renderer_driver_active">Active</string>
+    <string name="renderer_driver_delete">Delete</string>
+    <string name="renderer_driver_installing">Installing…</string>
+    <string name="renderer_driver_use">Use</string>
+    <string name="renderer_driver_install">Install</string>
+
+    <!-- ============================================================
+         settings/RendererTab.kt
+         ============================================================ -->
+    <string name="renderer_internal_res_title">Internal resolution. Higher values are sharper but can expose game-specific bloom or alignment artifacts.</string>
+    <string name="renderer_display_mode_title">Controls how the PS2 image fits the screen.</string>
+    <string name="renderer_display_mode_stretch">Stretch</string>
+    <string name="renderer_deinterlacing_title">Changes how interlaced video is displayed. Auto is safest.</string>
+    <string name="renderer_deinterlacing_off">Off</string>
+    <string name="renderer_deinterlacing_weave_tff">Weave TFF</string>
+    <string name="renderer_deinterlacing_weave_bff">Weave BFF</string>
+    <string name="renderer_deinterlacing_bob_tff">Bob TFF</string>
+    <string name="renderer_deinterlacing_bob_bff">Bob BFF</string>
+    <string name="renderer_deinterlacing_blend_tff">Blend TFF</string>
+    <string name="renderer_deinterlacing_blend_bff">Blend BFF</string>
+    <string name="renderer_deinterlacing_adapt_tff">Adapt TFF</string>
+    <string name="renderer_deinterlacing_adapt_bff">Adapt BFF</string>
+    <string name="renderer_texture_filtering">Texture Filtering</string>
+    <string name="renderer_texture_filtering_nearest">Nearest</string>
+    <string name="renderer_texture_filtering_forced">Forced</string>
+    <string name="renderer_texture_filtering_sprite">Sprite</string>
+    <string name="renderer_texture_filtering_help">Controls texture smoothing. PS2 is safest; Forced can soften or brighten some games.</string>
+    <string name="renderer_texture_preloading">Texture Preloading</string>
+    <string name="renderer_texture_preloading_partial">Partial</string>
+    <string name="renderer_texture_preloading_full">Full</string>
+    <string name="renderer_texture_preloading_help">Preloads textures to avoid missing or late texture uploads. Full is the safe default.</string>
+    <string name="renderer_hw_download">Hardware Download Mode</string>
+    <string name="renderer_hw_download_accurate">Accurate</string>
+    <string name="renderer_hw_download_force_full">Force Full</string>
+    <string name="renderer_hw_download_no_readbacks">No Readbacks</string>
+    <string name="renderer_hw_download_unsync">Unsync</string>
+    <string name="renderer_hw_download_disabled">Disabled</string>
+    <string name="renderer_hw_download_help">Readback accuracy for effects that need GPU data. Faster modes may break effects.</string>
+    <string name="renderer_crt_shader">CRT / TV Shader</string>
+    <string name="renderer_crt_scanline">Scanline</string>
+    <string name="renderer_crt_diagonal">Diagonal</string>
+    <string name="renderer_crt_tri">Tri</string>
+    <string name="renderer_crt_wave">Wave</string>
+    <string name="renderer_crt_lottes">Lottes</string>
+    <string name="renderer_crt_nxagss">NxAGSS</string>
+    <string name="renderer_crt_help">Post-process CRT/TV filters. Applies live on supported renderers.</string>
+    <string name="renderer_vsync">VSync</string>
+    <string name="renderer_vsync_help">Sync presentation to the display refresh — less tearing/smoother, slightly more latency. Restart the game to apply.</string>
+    <string name="renderer_shadeboost">Shadeboost</string>
+    <string name="renderer_shadeboost_help">Post-process colour controls for brightness, contrast, saturation, and gamma.</string>
+    <string name="renderer_brightness">Brightness</string>
+    <string name="renderer_contrast">Contrast</string>
+    <string name="renderer_saturation">Saturation</string>
+    <string name="renderer_gamma">Gamma</string>
+    <string name="renderer_texture_replacements">Texture Replacements</string>
+    <string name="renderer_texture_replacements_load">Loads replacement textures from the active game\'s texture folder.</string>
+    <string name="renderer_texture_replacements_async">Loads replacements in the background to reduce stalls.</string>
+    <string name="renderer_texture_replacements_scan">Scans replacements at boot. Slower startup, fewer in-game hitches.</string>
+    <string name="renderer_texture_replacements_dump">Writes textures used by the game to disk for pack creation.</string>
+    <string name="renderer_texture_replacements_log">Shows texture replacement status messages in-game.</string>
+    <string name="renderer_blending">Blending</string>
+    <string name="renderer_blending_basic">Basic</string>
+    <string name="renderer_blending_high">High</string>
+    <string name="renderer_blending_help">Controls alpha/blending precision. Basic is faster; higher can fix effects.</string>
+    <string name="renderer_mipmaps">Use Mipmaps</string>
+    <string name="renderer_mipmaps_help">Uses mipmaps in hardware renderers. Can fix texture shimmer or broken effects.</string>
+    <string name="renderer_mip_filter">Mip Filter</string>
+    <string name="renderer_mip_filter_auto">Auto</string>
+    <string name="renderer_mip_filter_help">Mip texture filtering. Auto is safest for compatibility.</string>
+    <string name="renderer_anisotropic">Anisotropic</string>
+    <string name="renderer_anisotropic_help">Sharpens angled textures. Higher values can cost GPU time.</string>
+    <string name="renderer_gpu_workarounds">GPU Workarounds</string>
+    <string name="renderer_gpu_workarounds_help">Overrides Android GPU workaround selection. Auto is recommended.</string>
+
+    <!-- ============================================================
+         ui/touch/TouchControlsOverlay.kt
+         ============================================================ -->
+    <string name="touch_open_settings">Open in-game settings</string>
+    <string name="touch_dpad_up">DPad up</string>
+    <string name="touch_dpad_down">DPad down</string>
+    <string name="touch_dpad_left">DPad left</string>
+    <string name="touch_dpad_right">DPad right</string>
+    <string name="touch_save">Save</string>
+    <string name="touch_discard">Discard</string>
+    <string name="touch_reset">Reset</string>
+    <string name="touch_profiles">Profiles</string>
+    <string name="touch_multitouch_on">Multi-Touch On</string>
+    <string name="touch_multitouch_off">Multi-Touch Off</string>
+    <string name="touch_profiles_title">Touch Control Profiles</string>
+    <string name="touch_delete">Delete</string>
+    <string name="touch_save_as_hint">Save current layout as new profile:</string>
+    <string name="touch_profile_name">Profile name</string>
+    <string name="touch_save_as">Save As</string>
+    <string name="touch_close">Close</string>
+
+    <!-- ============================================================
+         SettingsWidgets.kt / PadTab.kt
+         ============================================================ -->
+    <string name="common_new_card">New Card</string>
+    <string name="common_off">Off</string>
 </resources>

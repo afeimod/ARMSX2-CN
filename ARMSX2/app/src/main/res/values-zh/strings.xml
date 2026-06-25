@@ -119,4 +119,286 @@
          Toolbar / Tests button
          ============================================================ -->
     <string name="toolbar_value_empty">—</string>
+
+    <!-- ============================================================
+         settings/AudioTab.kt
+         ============================================================ -->
+    <string name="audio_section_title">PS2 音频 (SPU2) 输出。音量 / 静音即时生效，其余选项在你修改后立即重应用。</string>
+    <string name="audio_volume">音量</string>
+    <string name="audio_mute">静音</string>
+    <string name="audio_time_stretch">时间拉伸</string>
+    <string name="audio_time_stretch_help">保持音频音高不随模拟速度变化。关闭后 CPU 占用略低，但音高 / 时钟会漂移。</string>
+    <string name="audio_buffer">音频缓冲</string>
+    <string name="audio_buffer_help">缓冲越大越不易出剌 / 丢帧，但延迟增加。低端设备声音卡顿可调大此项。</string>
+    <string name="audio_output_latency">输出延迟</string>
+    <string name="audio_output_latency_help">目标输出延迟。越低响应越灵敏；越高越不容易丢帧。</string>
+    <string name="audio_ff_volume">快进音量</string>
+    <string name="audio_ff_volume_help">快进时的输出音量。</string>
+
+    <!-- ============================================================
+         settings/FixesTab.kt
+         ============================================================ -->
+    <string name="fixes_section_hardware">硬件修复</string>
+    <string name="fixes_section_upscaling">放大修复</string>
+    <string name="fixes_section_display">显示修复</string>
+    <string name="fixes_display_help">PCRTC / 显示相关修复，默认开启“去模糊”，其他项仅在游戏需要时打开。</string>
+    <string name="fixes_anti_blur">去模糊</string>
+    <string name="fixes_anti_blur_help">减少 PCSX2 为了模拟 PS2 混合效果添加的模糊，默认开启。</string>
+    <string name="fixes_screen_offsets">屏幕偏移</string>
+    <string name="fixes_screen_offsets_help">应用 PCRTC 屏幕偏移（以与真实硬件相同的方式居中图像）。</string>
+    <string name="fixes_show_overscan">显示过扫描</string>
+    <string name="fixes_show_overscan_help">显示部分游戏会渲染出的过扫描边框区域。</string>
+    <string name="fixes_disable_interlace_offset">禁用隔行偏移</string>
+    <string name="fixes_disable_interlace_offset_help">去掉隔行场偏移；可减少肉烁但可能出现梳齿。</string>
+    <string name="fixes_sync_to_host_refresh">同步到屏幕刷新率</string>
+    <string name="fixes_sync_to_host_refresh_help">以你屏幕的刷新率驱动模拟，滚动更平滑。</string>
+    <string name="fixes_disable_framebuffer_fetch">禁用帧缓冲读取</string>
+    <string name="fixes_disable_framebuffer_fetch_help">关闭 framebuffer-fetch 混合路径。诊断 / 兼容性用。</string>
+    <string name="fixes_override_texture_barriers">覆盖纹理屏障</string>
+    <string name="fixes_override_texture_barriers_help">强制启用 / 关闭渲染器的 texture-barrier 支持。推荐 Auto。</string>
+    <string name="fixes_hw_accurate_alpha_test">硬件精确 Alpha 测试</string>
+    <string name="fixes_hw_accurate_alpha_test_help">更精确的硬件 alpha 测试，修复部分透明度问题；轻微性能开销。</string>
+    <string name="fixes_disable_vertex_shader_expand">禁用顶点着色器展开</string>
+    <string name="fixes_disable_vertex_shader_expand_help">强制用 CPU 进行顶点展开而非顶点着色器。渲染初始化生效 —— 需要重启游戏。</string>
+    <string name="fixes_use_blit_swap_chain">使用 Blit 交换链</string>
+    <string name="fixes_use_blit_swap_chain_help">使用 blit present 模型代替 flip。渲染初始化生效 —— 需要重启游戏。</string>
+    <string name="fixes_disable_shader_cache">禁用着色器缓存</string>
+    <string name="fixes_disable_shader_cache_help">不在磁盘上缓存编译后的着色器（每次启动重编译）。渲染初始化生效 —— 需要重启游戏。</string>
+    <string name="fixes_integer_scaling">整数倍缩放</string>
+    <string name="fixes_integer_scaling_help">以整数倍缩放图像，像素干净整齐。</string>
+    <string name="fixes_dithering">抖动</string>
+    <string name="fixes_dithering_help">减少色带。Unscaled 与 PS2 最接近。</string>
+    <string name="fixes_vsync_queue_size">VSync 队列大小</string>
+    <string name="fixes_vsync_queue_size_help">GS 线程可提前排队的帧数。调高可平滑节奏但增加延迟。</string>
+    <string name="fixes_upscaling_help">仅在高于 Native 放大时生效。减少对齐 / 接缝 / 颜色伪影，代价是性能。</string>
+    <string name="fixes_half_pixel_offset">半像素偏移</string>
+    <string name="fixes_half_pixel_offset_help">修复部分放大后出现的几何 / 纹理偏移或模糊问题。</string>
+    <string name="fixes_round_sprite">取整精灵坐标</string>
+    <string name="fixes_round_sprite_help">将精灵坐标取整，减少 2D 元素的接缝 / 线条。</string>
+    <string name="fixes_bilinear_filter">双线性过滤</string>
+    <string name="fixes_bilinear_filter_help">修改放大后纹理的双线性过滤行为。</string>
+    <string name="fixes_vertical_stretch">垂直拉伸</string>
+    <string name="fixes_vertical_stretch_help">修复部分 2D 游戏放大后的竖线 / 间隙。</string>
+    <string name="fixes_merge_sprites">合并精灵</string>
+    <string name="fixes_merge_sprites_help">合并相邻的后处理精灵以消除接缝。</string>
+    <string name="fixes_force_even_sprite_positions">强制偶数精灵位置</string>
+    <string name="fixes_force_even_sprite_positions_help">强制精灵 / 纹理位置为偶数 (UserHacks_ForceEvenSpritePosition)。</string>
+    <string name="fixes_palette_texture">调色板纹理</string>
+    <string name="fixes_palette_texture_help">以原生分辨率绘制调色板纹理，放大后修正颜色问题。</string>
+    <string name="fixes_texture_offset_x">纹理 X 偏移</string>
+    <string name="fixes_texture_offset_x_help">水平纹理坐标偏移。0 表示不偏移。</string>
+    <string name="fixes_texture_offset_y">纹理 Y 偏移</string>
+    <string name="fixes_texture_offset_y_help">垂直纹理坐标偏移。0 表示不偏移。</string>
+    <string name="fixes_force_user_hacks">强制启用 User Hacks</string>
+    <string name="fixes_force_user_hacks_help">强制启用 PCSX2 硬件修复层 (UserHacks)。</string>
+    <string name="fixes_alpha_prite">Alpha 精灵</string>
+    <string name="fixes_alpha_prite_help">帮助部分精灵 / alpha 效果正确更新；可能损失性能。</string>
+    <string name="fixes_rt_sampling">RT 采样</string>
+    <string name="fixes_rt_sampling_help">帮助从渲染目标采样的效果；可能改变或减慢渲染。</string>
+    <string name="fixes_clut_render">CLUT 渲染</string>
+    <string name="fixes_clut_render_help">针对颜色 / CLUT 效果破损游戏的调色板 hack。</string>
+    <string name="fixes_sprite_bandwidth">精灵带宽</string>
+    <string name="fixes_sprite_bandwidth_help">CPU 精灵渲染带宽限制，仅对特定精灵伪影有用。</string>
+    <string name="fixes_sprite_cpu">精灵 CPU</string>
+    <string name="fixes_sprite_cpu_help">在 CPU 上渲染部分精灵以修复难缠的硬件渲染问题。</string>
+    <string name="fixes_cpu_clut">CPU CLUT</string>
+    <string name="fixes_cpu_clut_help">在 CPU 上渲染 CLUT，修复部分游戏的调色板 / 颜色问题。</string>
+    <string name="fixes_depth_zfb">深度 ZFB</string>
+    <string name="fixes_depth_zfb_help">深度缓冲 hack，可减少部分硬件渲染游戏的 z-fighting。</string>
+    <string name="fixes_palette_conversion">调色板转换</string>
+    <string name="fixes_palette_conversion_help">在 GPU 上做调色板转换，可能帮助或伤害性能，取决于游戏。</string>
+    <string name="fixes_fb_conversion">FB 转换</string>
+    <string name="fixes_fb_conversion_help">在 CPU 上转换帧缓冲格式，修复特定效果。</string>
+    <string name="fixes_flush_rt_after_draw">绘制后刷 RT</string>
+    <string name="fixes_flush_rt_after_draw_help">关闭渲染目标时将其刷回内存。</string>
+    <string name="fixes_preload_frame_data">预加载帧数据</string>
+    <string name="fixes_preload_frame_data_help">绘制前上传上一帧数据。修复部分效果。</string>
+    <string name="fixes_texture_inside_rt">RT 内部纹理</string>
+    <string name="fixes_texture_inside_rt_help">估算使用的纹理区域。帮助那些读奇怪区域的游戏。</string>
+    <string name="fixes_command_buffer">命令缓冲</string>
+    <string name="fixes_command_buffer_help">缓冲 draw call 后再提交。可帮助个别游戏；诊断用。</string>
+    <string name="fixes_disable_depth_conversion">禁用深度转换</string>
+    <string name="fixes_disable_depth_conversion_help">禁用深度模拟。更快但会破坏很多游戏，末选项。</string>
+    <string name="fixes_disable_invalidation">禁用失效检查</string>
+    <string name="fixes_disable_invalidation_help">禁用部分纹理缓存的源失效检查。</string>
+    <string name="fixes_skip_above">跳过 Draw 起始</string>
+    <string name="fixes_skip_above_help">跳过的第一个 draw call (UserHacks_SkipDraw)。0 = 关闭。高级选项。</string>
+    <string name="fixes_skip_below">跳过 Draw 结束</string>
+    <string name="fixes_skip_below_help">跳过的最后一个 draw call。0 = 关闭。高级选项。</string>
+    <string name="fixes_gpu_busy_wait">GPU 忙等</string>
+    <string name="fixes_gpu_busy_wait_help">在 readback 上忙等 GPU，减少卡顿。可能会增加功耗。</string>
+    <string name="fixes_cpu_busy_wait">CPU 忙等</string>
+    <string name="fixes_cpu_busy_wait_help">在 readback 上忙等 CPU，减少卡顿。可能会增加功耗。</string>
+    <string name="fixes_sw_auto_flush">软件渲染自动刷新</string>
+    <string name="fixes_sw_auto_flush_help">软件渲染自动刷新，默认开启以保证正确性。</string>
+    <string name="fixes_sw_mipmap">软件渲染 Mipmap</string>
+    <string name="fixes_sw_mipmap_help">软件渲染 mipmapping，默认开启。</string>
+    <string name="fixes_sw_threads">软件渲染线程数</string>
+    <string name="fixes_sw_threads_help">软件渲染额外的工作线程数。0 = 单线程。</string>
+    <string name="fixes_sw_tile_height">软件渲染块高</string>
+    <string name="fixes_sw_tile_height_help">每线程软件渲染的块高。默认 4。需重启游戏生效。</string>
+
+    <!-- ============================================================
+         settings/HotkeysTab.kt
+         ============================================================ -->
+    <string name="hotkeys_section_title">手柄热键</string>
+    <string name="hotkeys_section_help">把物理按键（背键也可）绑定到游戏内动作 —— 绑定存在这个 tab 里，会在重启后保留。</string>
+    <string name="hotkeys_clear">清除</string>
+    <string name="hotkeys_capture_hint">按 1 个键，或同时按 2 个键…</string>
+    <string name="hotkeys_not_set">未设置</string>
+
+    <!-- ============================================================
+         settings/OverlayTab.kt
+         ============================================================ -->
+    <string name="overlay_section_help">显示 / 隐藏性能悬浮窗的各个部分。关闭 GPU 也可减少悬浮窗的轮询开销。</string>
+    <string name="overlay_show_gpu">GPU 使用率（关闭后节省性能）</string>
+    <string name="overlay_show_cpu">CPU 使用率</string>
+    <string name="overlay_show_vps">VPS (vblanks/秒)</string>
+    <string name="overlay_show_internal_res">内部分辨率</string>
+    <string name="overlay_show_gs_stats">GS 统计</string>
+    <string name="overlay_show_frame_times">帧时间图</string>
+
+    <!-- ============================================================
+         settings/PadTab.kt
+         ============================================================ -->
+    <string name="pad_section_help">点一个动作，然后按手柄上的一个物理键。</string>
+    <string name="pad_reset_mappings">重置手柄映射</string>
+    <string name="pad_section_hotkeys">热键</string>
+    <string name="pad_section_touch">屏上控件</string>
+    <string name="pad_touch_help">屏上触控按钮。永不 = 总是隐藏（用于纯手柄设备 —— 也会隐藏设置入口）。</string>
+    <string name="pad_touch_never">永不</string>
+    <string name="pad_touch_auto">自动</string>
+    <string name="pad_button_capture_hint">按一个键...</string>
+
+    <!-- ============================================================
+         settings/RecompilerTab.kt
+         ============================================================ -->
+    <string name="recomp_section_help">禁用某项重编译器会回退到解释执行 —— 仅供调试，会严重变慢。</string>
+    <string name="recomp_ee">EE (R5900)</string>
+    <string name="recomp_iop">IOP (R3000)</string>
+    <string name="recomp_fastmem">Fastmem</string>
+
+    <!-- ============================================================
+         settings/RendererBackendSection.kt
+         ============================================================ -->
+    <string name="renderer_graphics_api">图形 API</string>
+    <string name="renderer_apply_restart">应用并重启</string>
+    <string name="renderer_api_auto">自动</string>
+    <string name="renderer_api_opengl">OpenGL</string>
+    <string name="renderer_api_vulkan">Vulkan</string>
+    <string name="renderer_api_software">软件</string>
+    <string name="renderer_api_help">图形 API / 驱动改动会在下次渲染器启动时生效。</string>
+    <string name="renderer_import_failed">无法导入该文件。需要 AdrenoToolsDrivers 格式的 .zip（meta.json + libvulkan_freedreno.so）。</string>
+    <string name="renderer_gpu_driver">GPU 驱动</string>
+    <string name="renderer_gpu_driver_help">用 Mesa Turnip 或其他 Adreno 驱动替换系统 Vulkan 驱动。Adreno 6xx/7xx 推荐开启。</string>
+    <string name="renderer_driver_default">默认</string>
+    <string name="renderer_driver_system">系统 Vulkan 驱动</string>
+    <string name="renderer_driver_installed">已安装</string>
+    <string name="renderer_driver_importing">导入中…</string>
+    <string name="renderer_driver_import_zip">导入 .zip</string>
+    <string name="renderer_driver_hide_online">隐藏在线</string>
+    <string name="renderer_driver_browse_online">浏览在线</string>
+    <string name="renderer_driver_network_failed">无法连接 github.com/K11MCH1/AdrenoToolsDrivers。检查网络后重试。</string>
+    <string name="renderer_driver_loading">正在加载驱动列表…</string>
+    <string name="renderer_driver_install_failed">%1$s 安装失败。下载或解压步骤出错 —— 请重试。</string>
+    <string name="renderer_driver_active">已激活</string>
+    <string name="renderer_driver_delete">删除</string>
+    <string name="renderer_driver_installing">安装中…</string>
+    <string name="renderer_driver_use">使用</string>
+    <string name="renderer_driver_install">安装</string>
+
+    <!-- ============================================================
+         settings/RendererTab.kt
+         ============================================================ -->
+    <string name="renderer_internal_res_title">内部分辨率。值越大越锐利，但可能暴露游戏特有的 bloom / 对齐伪影。</string>
+    <string name="renderer_display_mode_title">控制 PS2 画面如何适应屏幕。</string>
+    <string name="renderer_display_mode_stretch">拉伸</string>
+    <string name="renderer_deinterlacing_title">控制隔行视频的显示方式。Auto 最安全。</string>
+    <string name="renderer_deinterlacing_off">关</string>
+    <string name="renderer_deinterlacing_weave_tff">Weave TFF</string>
+    <string name="renderer_deinterlacing_weave_bff">Weave BFF</string>
+    <string name="renderer_deinterlacing_bob_tff">Bob TFF</string>
+    <string name="renderer_deinterlacing_bob_bff">Bob BFF</string>
+    <string name="renderer_deinterlacing_blend_tff">Blend TFF</string>
+    <string name="renderer_deinterlacing_blend_bff">Blend BFF</string>
+    <string name="renderer_deinterlacing_adapt_tff">Adapt TFF</string>
+    <string name="renderer_deinterlacing_adapt_bff">Adapt BFF</string>
+    <string name="renderer_texture_filtering">纹理过滤</string>
+    <string name="renderer_texture_filtering_nearest">最近邻</string>
+    <string name="renderer_texture_filtering_forced">强制双线性</string>
+    <string name="renderer_texture_filtering_sprite">精灵</string>
+    <string name="renderer_texture_filtering_help">控制纹理平滑方式。PS2 最安全；Forced 可能让部分游戏更柔和 / 更亮。</string>
+    <string name="renderer_texture_preloading">纹理预加载</string>
+    <string name="renderer_texture_preloading_partial">部分</string>
+    <string name="renderer_texture_preloading_full">完全</string>
+    <string name="renderer_texture_preloading_help">预加载纹理以避免缺失或滞后上传。Full 是安全默认。</string>
+    <string name="renderer_hw_download">硬件下载模式</string>
+    <string name="renderer_hw_download_accurate">精确</string>
+    <string name="renderer_hw_download_force_full">强制完全</string>
+    <string name="renderer_hw_download_no_readbacks">无 Readback</string>
+    <string name="renderer_hw_download_unsync">不同步</string>
+    <string name="renderer_hw_download_disabled">禁用</string>
+    <string name="renderer_hw_download_help">需要 GPU 数据的效果的回读精度。更快的模式可能破坏效果。</string>
+    <string name="renderer_crt_shader">CRT / 电视 着色器</string>
+    <string name="renderer_crt_scanline">扫描线</string>
+    <string name="renderer_crt_diagonal">对角</string>
+    <string name="renderer_crt_tri">Tri</string>
+    <string name="renderer_crt_wave">波</string>
+    <string name="renderer_crt_lottes">Lottes</string>
+    <string name="renderer_crt_nxagss">NxAGSS</string>
+    <string name="renderer_crt_help">后处理 CRT / 电视滤镜。在支持的渲染器上实时生效。</string>
+    <string name="renderer_vsync">VSync</string>
+    <string name="renderer_vsync_help">将画面显示与屏幕刷新同步 —— 减少撕裂 / 更平滑，延迟会略增。需重启游戏生效。</string>
+    <string name="renderer_shadeboost">Shadeboost</string>
+    <string name="renderer_shadeboost_help">后处理色彩控制：亮度、对比度、饱和度、伽马。</string>
+    <string name="renderer_brightness">亮度</string>
+    <string name="renderer_contrast">对比度</string>
+    <string name="renderer_saturation">饱和度</string>
+    <string name="renderer_gamma">伽马</string>
+    <string name="renderer_texture_replacements">纹理替换</string>
+    <string name="renderer_texture_replacements_load">从当前游戏的 texture 文件夹加载替换纹理。</string>
+    <string name="renderer_texture_replacements_async">在后台加载替换纹理以减少卡顿。</string>
+    <string name="renderer_texture_replacements_scan">启动时扫描替换纹理。启动变慢，但游戏中卡顿减少。</string>
+    <string name="renderer_texture_replacements_dump">将游戏使用的纹理写入磁盘以便制作资源包。</string>
+    <string name="renderer_texture_replacements_log">在游戏中显示纹理替换状态消息。</string>
+    <string name="renderer_blending">混合</string>
+    <string name="renderer_blending_basic">基础</string>
+    <string name="renderer_blending_high">高精度</string>
+    <string name="renderer_blending_help">控制 alpha / 混合精度。Basic 更快；高精度可修复部分效果。</string>
+    <string name="renderer_mipmaps">使用 Mipmap</string>
+    <string name="renderer_mipmaps_help">在硬件渲染器中使用 mipmap。可修复纹理闪动 / 错乱。</string>
+    <string name="renderer_mip_filter">Mip 过滤</string>
+    <string name="renderer_mip_filter_auto">自动</string>
+    <string name="renderer_mip_filter_help">Mip 纹理过滤方式。Auto 最安全，兼容性最好。</string>
+    <string name="renderer_anisotropic">各向异性</string>
+    <string name="renderer_anisotropic_help">锐化斜向纹理。值越大 GPU 开销越高。</string>
+    <string name="renderer_gpu_workarounds">GPU 兼容方案</string>
+    <string name="renderer_gpu_workarounds_help">覆盖 Android GPU 兼容方案的选择。推荐 Auto。</string>
+
+    <!-- ============================================================
+         ui/touch/TouchControlsOverlay.kt
+         ============================================================ -->
+    <string name="touch_open_settings">打开游戏内设置</string>
+    <string name="touch_dpad_up">方向键 上</string>
+    <string name="touch_dpad_down">方向键 下</string>
+    <string name="touch_dpad_left">方向键 左</string>
+    <string name="touch_dpad_right">方向键 右</string>
+    <string name="touch_save">保存</string>
+    <string name="touch_discard">放弃</string>
+    <string name="touch_reset">重置</string>
+    <string name="touch_profiles">配置</string>
+    <string name="touch_multitouch_on">多点触控 开</string>
+    <string name="touch_multitouch_off">多点触控 关</string>
+    <string name="touch_profiles_title">触控配置</string>
+    <string name="touch_delete">删除</string>
+    <string name="touch_save_as_hint">将当前布局另存为新配置：</string>
+    <string name="touch_profile_name">配置名称</string>
+    <string name="touch_save_as">另存为</string>
+    <string name="touch_close">关闭</string>
+
+    <!-- ============================================================
+         SettingsWidgets.kt / PadTab.kt
+         ============================================================ -->
+    <string name="common_new_card">新记忆卡</string>
+    <string name="common_off">关闭</string>
 </resources>
