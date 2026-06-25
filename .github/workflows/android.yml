@@ -1,0 +1,168 @@
+name: Android CI
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'ARMSX2/**'
+      - 'pcsx2/**'
+      - 'common/**'
+      - '.github/workflows/android.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'ARMSX2/**'
+      - 'pcsx2/**'
+      - 'common/**'
+      - '.github/workflows/android.yml'
+  workflow_dispatch:
+    inputs:
+      buildType:
+        description: 'Build type'
+        required: true
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+
+# ARMSX2 native build: cold ~30-90 min on a 4-core runner (Ninja picks
+# up most of AGP's parallelism). 180 min ceiling leaves headroom for
+# SDK/NDK install on the very first run.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_COMPRESS: true
+  CCACHE_COMPRESSLEVEL: 9
+  CCACHE_MAXSIZE: 300M
+
+jobs:
+  build:
+    name: Android ${{ inputs.buildType || (github.event_name == 'pull_request' && 'Debug') || 'Release' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      BUILD_TYPE: ${{ inputs.buildType || 'Release' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }} gradle ${{ hashFiles('ARMSX2/gradle/wrapper/gradle-wrapper.properties', 'ARMSX2/gradle.properties', '.github/workflows/android.yml') }}
+          restore-keys: |
+            ${{ runner.os }} gradle
+
+      - name: Prepare ccache timestamp
+        id: ccache_ts
+        run: echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          # buildType/ABI don't change ccache *contents* (only stats),
+          # so they're kept off the key — falling back to a previous
+          # buildType's cache is fine and avoids cold rebuilds on flips.
+          key: ${{ runner.os }} android ccache ${{ steps.ccache_ts.outputs.timestamp }}
+          restore-keys: |
+            ${{ runner.os }} android ccache
+
+      - name: Write local.properties
+        # AGP reads sdk.dir from local.properties; CI must generate it
+        # from $ANDROID_SDK_ROOT (exported by setup-android).
+        run: echo "sdk.dir=${ANDROID_SDK_ROOT}" > ARMSX2/local.properties
+
+      - name: Decode release keystore
+        if: ${{ env.BUILD_TYPE == 'Release' && secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        run: |
+          mkdir -p ~/.gradle
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ~/.gradle/release.keystore
+          ls -la ~/.gradle/release.keystore
+
+      - name: Inject signing config
+        if: ${{ env.BUILD_TYPE == 'Release' && secrets.ANDROID_KEYSTORE_BASE64 != '' }}
+        working-directory: ARMSX2
+        run: |
+          cat >> gradle.properties <<EOF
+          ARMSX2_RELEASE_STORE_FILE=/root/.gradle/release.keystore
+          ARMSX2_RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ARMSX2_RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
+          ARMSX2_RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: ccache reset stats
+        run: ccache -z
+
+      - name: Build APK
+        working-directory: ARMSX2
+        env:
+          # AGP forwards these to the externalNativeBuild CMake/Ninja
+          # subprocess; no build.gradle.kts change needed.
+          CC: 'ccache clang'
+          CXX: 'ccache clang++'
+        run: |
+          if [ "${{ env.BUILD_TYPE }}" = "Release" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
+      - name: Collect APKs
+        working-directory: ARMSX2
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/ci-artifacts"
+          if [ "${{ env.BUILD_TYPE }}" = "Release" ]; then
+            APK_DIR="app/build/outputs/apk/release"
+          else
+            APK_DIR="app/build/outputs/apk/debug"
+          fi
+          shopt -s nullglob
+          APKS=("$APK_DIR"/*.apk)
+          shopt -u nullglob
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "::error::No APK found in $APK_DIR"
+            ls -R app/build/outputs/ || true
+            exit 1
+          fi
+          for f in "${APKS[@]}"; do
+            echo "Found APK: $f"
+            cp "$f" "$GITHUB_WORKSPACE/ci-artifacts/"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARMSX2-android-${{ env.BUILD_TYPE }}
+          path: ci-artifacts
+          if-no-files-found: error
+          retention-days: 14
