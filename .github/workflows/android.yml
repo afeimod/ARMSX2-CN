@@ -1,20 +1,6 @@
 name: Android CI
 
 on:
-  push:
-    branches: [main, master]
-    paths:
-      - 'ARMSX2/**'
-      - 'pcsx2/**'
-      - 'common/**'
-      - '.github/workflows/android.yml'
-  pull_request:
-    branches: [main, master]
-    paths:
-      - 'ARMSX2/**'
-      - 'pcsx2/**'
-      - 'common/**'
-      - '.github/workflows/android.yml'
   workflow_dispatch:
     inputs:
       buildType:
