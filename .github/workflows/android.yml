@@ -1,0 +1,318 @@
+name: Android CI
+
+on:
+  workflow_dispatch:
+    inputs:
+      buildType:
+        description: 'Build type'
+        required: true
+        type: choice
+        options:
+          - Release
+          - Debug
+        default: Release
+
+# ARMSX2 native build: cold ~30-90 min on a 4-core runner (Ninja picks
+# up most of AGP's parallelism). 180 min ceiling leaves headroom for
+# SDK/NDK install on the very first run.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_COMPRESS: true
+  CCACHE_COMPRESSLEVEL: 9
+  CCACHE_MAXSIZE: 300M
+
+jobs:
+  build:
+    name: Android ${{ inputs.buildType || (github.event_name == 'pull_request' && 'Debug') || 'Release' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    env:
+      BUILD_TYPE: ${{ inputs.buildType || 'Release' }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses
+
+      - name: Install ccache
+        # ubuntu-22.04 ships ccache in universe. Without this, the
+        # `CC=ccache clang` launcher set in the Build step fails with
+        # "ccache: command not found" before any compilation starts.
+        run: sudo apt-get update && sudo apt-get install -y ccache
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }} gradle ${{ hashFiles('ARMSX2/gradle/wrapper/gradle-wrapper.properties', 'ARMSX2/gradle.properties', '.github/workflows/android.yml') }}
+          restore-keys: |
+            ${{ runner.os }} gradle
+
+      - name: Prepare ccache timestamp
+        id: ccache_ts
+        run: echo "timestamp=$(date -u +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: .ccache
+          # buildType/ABI don't change ccache *contents* (only stats),
+          # so they're kept off the key — falling back to a previous
+          # buildType's cache is fine and avoids cold rebuilds on flips.
+          key: ${{ runner.os }} android ccache ${{ steps.ccache_ts.outputs.timestamp }}
+          restore-keys: |
+            ${{ runner.os }} android ccache
+
+      - name: Write local.properties
+        # AGP reads sdk.dir from local.properties; CI must generate it
+        # from $ANDROID_SDK_ROOT (exported by setup-android).
+        run: echo "sdk.dir=${ANDROID_SDK_ROOT}" > ARMSX2/local.properties
+
+      - name: Decode release keystore
+        # NB: keep `if` free of `secrets.*` — the secrets context is
+        # not available in `if` expressions on PRs from forks, which
+        # makes the workflow fail to even start evaluating. The
+        # actual guard is in the shell below.
+        if: env.BUILD_TYPE == 'Release'
+        run: |
+          set -e
+          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
+            echo "No ANDROID_KEYSTORE_BASE64 secret — falling back to debug signing config"
+            exit 0
+          fi
+          mkdir -p ~/.gradle
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > ~/.gradle/release.keystore
+          ls -la ~/.gradle/release.keystore
+
+      - name: Inject signing config
+        if: env.BUILD_TYPE == 'Release'
+        working-directory: ARMSX2
+        run: |
+          set -e
+          if [ ! -f /root/.gradle/release.keystore ]; then
+            echo "release.keystore not present — skipping signing config injection"
+            exit 0
+          fi
+          cat >> gradle.properties <<EOF
+          ARMSX2_RELEASE_STORE_FILE=/root/.gradle/release.keystore
+          ARMSX2_RELEASE_STORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ARMSX2_RELEASE_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}
+          ARMSX2_RELEASE_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}
+          EOF
+
+      - name: ccache reset stats
+        run: ccache -z
+
+      - name: Ensure gradlew is executable
+        # Git does not preserve the executable bit by default
+        # (core.fileMode=false on most runners), so the wrapper script
+        # checked out from the repo lacks +x and `./gradlew` fails
+        # with EACCES (exit 126). Same goes for any executable under
+        # app/src/main/cpp/3rdparty/ (libwebp, etc.) that the build
+        # may shell out to. Restore the bit before invoking.
+        working-directory: ARMSX2
+        run: |
+          set -e
+          chmod +x ./gradlew
+          find . -type f \( -name 'gradlew' -o -name 'gradlew.bat' \) -exec chmod +x {} +
+          ls -l ./gradlew
+
+      - name: Sync shaderc third_party dependencies
+        # shaderc's CMakeLists.txt unconditionally adds its `third_party/`
+        # subdir, which hard-requires spirv-tools, spirv-headers, glslang,
+        # re2, effcee, abseil_cpp, and googletest source trees to exist at
+        # cmake-configure time. The repo ships a DEPS manifest with pinned
+        # commit hashes for each, but the top-level .gitmodules is empty
+        # in this fork, so `actions/checkout` with submodules: recursive
+        # does nothing for shaderc and configureCMakeRelease fails with:
+        #   "SPIRV-Tools was not found - required for compilation"
+        # Run shaderc's own git-sync-deps utility, which clones each
+        # dep to the right relative path under third_party/.
+        working-directory: ARMSX2/app/src/main/cpp/3rdparty/shaderc
+        run: |
+          set -e
+          chmod +x utils/git-sync-deps
+          # -s = silent, omit the per-clone progress chatter
+          python3 utils/git-sync-deps
+          echo "--- shaderc third_party contents ---"
+          ls -1 third_party
+          for d in third_party/*/; do
+            printf '%-30s %s\n' "$d" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo 'NO_GIT')"
+          done
+
+      - name: Bridge shaderc third_party case mismatches
+        # cmake/SearchForStuff.cmake hardcodes the path with capital
+        # letters:
+        #   SHADERC_SPIRV_TOOLS_DIR   = .../shaderc/third_party/SPIRV-Tools
+        #   SHADERC_SPIRV_HEADERS_DIR = .../shaderc/third_party/SPIRV-Headers
+        # but shaderc's own DEPS file (and git-sync-deps) clones them
+        # lowercase: spirv-tools, spirv-headers. Without these symlinks
+        # the IS_DIRECTORY checks in shaderc/third_party/CMakeLists.txt
+        # fail and configure bombs out with the misleading
+        # "SPIRV-Tools was not found" message.
+        working-directory: ARMSX2/app/src/main/cpp/3rdparty/shaderc/third_party
+        run: |
+          set -e
+          for pair in 'spirv-tools:SPIRV-Tools' 'spirv-headers:SPIRV-Headers'; do
+            src="${pair%%:*}"
+            dst="${pair##*:}"
+            if [ -d "$src" ] && [ ! -e "$dst" ]; then
+              ln -s "$src" "$dst"
+              echo "linked $dst -> $src"
+            elif [ -e "$dst" ] && [ ! -L "$dst" ]; then
+              echo "WARN: $dst exists and is not a symlink; left untouched"
+            else
+              echo "skip $dst (already exists or no source)"
+            fi
+          done
+          ls -la SPIRV-Tools SPIRV-Headers 2>/dev/null || true
+
+      - name: Diagnose shaderc cmake configure
+        # The shaderc/third_party/CMakeLists.txt FATAL_ERRORs with
+        # "SPIRV-Tools was not found" because the add_subdirectory of
+        # spirv-tools is failing silently — its actual error is buried
+        # in CMakeError.log and not surfaced through the AGP-spawned
+        # cmake invocation. Run the same cmake configure the AGP build
+        # will use, but inline (not via Gradle), with stderr captured,
+        # so we can see the real failure before the 30-90 min native
+        # build burns time. Uses the same NDK + toolchain + cmake
+        # version as AGP, otherwise the PCSX2 BuildParameters arch
+        # gate fires for the wrong ABI and the diagnostic is useless.
+        working-directory: ARMSX2/app
+        env:
+          NDK: /usr/local/lib/android/sdk/ndk/28.2.13676358
+          CMAKE: /usr/local/lib/android/sdk/cmake/3.22.1/bin/cmake
+          NINJA: /usr/local/lib/android/sdk/cmake/3.22.1/bin/ninja
+          ABI: arm64-v8a
+          API: 26
+        run: |
+          set -e
+          set -o pipefail
+          # Sanity: shaderc expects ${SHADERC_THIRD_PARTY_ROOT_DIR}/
+          # {spirv-tools,spirv-headers,glslang,re2,effcee,abseil_cpp}/
+          # to exist. The Sync step puts them under
+          # src/main/cpp/3rdparty/shaderc/third_party/. Print absolute
+          # paths so the next line in the log is decisive when cmake
+          # later complains about missing dirs.
+          echo '--- shaderc third_party layout ---'
+          for d in spirv-tools spirv-headers glslang re2 effcee abseil_cpp googletest; do
+            p="src/main/cpp/3rdparty/shaderc/third_party/$d"
+            if [ -d "$p" ]; then
+              printf 'OK   %s  -> %s  (HEAD %s)\n' "$d" "$p" "$(git -C "$p" rev-parse --short HEAD 2>/dev/null || echo NO_GIT)"
+            else
+              printf 'MISS %s  -> %s\n' "$d" "$p"
+            fi
+          done
+          rm -rf /tmp/cxx-diag
+          mkdir -p /tmp/cxx-diag
+          # Capture full stderr (cmake writes the real error to stderr,
+          # AGP's logger only forwards a redacted subset) and surface it
+          # in the GitHub Actions log.
+          set +e
+          ${CMAKE} \
+            -Hsrc/main/cpp \
+            -B/tmp/cxx-diag \
+            -G Ninja \
+            -DCMAKE_MAKE_PROGRAM=${NINJA} \
+            -DCMAKE_SYSTEM_NAME=Android \
+            -DCMAKE_SYSTEM_VERSION=${API} \
+            -DANDROID_PLATFORM=android-${API} \
+            -DANDROID_ABI=${ABI} \
+            -DCMAKE_ANDROID_ARCH_ABI=${ABI} \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DANDROID_NDK=${NDK} \
+            -DCMAKE_ANDROID_NDK=${NDK} \
+            -DCMAKE_TOOLCHAIN_FILE=${NDK}/build/cmake/android.toolchain.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DANDROID=true \
+            -DANDROID_STL=c++_static \
+            "-DCMAKE_C_FLAGS=-O3 -g" \
+            "-DCMAKE_CXX_FLAGS=-O3 -g" \
+            2>&1 | tee /tmp/cxx-diag-configure.log
+          echo "--- cmake configure exit: ${PIPESTATUS[0]} ---"
+          # Always upload the cmake internals, even on failure — the
+          # real error message lives in CMakeError.log, not in stdout.
+          mkdir -p /tmp/diag-artifacts
+          cp -r /tmp/cxx-diag/CMakeFiles /tmp/diag-artifacts/ || true
+          cp /tmp/cxx-diag-configure.log /tmp/diag-artifacts/ || true
+          tar -C /tmp -czf /tmp/diag-artifacts.tar.gz diag-artifacts
+        continue-on-error: true
+
+      - name: Upload cmake diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cxx-diag
+          path: /tmp/diag-artifacts.tar.gz
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Build APK
+        working-directory: ARMSX2
+        env:
+          # AGP forwards these to the externalNativeBuild CMake/Ninja
+          # subprocess; no build.gradle.kts change needed.
+          CC: 'ccache clang'
+          CXX: 'ccache clang++'
+        run: |
+          if [ "${{ env.BUILD_TYPE }}" = "Release" ]; then
+            ./gradlew assembleRelease --no-daemon --stacktrace
+          else
+            ./gradlew assembleDebug --no-daemon --stacktrace
+          fi
+
+      - name: ccache stats
+        if: always()
+        run: ccache -s
+
+      - name: Collect APKs
+        working-directory: ARMSX2
+        run: |
+          set -e
+          mkdir -p "$GITHUB_WORKSPACE/ci-artifacts"
+          if [ "${{ env.BUILD_TYPE }}" = "Release" ]; then
+            APK_DIR="app/build/outputs/apk/release"
+          else
+            APK_DIR="app/build/outputs/apk/debug"
+          fi
+          shopt -s nullglob
+          APKS=("$APK_DIR"/*.apk)
+          shopt -u nullglob
+          if [ ${#APKS[@]} -eq 0 ]; then
+            echo "::error::No APK found in $APK_DIR"
+            ls -R app/build/outputs/ || true
+            exit 1
+          fi
+          for f in "${APKS[@]}"; do
+            echo "Found APK: $f"
+            cp "$f" "$GITHUB_WORKSPACE/ci-artifacts/"
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ARMSX2-android-${{ env.BUILD_TYPE }}
+          path: ci-artifacts
+          if-no-files-found: error
+          retention-days: 14
