@@ -1,0 +1,305 @@
+name: Android Refresh Build (Release)
+
+# Builds the official "Refresh" (release) variant of ARMSX2.
+#
+# Triggers:
+#   - tag push (v*)              -> builds release APK + AAB and creates a GitHub Release
+#   - workflow_dispatch          -> manual run with a build_type choice (release / releaseNoLog / aab)
+#
+# Required secrets (only on tag / manual runs):
+#   - KEYSTORE_BASE64            -> base64-encoded .keystore / .jks file
+#   - KEYSTORE_PASSWORD          -> keystore password
+#   - KEY_ALIAS                  -> key alias inside the keystore
+#   - KEY_PASSWORD               -> key password
+#
+# Notes:
+#   * Debug builds are produced by android_nightly_build.yml — this workflow
+#     only handles signed release artifacts.
+#   * .mdf disc image support lives in the native code (app/src/main/cpp) and
+#     cannot be fixed from CI; see app/src/main/cpp for the loader work.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Release flavor to build'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release          # signed APK, logs enabled (LOGS_ENABLED=true)
+          - releaseNoLog     # signed APK, logs disabled (LOGS_ENABLED=false)
+          - bundle           # AAB only (signed, for Play Store)
+          - all              # APK (release) + AAB
+
+permissions:
+  contents: write
+
+concurrency:
+  group: refresh-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build (${{ inputs.build_type || 'release' }})
+    runs-on: ubuntu-latest
+
+    outputs:
+      package_name:   ${{ steps.package_info.outputs.PACKAGE_NAME }}
+      version_name:   ${{ steps.package_info.outputs.VERSION_NAME }}
+      version_code:   ${{ steps.package_info.outputs.VERSION_CODE }}
+      release_tag:    ${{ steps.release_vars.outputs.RELEASE_TAG }}
+      release_title:  ${{ steps.release_vars.outputs.RELEASE_TITLE }}
+      build_type:     ${{ steps.release_vars.outputs.BUILD_TYPE }}
+
+    steps:
+      - name: Checkout of code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Java and Android SDK Setup
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      # --- Decoding signing material from secrets ---
+      - name: Decode keystore and write signing properties
+        env:
+          KEYSTORE_BASE64:   ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS:         ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD:      ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::KEYSTORE_BASE64 secret is empty. Cannot sign a release build."
+            echo "::error::Either upload your keystore and configure the four secrets,"
+            echo "::error::or run a debug build via android_nightly_build.yml."
+            exit 1
+          fi
+          if [ -z "${KEYSTORE_PASSWORD:-}" ] || [ -z "${KEY_ALIAS:-}" ] || [ -z "${KEY_PASSWORD:-}" ]; then
+            echo "::error::KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD must all be set."
+            exit 1
+          fi
+
+          mkdir -p app
+          echo "${KEYSTORE_BASE64}" | base64 -d > app/refresh.keystore
+          chmod 600 app/refresh.keystore
+
+          printf 'storeFile=refresh.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
+            "${KEYSTORE_PASSWORD}" "${KEY_ALIAS}" "${KEY_PASSWORD}" \
+            > app/armsx2_keystore.properties
+
+          keytool -list -keystore app/refresh.keystore -storepass "${KEYSTORE_PASSWORD}" >/dev/null
+          echo "Keystore decoded and verified."
+
+      # --- Build Phase ---
+      - name: Resolve build flavor from inputs
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BT="${{ inputs.build_type }}"
+          else
+            BT="release"
+          fi
+          echo "BUILD_TYPE=${BT}" >> $GITHUB_OUTPUT
+          echo "Selected build flavor: ${BT}"
+
+      - name: Build signed APK (release)
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.build_type == 'release' || inputs.build_type == 'releaseNoLog' || inputs.build_type == 'all')) ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        env:
+          BUILD_TYPE: ${{ steps.resolve.outputs.BUILD_TYPE }}
+        run: |
+          set -euo pipefail
+          case "${BUILD_TYPE}" in
+            release)
+              ./gradlew assembleUnrestrictedRelease
+              ;;
+            releaseNoLog)
+              ./gradlew assembleUnrestrictedReleaseNoLog
+              ;;
+            all)
+              ./gradlew assembleUnrestrictedRelease
+              ;;
+            *)
+              echo "::notice::Skipping APK build for build_type=${BUILD_TYPE}"
+              ;;
+          esac
+
+      - name: Build signed AAB (bundle)
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.build_type == 'bundle' || inputs.build_type == 'all')) ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        run: ./gradlew bundleUnrestrictedRelease
+
+      # --- Package metadata ---
+      - name: Get Package Name and Version
+        id: package_info
+        run: |
+          PACKAGE_NAME=$(grep 'applicationId' app/build.gradle | head -n 1 | awk '{print $2}' | tr -d '"')
+          VERSION_NAME=$(grep 'versionName'  app/build.gradle | head -n 1 | awk '{print $2}' | tr -d '"')
+          VERSION_CODE=$(grep 'versionCode'  app/build.gradle | head -n 1 | awk '{print $2}' | tr -d '"')
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> $GITHUB_OUTPUT
+          echo "VERSION_NAME=${VERSION_NAME}" >> $GITHUB_OUTPUT
+          echo "VERSION_CODE=${VERSION_CODE}" >> $GITHUB_OUTPUT
+
+      - name: Defining the Release Tag and Title
+        id: release_vars
+        env:
+          BUILD_TYPE: ${{ steps.resolve.outputs.BUILD_TYPE }}
+        run: |
+          DATE_TIME=$(date +%Y%m%d-%H%M)
+          # Prefer the git tag if present (e.g. v1.0.8), otherwise synthesize one.
+          if [ "${{ github.event_name }}" = "push" ] && [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG_BASE="${GITHUB_REF_NAME}"
+          else
+            TAG_BASE="manual"
+          fi
+          FULL_TAG="${{ steps.package_info.outputs.PACKAGE_NAME }}-refresh-${TAG_BASE}-${{ steps.package_info.outputs.VERSION_NAME }}-${DATE_TIME}"
+          if [ "${BUILD_TYPE}" = "releaseNoLog" ]; then
+            TITLE="Refresh Build (RELEASE / no-log - ${{ steps.package_info.outputs.VERSION_NAME }}) - ${DATE_TIME}"
+          elif [ "${BUILD_TYPE}" = "bundle" ]; then
+            TITLE="Refresh Build (AAB - ${{ steps.package_info.outputs.VERSION_NAME }}) - ${DATE_TIME}"
+          else
+            TITLE="Refresh Build (RELEASE - ${{ steps.package_info.outputs.VERSION_NAME }}) - ${DATE_TIME}"
+          fi
+
+          echo "RELEASE_TAG=${FULL_TAG}"  >> $GITHUB_OUTPUT
+          echo "RELEASE_TITLE=${TITLE}"   >> $GITHUB_OUTPUT
+          echo "BUILD_TYPE=${BUILD_TYPE}" >> $GITHUB_OUTPUT
+
+      # --- Rename artifacts to a stable, dated name ---
+      - name: Find and Rename APK to Refresh
+        id: rename_apk
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.build_type == 'release' || inputs.build_type == 'releaseNoLog' || inputs.build_type == 'all')) ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        env:
+          BUILD_TYPE: ${{ steps.resolve.outputs.BUILD_TYPE }}
+        run: |
+          set -euo pipefail
+          SUFFIX="-release"
+          if [ "${BUILD_TYPE}" = "releaseNoLog" ]; then
+            SUFFIX="-release-nolog"
+          fi
+
+          ORIGINAL_PATH=$(find ${{ github.workspace }}/app/build -type f -name "*.apk" -path "*release*" ! -name "*sources*" ! -name "*mapping*" -print -quit || true)
+          if [ -z "${ORIGINAL_PATH}" ]; then
+            echo "::error::Release APK not found under app/build/outputs/. Check the gradle task output above."
+            exit 1
+          fi
+
+          BASE=$(basename "${ORIGINAL_PATH}")
+          # Strip "-release.apk" and append our own suffix.
+          STEM="${BASE%-release.apk}"
+          NEW_NAME="${STEM}${SUFFIX}-refresh.apk"
+          NEW_PATH="${{ github.workspace }}/${NEW_NAME}"
+          mv "${ORIGINAL_PATH}" "${NEW_PATH}"
+          echo "APK_FILE_REFRESH=${NEW_PATH}" >> $GITHUB_OUTPUT
+          echo "Renamed: ${BASE} -> ${NEW_NAME}"
+
+      - name: Find and Rename AAB
+        id: rename_aab
+        if: >-
+          (github.event_name == 'workflow_dispatch' &&
+           (inputs.build_type == 'bundle' || inputs.build_type == 'all')) ||
+          (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+        run: |
+          set -euo pipefail
+          ORIGINAL_PATH=$(find ${{ github.workspace }}/app/build -type f -name "*.aab" -path "*release*" -print -quit || true)
+          if [ -z "${ORIGINAL_PATH}" ]; then
+            echo "::error::Release AAB not found under app/build/outputs/."
+            exit 1
+          fi
+          BASE=$(basename "${ORIGINAL_PATH}")
+          STEM="${BASE%-release.aab}"
+          NEW_NAME="${STEM}-refresh.aab"
+          NEW_PATH="${{ github.workspace }}/${NEW_NAME}"
+          mv "${ORIGINAL_PATH}" "${NEW_PATH}"
+          echo "AAB_FILE_REFRESH=${NEW_PATH}" >> $GITHUB_OUTPUT
+          echo "Renamed: ${BASE} -> ${NEW_NAME}"
+
+      # --- Upload artifact (always, for inspection in the Actions UI) ---
+      - name: Upload Refresh APK artifact
+        if: steps.rename_apk.outputs.APK_FILE_REFRESH
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.package_info.outputs.PACKAGE_NAME }}-refresh-apk
+          path: ${{ steps.rename_apk.outputs.APK_FILE_REFRESH }}
+
+      - name: Upload Refresh AAB artifact
+        if: steps.rename_aab.outputs.AAB_FILE_REFRESH
+        uses: actions/upload-artifact@v5
+        with:
+          name: ${{ steps.package_info.outputs.PACKAGE_NAME }}-refresh-aab
+          path: ${{ steps.rename_aab.outputs.AAB_FILE_REFRESH }}
+
+      - name: Upload signing material for traceability
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: signing-properties
+          path: app/armsx2_keystore.properties
+          retention-days: 7
+
+  release:
+    name: Create GitHub Release
+    needs: [ build ]
+    if: >
+      github.repository == 'ARMSX2/ARMSX2' &&
+      github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download APK artifact
+        if: needs.build.outputs.build_type != 'bundle'
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.build.outputs.package_name }}-refresh-apk
+          path: artifact
+
+      - name: Download AAB artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: ${{ needs.build.outputs.package_name }}-refresh-aab
+          path: artifact
+
+      - name: Create the Release on GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.release_tag }}
+          name: ${{ needs.build.outputs.release_title }}
+          body: |
+            ## Refresh Build (RELEASE)
+
+            Official signed release artifact for community distribution.
+
+            * **Version:** ${{ needs.build.outputs.version_name }} (code ${{ needs.build.outputs.version_code }})
+            * **Package Name:** ${{ needs.build.outputs.package_name }}
+            * **Build type:** ${{ needs.build.outputs.build_type }}
+            * **Tag:** ${{ github.ref_name }}
+            * **Commit:** ${{ github.sha }}
+
+            **Installable APK and Play-Store-ready AAB are attached.**
+
+            > Note: `.mdf` disc image support is still pending in the native
+            > code (see app/src/main/cpp). This CI cannot add it; track that
+            > separately from the build pipeline.
+          draft: false
+          prerelease: true
+          files: |
+            artifact/*.apk
+            artifact/*.aab
