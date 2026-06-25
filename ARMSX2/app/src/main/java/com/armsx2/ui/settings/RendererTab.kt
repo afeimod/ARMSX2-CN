@@ -28,8 +28,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import androidx.documentfile.provider.DocumentFile
 import com.armsx2.Main
+import com.armsx2.R
 import com.armsx2.config.LiveGsApplyQueue
 import com.armsx2.config.Settings
 import com.armsx2.ui.Colors
@@ -99,7 +101,7 @@ fun RendererTab(state: MutableState<Settings>) {
             options = UPSCALE_OPTIONS.map { it.label },
             selectedIndex = upscaleIndex,
             columns = 4,
-            description = "Internal resolution. Higher values are sharper but can expose game-specific bloom or alignment artifacts.",
+            description = stringResource(R.string.renderer_internal_res_title),
             onChange = { index ->
                 val mult = UPSCALE_OPTIONS[index].value
                 if (abs(Main.upscale.value - mult) >= 0.01f) {
@@ -112,62 +114,62 @@ fun RendererTab(state: MutableState<Settings>) {
         SettingsDivider()
         SegmentedRow(
             label = "Display Mode",
-            options = listOf("Stretch", "Auto", "4:3", "16:9", "10:7"),
+            options = listOf(stringResource(R.string.renderer_display_mode_stretch), stringResource(R.string.renderer_api_auto), "4:3", "16:9", "10:7"),
             selectedIndex = s.aspectRatio.coerceIn(0, 4),
-            description = "Controls how the PS2 image fits the screen.",
+            description = stringResource(R.string.renderer_display_mode_title),
             onChange = { apply(s.copy(aspectRatio = it)) },
         )
         SettingsDivider()
         SegmentedGridRow(
             label = "Deinterlacing",
             options = listOf(
-                "Auto", "Off", "Weave TFF", "Weave BFF", "Bob TFF",
-                "Bob BFF", "Blend TFF", "Blend BFF", "Adapt TFF", "Adapt BFF",
+                stringResource(R.string.renderer_api_auto), stringResource(R.string.renderer_deinterlacing_off), stringResource(R.string.renderer_deinterlacing_weave_tff), stringResource(R.string.renderer_deinterlacing_weave_bff), stringResource(R.string.renderer_deinterlacing_bob_tff),
+                stringResource(R.string.renderer_deinterlacing_bob_bff), stringResource(R.string.renderer_deinterlacing_blend_tff), stringResource(R.string.renderer_deinterlacing_blend_bff), stringResource(R.string.renderer_deinterlacing_adapt_tff), stringResource(R.string.renderer_deinterlacing_adapt_bff),
             ),
             selectedIndex = s.deinterlaceMode.coerceIn(0, 9),
             columns = 5,
-            description = "Changes how interlaced video is displayed. Auto is safest.",
+            description = stringResource(R.string.renderer_deinterlacing_title),
             onChange = { apply(s.copy(deinterlaceMode = it)) },
         )
         SettingsDivider()
         SegmentedRow(
             label = "Texture Filtering",
-            options = listOf("Nearest", "Forced", "PS2", "Sprite"),
+            options = listOf(stringResource(R.string.renderer_texture_filtering_nearest), stringResource(R.string.renderer_texture_filtering_forced), "PS2", stringResource(R.string.renderer_texture_filtering_sprite)),
             selectedIndex = s.textureFiltering.coerceIn(0, 3),
-            description = "Controls texture smoothing. PS2 is safest; Forced can soften or brighten some games.",
+            description = stringResource(R.string.renderer_texture_filtering_help),
             onChange = { apply(s.copy(textureFiltering = it)) },
         )
         SettingsDivider()
         SegmentedRow(
             label = "Texture Preloading",
-            options = listOf("Off", "Partial", "Full"),
+            options = listOf(stringResource(R.string.common_off), stringResource(R.string.renderer_texture_preloading_partial), stringResource(R.string.renderer_texture_preloading_full)),
             selectedIndex = s.texturePreloading.coerceIn(0, 2),
-            description = "Preloads textures to avoid missing or late texture uploads. Full is the safe default.",
+            description = stringResource(R.string.renderer_texture_preloading_help),
             onChange = { apply(s.copy(texturePreloading = it)) },
         )
         SettingsDivider()
         SegmentedGridRow(
             label = "Hardware Download Mode",
-            options = listOf("Accurate", "Force Full", "No Readbacks", "Unsync", "Disabled"),
+            options = listOf(stringResource(R.string.renderer_hw_download_accurate), stringResource(R.string.renderer_hw_download_force_full), stringResource(R.string.renderer_hw_download_no_readbacks), stringResource(R.string.renderer_hw_download_unsync), stringResource(R.string.renderer_hw_download_disabled)),
             selectedIndex = s.hardwareDownloadMode.coerceIn(0, 4),
             columns = 3,
-            description = "Readback accuracy for effects that need GPU data. Faster modes may break effects.",
+            description = stringResource(R.string.renderer_hw_download_help),
             onChange = { apply(s.copy(hardwareDownloadMode = it)) },
         )
         SettingsDivider()
         SegmentedGridRow(
             label = "CRT / TV Shader",
-            options = listOf("Off", "Scanline", "Diagonal", "Tri", "Wave", "Lottes", "4xRGSS", "NxAGSS"),
+            options = listOf(stringResource(R.string.common_off), stringResource(R.string.renderer_crt_scanline), stringResource(R.string.renderer_crt_diagonal), stringResource(R.string.renderer_crt_tri), stringResource(R.string.renderer_crt_wave), stringResource(R.string.renderer_crt_lottes), "4xRGSS", stringResource(R.string.renderer_crt_nxagss)),
             selectedIndex = s.tvShader.coerceIn(0, 7),
             columns = 4,
-            description = "Post-process CRT/TV filters. Applies live on supported renderers.",
+            description = stringResource(R.string.renderer_crt_help),
             onChange = { apply(s.copy(tvShader = it)) },
         )
         SettingsDivider()
         ToggleRow(
             "VSync",
             s.vsyncEnable,
-            description = "Sync presentation to the display refresh — less tearing/smoother, slightly more latency. Restart the game to apply.",
+            description = stringResource(R.string.renderer_vsync_help),
         ) {
             apply(s.copy(vsyncEnable = it))
         }
@@ -175,7 +177,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Shadeboost",
             s.shadeBoost,
-            description = "Post-process colour controls for brightness, contrast, saturation, and gamma.",
+            description = stringResource(R.string.renderer_shadeboost_help),
         ) {
             apply(s.copy(shadeBoost = it))
         }
@@ -225,7 +227,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Load Texture Packs",
             s.loadTextureReplacements,
-            description = "Loads replacement textures from the active game's texture folder.",
+            description = stringResource(R.string.renderer_texture_replacements_load),
         ) {
             apply(s.copy(loadTextureReplacements = it))
         }
@@ -233,7 +235,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Async Texture Loading",
             s.loadTextureReplacementsAsync,
-            description = "Loads replacements in the background to reduce stalls.",
+            description = stringResource(R.string.renderer_texture_replacements_async),
         ) {
             apply(s.copy(loadTextureReplacementsAsync = it))
         }
@@ -241,7 +243,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Precache Texture Packs",
             s.precacheTextureReplacements,
-            description = "Scans replacements at boot. Slower startup, fewer in-game hitches.",
+            description = stringResource(R.string.renderer_texture_replacements_scan),
         ) {
             apply(s.copy(precacheTextureReplacements = it))
         }
@@ -251,7 +253,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Dump Replaceable Textures",
             s.dumpReplaceableTextures,
-            description = "Writes textures used by the game to disk for pack creation.",
+            description = stringResource(R.string.renderer_texture_replacements_dump),
         ) {
             apply(s.copy(dumpReplaceableTextures = it))
         }
@@ -259,7 +261,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "Texture Pack OSD",
             s.osdShowTextureReplacements,
-            description = "Shows texture replacement status messages in-game.",
+            description = stringResource(R.string.renderer_texture_replacements_log),
         ) {
             apply(s.copy(osdShowTextureReplacements = it))
         }
@@ -268,7 +270,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Blending Accuracy",
             options = listOf("Min", "Basic", "Med", "High", "Full", "Max"),
             selectedIndex = s.accurateBlendingUnit.coerceIn(0, 5),
-            description = "Controls alpha/blending precision. Basic is faster; higher can fix effects.",
+            description = stringResource(R.string.renderer_blending_help),
             onChange = { apply(s.copy(accurateBlendingUnit = it)) },
         )
         // Hardware & upscaling compatibility fixes now live in the dedicated
@@ -277,7 +279,7 @@ fun RendererTab(state: MutableState<Settings>) {
         ToggleRow(
             "HW Mipmapping",
             s.hwMipmap,
-            description = "Uses mipmaps in hardware renderers. Can fix texture shimmer or broken effects.",
+            description = stringResource(R.string.renderer_mipmaps_help),
         ) {
             apply(s.copy(hwMipmap = it))
         }
@@ -289,7 +291,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Trilinear",
             options = triLabels,
             selectedIndex = triIdx,
-            description = "Mip texture filtering. Auto is safest for compatibility.",
+            description = stringResource(R.string.renderer_mip_filter_help),
             onChange = { apply(s.copy(triFilter = it - 1)) },
         )
         SettingsDivider()
@@ -300,7 +302,7 @@ fun RendererTab(state: MutableState<Settings>) {
             label = "Anisotropic",
             options = anisoLabels,
             selectedIndex = anisoIdx,
-            description = "Sharpens angled textures. Higher values can cost GPU time.",
+            description = stringResource(R.string.renderer_anisotropic_help),
             onChange = { apply(s.copy(maxAnisotropy = anisoVals[it])) },
         )
         SettingsDivider()
@@ -314,9 +316,9 @@ fun RendererTab(state: MutableState<Settings>) {
         // RestartButton does.
         SegmentedRow(
             label = "GPU Profile",
-            options = listOf("Auto", "Mali", "Adreno", "PowerVR"),
+            options = listOf(stringResource(R.string.renderer_mip_filter_auto), "Mali", "Adreno", "PowerVR"),
             selectedIndex = s.gpuProfile.coerceIn(0, 3),
-            description = "Overrides Android GPU workaround selection. Auto is recommended.",
+            description = stringResource(R.string.renderer_gpu_workarounds_help),
             onChange = {
                 apply(s.copy(gpuProfile = it))
             },

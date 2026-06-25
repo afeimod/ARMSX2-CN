@@ -15,7 +15,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import com.armsx2.config.Settings
+import com.armsx2.R
 import com.armsx2.ui.Colors
 import com.armsx2.ui.InGameOverlay
 
@@ -43,92 +45,91 @@ fun FixesTab(state: MutableState<Settings>) {
             .fillMaxWidth()
             .verticalScroll(scroll),
     ) {
-        SectionHeader("Display Fixes")
+        SectionHeader(stringResource(R.string.fixes_section_display))
         HelpText(
-            "PCRTC / presentation fixes for the displayed image. Anti-Blur is on by " +
-                "default; the rest are off unless a game needs them.",
+            stringResource(R.string.fixes_display_help),
             modifier = Modifier.padding(horizontal = 6.dp),
         )
         SettingsDivider()
         ToggleRow(
-            "Anti-Blur",
+            stringResource(R.string.fixes_anti_blur),
             s.antiBlur,
-            description = "Reduces the blur PCSX2 adds to mimic the PS2's blend. On by default.",
+            description = stringResource(R.string.fixes_anti_blur_help),,
         ) { apply(s.copy(antiBlur = it)) }
         SettingsDivider()
         ToggleRow(
-            "Screen Offsets",
+            stringResource(R.string.fixes_screen_offsets),
             s.screenOffsets,
-            description = "Applies the PCRTC screen offsets (centres the image like real hardware).",
+            description = stringResource(R.string.fixes_screen_offsets_help),,
         ) { apply(s.copy(screenOffsets = it)) }
         SettingsDivider()
         ToggleRow(
-            "Show Overscan",
+            stringResource(R.string.fixes_show_overscan),
             s.showOverscan,
-            description = "Shows the overscan border area some games render into.",
+            description = stringResource(R.string.fixes_show_overscan_help),,
         ) { apply(s.copy(showOverscan = it)) }
         SettingsDivider()
         ToggleRow(
-            "Disable Interlace Offset",
+            stringResource(R.string.fixes_disable_interlace_offset),
             s.disableInterlaceOffset,
-            description = "Removes the interlace field offset; can stop shimmer but may add combing.",
+            description = stringResource(R.string.fixes_disable_interlace_offset_help),,
         ) { apply(s.copy(disableInterlaceOffset = it)) }
         SettingsDivider()
         ToggleRow(
-            "Sync To Host Refresh",
+            stringResource(R.string.fixes_sync_to_host_refresh),
             s.syncToHostRefresh,
-            description = "Paces emulation to your screen's refresh rate for smoother scrolling.",
+            description = stringResource(R.string.fixes_sync_to_host_refresh_help),,
         ) { apply(s.copy(syncToHostRefresh = it)) }
         SettingsDivider()
         ToggleRow(
-            "Disable Framebuffer Fetch",
+            stringResource(R.string.fixes_disable_framebuffer_fetch),
             s.disableFramebufferFetch,
-            description = "Disables the framebuffer-fetch blending path. Diagnostic / compatibility.",
+            description = stringResource(R.string.fixes_disable_framebuffer_fetch_help),,
         ) { apply(s.copy(disableFramebufferFetch = it)) }
         SettingsDivider()
         SegmentedRow(
             label = "Override Texture Barriers",
             options = listOf("Auto", "Off", "On"),
             selectedIndex = (s.overrideTextureBarriers + 1).coerceIn(0, 2),
-            description = "Forces the renderer's texture-barrier support on/off. Auto is recommended.",
+            description = stringResource(R.string.fixes_override_texture_barriers_help),
             onChange = { apply(s.copy(overrideTextureBarriers = it - 1)) },
         )
         SettingsDivider()
         ToggleRow(
-            "HW Accurate Alpha Test",
+            stringResource(R.string.fixes_hw_accurate_alpha_test),
             s.hwAccurateAlphaTest,
-            description = "More accurate hardware alpha testing. Fixes some transparency artifacts; small speed cost.",
+            description = stringResource(R.string.fixes_hw_accurate_alpha_test_help),,
         ) { apply(s.copy(hwAccurateAlphaTest = it)) }
         SettingsDivider()
         ToggleRow(
-            "Disable Vertex Shader Expand",
+            stringResource(R.string.fixes_disable_vertex_shader_expand),
             s.disableVertexShaderExpand,
-            description = "Forces CPU vertex expansion instead of the vertex shader. Renderer-init — restart the game to apply.",
+            description = stringResource(R.string.fixes_disable_vertex_shader_expand_help),,
         ) { apply(s.copy(disableVertexShaderExpand = it)) }
         SettingsDivider()
         ToggleRow(
-            "Use Blit Swap Chain",
+            stringResource(R.string.fixes_use_blit_swap_chain),
             s.useBlitSwapChain,
-            description = "Uses a blit present model instead of flip. Renderer-init — restart the game to apply.",
+            description = stringResource(R.string.fixes_use_blit_swap_chain_help),,
         ) { apply(s.copy(useBlitSwapChain = it)) }
         SettingsDivider()
         ToggleRow(
-            "Disable Shader Cache",
+            stringResource(R.string.fixes_disable_shader_cache),
             s.disableShaderCache,
-            description = "Don't cache compiled shaders to disk (recompiles each launch). Renderer-init — restart the game to apply.",
+            description = stringResource(R.string.fixes_disable_shader_cache_help),,
         ) { apply(s.copy(disableShaderCache = it)) }
         SettingsDivider()
         ToggleRow(
-            "Integer Scaling",
+            stringResource(R.string.fixes_integer_scaling),
             s.integerScaling,
-            description = "Scales the image by whole-number factors for crisp, even pixels.",
+            description = stringResource(R.string.fixes_integer_scaling_help),,
         ) { apply(s.copy(integerScaling = it)) }
         SettingsDivider()
         SegmentedRow(
             label = "Dithering",
             options = listOf("Off", "Scaled", "Unscaled"),
             selectedIndex = s.dithering.coerceIn(0, 2),
-            description = "Reduces colour banding. Unscaled matches the PS2 most closely.",
+            description = stringResource(R.string.fixes_dithering_help),
             onChange = { apply(s.copy(dithering = it)) },
         )
         SettingsDivider()
@@ -137,14 +138,13 @@ fun FixesTab(state: MutableState<Settings>) {
             value = s.vsyncQueueSize.coerceIn(0, 3),
             min = 0,
             max = 3,
-            description = "Frames the GS thread may queue ahead. Higher can smooth pacing; adds latency.",
+            description = stringResource(R.string.fixes_vsync_queue_size_help),
             onChange = { apply(s.copy(vsyncQueueSize = it)) },
         )
 
-        SectionHeader("Upscaling Fixes")
+        SectionHeader(stringResource(R.string.fixes_section_upscaling))
         HelpText(
-            "Only active when upscaling above Native. They reduce alignment/seam " +
-                "artifacts but won't remove every bloom or glow.",
+            stringResource(R.string.fixes_upscaling_help),
             modifier = Modifier.padding(horizontal = 6.dp),
         )
         SettingsDivider()
@@ -152,7 +152,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Upscaling Fixes",
             options = listOf("Off", "Normal", "Aggr.", "Normal+", "Aggr.+"),
             selectedIndex = s.nativeScaling.coerceIn(0, 4),
-            description = "Texture alignment hacks for upscaling (UserHacks_native_scaling).",
+            description = stringResource(R.string.fixes_upscaling_help),
             onChange = { apply(s.copy(nativeScaling = it)) },
         )
         SettingsDivider()
@@ -160,7 +160,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Half-Pixel Offset",
             options = listOf("Off", "Normal", "Special", "Aggr.", "Native", "NW-Tex"),
             selectedIndex = s.halfPixelOffset.coerceIn(0, 5),
-            description = "Fixes shifted or blurry geometry/textures in some upscaled games.",
+            description = stringResource(R.string.fixes_half_pixel_offset_help),
             onChange = { apply(s.copy(halfPixelOffset = it)) },
         )
         SettingsDivider()
@@ -168,7 +168,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Round Sprite",
             options = listOf("Off", "Half", "Full"),
             selectedIndex = s.roundSprite.coerceIn(0, 2),
-            description = "Rounds sprite coordinates to reduce seams or lines in 2D elements.",
+            description = stringResource(R.string.fixes_round_sprite_help),
             onChange = { apply(s.copy(roundSprite = it)) },
         )
         SettingsDivider()
@@ -176,32 +176,32 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Bilinear Dirty",
             options = listOf("Off", "Normal", "Half", "Forced"),
             selectedIndex = s.bilinearUpscale.coerceIn(0, 3),
-            description = "Changes bilinear filtering behavior for upscaled textures.",
+            description = stringResource(R.string.fixes_bilinear_filter_help),
             onChange = { apply(s.copy(bilinearUpscale = it)) },
         )
         SettingsDivider()
         ToggleRow(
             "Align Sprite",
             s.alignSprite,
-            description = "Fixes vertical lines/gaps in some 2D games when upscaling.",
+            description = stringResource(R.string.fixes_vertical_stretch_help),
         ) { apply(s.copy(alignSprite = it)) }
         SettingsDivider()
         ToggleRow(
             "Merge Sprite",
             s.mergeSprite,
-            description = "Merges adjacent post-process sprites to remove seams.",
+            description = stringResource(R.string.fixes_merge_sprites_help),
         ) { apply(s.copy(mergeSprite = it)) }
         SettingsDivider()
         ToggleRow(
             "Wild Arms Offset",
             s.forceEvenSpritePosition,
-            description = "Forces even sprite/texture positions (UserHacks_ForceEvenSpritePosition).",
+            description = stringResource(R.string.fixes_force_even_sprite_positions_help),
         ) { apply(s.copy(forceEvenSpritePosition = it)) }
         SettingsDivider()
         ToggleRow(
             "Unscaled Palette Draw",
             s.unscaledPaletteDraw,
-            description = "Draws palette textures at native res to fix colour issues when upscaling.",
+            description = stringResource(R.string.fixes_palette_texture_help),
         ) { apply(s.copy(unscaledPaletteDraw = it)) }
         SettingsDivider()
         IntSliderRow(
@@ -209,7 +209,7 @@ fun FixesTab(state: MutableState<Settings>) {
             value = s.textureOffsetX.coerceIn(0, 1000),
             min = 0,
             max = 1000,
-            description = "Horizontal texture-coordinate offset. 0 unless a game needs it.",
+            description = stringResource(R.string.fixes_texture_offset_x_help),
             onChange = { apply(s.copy(textureOffsetX = it)) },
         )
         SettingsDivider()
@@ -218,11 +218,11 @@ fun FixesTab(state: MutableState<Settings>) {
             value = s.textureOffsetY.coerceIn(0, 1000),
             min = 0,
             max = 1000,
-            description = "Vertical texture-coordinate offset. 0 unless a game needs it.",
+            description = stringResource(R.string.fixes_texture_offset_y_help),
             onChange = { apply(s.copy(textureOffsetY = it)) },
         )
 
-        SectionHeader("Hardware Fixes")
+        SectionHeader(stringResource(R.string.fixes_section_hardware))
         HelpText(
             "Manual renderer hacks. The master toggle auto-enables when any fix is " +
                 "set. Leave these off unless fixing a specific visual issue.",
@@ -232,14 +232,14 @@ fun FixesTab(state: MutableState<Settings>) {
         ToggleRow(
             "Manual Hardware Fixes",
             s.manualUserHacks,
-            description = "Force-enables the PCSX2 hardware-fix layer (UserHacks).",
+            description = stringResource(R.string.fixes_force_user_hacks_help),
         ) { apply(s.copy(manualUserHacks = it)) }
         SettingsDivider()
         SegmentedRow(
             label = "Auto Flush",
             options = listOf("Off", "Sprites", "On"),
             selectedIndex = s.autoFlush.coerceIn(0, 2),
-            description = "Helps some sprite/alpha effects update correctly; can cost performance.",
+            description = stringResource(R.string.fixes_alpha_prite_help),
             onChange = { apply(s.copy(autoFlush = it)) },
         )
         SettingsDivider()
@@ -247,7 +247,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Texture Inside RT",
             options = listOf("Off", "Inside", "Merge"),
             selectedIndex = s.textureInsideRt.coerceIn(0, 2),
-            description = "Helps effects that sample from render targets; can alter or slow rendering.",
+            description = stringResource(R.string.fixes_rt_sampling_help),
             onChange = { apply(s.copy(textureInsideRt = it)) },
         )
         SettingsDivider()
@@ -255,7 +255,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "GPU Target CLUT",
             options = listOf("Off", "Inside", "Forced"),
             selectedIndex = s.gpuTargetClut.coerceIn(0, 2),
-            description = "Palette handling hack for games with broken colours or CLUT effects.",
+            description = stringResource(R.string.fixes_clut_render_help),
             onChange = { apply(s.copy(gpuTargetClut = it)) },
         )
         SettingsDivider()
@@ -263,7 +263,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "CPU Sprite BW",
             options = listOf("Off", "64", "128", "256"),
             selectedIndex = s.cpuSpriteRenderBw.coerceIn(0, 3),
-            description = "CPU sprite-render bandwidth limit. Useful only for specific sprite glitches.",
+            description = stringResource(R.string.fixes_sprite_bandwidth_help),
             onChange = { apply(s.copy(cpuSpriteRenderBw = it)) },
         )
         SettingsDivider()
@@ -272,7 +272,7 @@ fun FixesTab(state: MutableState<Settings>) {
             options = listOf("Off", "Sprite", "Triangle", "Aggressive", "Full", "Max"),
             selectedIndex = s.cpuSpriteRenderLevel.coerceIn(0, 5),
             columns = 3,
-            description = "Renders selected sprite work on CPU to fix difficult hardware-renderer issues.",
+            description = stringResource(R.string.fixes_sprite_cpu_help),
             onChange = { apply(s.copy(cpuSpriteRenderLevel = it)) },
         )
         SettingsDivider()
@@ -280,7 +280,7 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "CPU CLUT Render",
             options = listOf("Off", "Normal", "Aggr."),
             selectedIndex = s.cpuClutRender.coerceIn(0, 2),
-            description = "Renders CLUTs on the CPU to fix palette/colour issues in some games.",
+            description = stringResource(R.string.fixes_cpu_clut_help),
             onChange = { apply(s.copy(cpuClutRender = it)) },
         )
         SettingsDivider()
@@ -288,56 +288,56 @@ fun FixesTab(state: MutableState<Settings>) {
             label = "Limit 24-Bit Depth",
             options = listOf("Off", "Upper", "Lower"),
             selectedIndex = s.limit24BitDepth.coerceIn(0, 2),
-            description = "Depth-buffer hack that can reduce z-fighting in some hardware-rendered games.",
+            description = stringResource(R.string.fixes_depth_zfb_help),
             onChange = { apply(s.copy(limit24BitDepth = it)) },
         )
         SettingsDivider()
         ToggleRow(
             "GPU Palette Conversion",
             s.gpuPaletteConversion,
-            description = "Does palette conversion on the GPU. Can help or hurt depending on the game.",
+            description = stringResource(R.string.fixes_palette_conversion_help),
         ) { apply(s.copy(gpuPaletteConversion = it)) }
         SettingsDivider()
         ToggleRow(
             "CPU Framebuffer Conversion",
             s.cpuFramebufferConversion,
-            description = "Converts framebuffer formats on the CPU to fix specific effects.",
+            description = stringResource(R.string.fixes_fb_conversion_help),
         ) { apply(s.copy(cpuFramebufferConversion = it)) }
         SettingsDivider()
         ToggleRow(
             "Read Targets When Closing",
             s.readTargetsWhenClosing,
-            description = "Flushes render targets back to memory when closing them.",
+            description = stringResource(R.string.fixes_flush_rt_after_draw_help),
         ) { apply(s.copy(readTargetsWhenClosing = it)) }
         SettingsDivider()
         ToggleRow(
-            "Preload Frame Data",
+            stringResource(R.string.fixes_preload_frame_data),
             s.preloadFrameData,
-            description = "Uploads the previous frame's data before drawing. Fixes some effects.",
+            description = stringResource(R.string.fixes_preload_frame_data_help),,
         ) { apply(s.copy(preloadFrameData = it)) }
         SettingsDivider()
         ToggleRow(
             "Estimate Texture Region",
             s.estimateTextureRegion,
-            description = "Estimates the used texture region. Helps games that read odd regions.",
+            description = stringResource(R.string.fixes_texture_inside_rt_help),
         ) { apply(s.copy(estimateTextureRegion = it)) }
         SettingsDivider()
         ToggleRow(
             "Draw Buffering",
             s.drawBuffering,
-            description = "Buffers draws before submitting. Can help a few games; diagnostic.",
+            description = stringResource(R.string.fixes_command_buffer_help),
         ) { apply(s.copy(drawBuffering = it)) }
         SettingsDivider()
         ToggleRow(
             "Disable Depth Emulation",
             s.disableDepthEmulation,
-            description = "Disables depth emulation. Faster but breaks many games — last resort.",
+            description = stringResource(R.string.fixes_disable_depth_conversion_help),
         ) { apply(s.copy(disableDepthEmulation = it)) }
         SettingsDivider()
         ToggleRow(
             "Disable Partial Invalidation",
             s.disablePartialInvalidation,
-            description = "Disables partial texture-cache source invalidation.",
+            description = stringResource(R.string.fixes_disable_invalidation_help),
         ) { apply(s.copy(disablePartialInvalidation = it)) }
         SettingsDivider()
         ToggleRow(
@@ -373,13 +373,13 @@ fun FixesTab(state: MutableState<Settings>) {
         ToggleRow(
             "Spin GPU For Readbacks",
             s.spinGpuReadbacks,
-            description = "Busy-waits the GPU on readbacks to reduce stalls. Can raise power use.",
+            description = stringResource(R.string.fixes_gpu_busy_wait_help),
         ) { apply(s.copy(spinGpuReadbacks = it)) }
         SettingsDivider()
         ToggleRow(
             "Spin CPU For Readbacks",
             s.spinCpuReadbacks,
-            description = "Busy-waits the CPU on readbacks to reduce stalls. Can raise power use.",
+            description = stringResource(R.string.fixes_cpu_busy_wait_help),
         ) { apply(s.copy(spinCpuReadbacks = it)) }
 
         SectionHeader("Software Renderer")
@@ -391,13 +391,13 @@ fun FixesTab(state: MutableState<Settings>) {
         ToggleRow(
             "Auto-Flush (SW)",
             s.autoFlushSw,
-            description = "Software-renderer auto-flush. On by default for correctness.",
+            description = stringResource(R.string.fixes_sw_auto_flush_help),
         ) { apply(s.copy(autoFlushSw = it)) }
         SettingsDivider()
         ToggleRow(
             "Mipmapping (SW)",
             s.mipmapSw,
-            description = "Software-renderer mipmapping. On by default.",
+            description = stringResource(R.string.fixes_sw_mipmap_help),
         ) { apply(s.copy(mipmapSw = it)) }
         SettingsDivider()
         IntSliderRow(
@@ -405,7 +405,7 @@ fun FixesTab(state: MutableState<Settings>) {
             value = s.swThreads.coerceIn(0, 10),
             min = 0,
             max = 10,
-            description = "Extra worker threads for the software renderer. 0 = single-threaded.",
+            description = stringResource(R.string.fixes_sw_threads_help),
             onChange = { apply(s.copy(swThreads = it)) },
         )
         SettingsDivider()
@@ -414,7 +414,7 @@ fun FixesTab(state: MutableState<Settings>) {
             value = s.swThreadsHeight.coerceIn(0, 8),
             min = 0,
             max = 8,
-            description = "Software-renderer tile height per thread. Default 4. Restart the game to apply.",
+            description = stringResource(R.string.fixes_sw_tile_height_help),
             onChange = { apply(s.copy(swThreadsHeight = it)) },
         )
         Spacer(Modifier.height(8.dp))

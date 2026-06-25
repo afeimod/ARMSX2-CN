@@ -1,6 +1,8 @@
 package com.armsx2.ui.touch
 
 import androidx.compose.foundation.Image
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -286,7 +288,7 @@ private fun InGameSettingsButton(modifier: Modifier = Modifier, onClick: () -> U
     ) {
         Icon(
             imageVector = LineAwesomeIcons.CogSolid,
-            contentDescription = "Open in-game settings",
+            contentDescription = stringResource(R.string.touch_open_settings),
             tint = Color.White.copy(alpha = 0.92f),
             modifier = Modifier.size(23.dp),
         )
@@ -646,7 +648,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
             painter = painterResource(
                 if (active.value.up) R.drawable.pad_dpad_up_pressed else R.drawable.pad_dpad_up
             ),
-            contentDescription = "DPad up",
+            contentDescription = stringResource(R.string.touch_dpad_up),
             contentScale = ContentScale.Fit,
             alpha = opacity,
             modifier = Modifier
@@ -659,7 +661,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
             painter = painterResource(
                 if (active.value.down) R.drawable.pad_dpad_up_pressed else R.drawable.pad_dpad_up
             ),
-            contentDescription = "DPad down",
+            contentDescription = stringResource(R.string.touch_dpad_down),
             contentScale = ContentScale.Fit,
             alpha = opacity,
             modifier = Modifier
@@ -672,7 +674,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
             painter = painterResource(
                 if (active.value.left) R.drawable.pad_dpad_left_pressed else R.drawable.pad_dpad_left
             ),
-            contentDescription = "DPad left",
+            contentDescription = stringResource(R.string.touch_dpad_left),
             contentScale = ContentScale.Fit,
             alpha = opacity,
             modifier = Modifier
@@ -684,7 +686,7 @@ private fun DpadWidget(cfg: TouchButtonCfg, edit: Boolean) {
             painter = painterResource(
                 if (active.value.right) R.drawable.pad_dpad_right_pressed else R.drawable.pad_dpad_right
             ),
-            contentDescription = "DPad right",
+            contentDescription = stringResource(R.string.touch_dpad_right),
             contentScale = ContentScale.Fit,
             alpha = opacity,
             modifier = Modifier
@@ -967,17 +969,17 @@ private fun EditToolbar(modifier: Modifier = Modifier) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ToolbarChip("Save") {
+            ToolbarChip(stringResource(R.string.touch_save)) {
                 TouchControls.saveLiveLayoutToActive()
                 TouchControls.editMode.value = false
             }
-            ToolbarChip("Discard") {
+            ToolbarChip(stringResource(R.string.touch_discard)) {
                 TouchControls.discardEdits()
                 TouchControls.editMode.value = false
             }
-            ToolbarChip("Reset") { TouchControls.resetActiveToDefault() }
-            ToolbarChip("Profiles") { TouchControls.profileDialogOpen.value = true }
-            ToolbarChip(if (TouchControls.faceMultiTouch.value) "Multi-Touch On" else "Multi-Touch Off") {
+            ToolbarChip(stringResource(R.string.touch_reset)) { TouchControls.resetActiveToDefault() }
+            ToolbarChip(stringResource(R.string.touch_profiles)) { TouchControls.profileDialogOpen.value = true }
+            ToolbarChip(if (TouchControls.faceMultiTouch.value) stringResource(R.string.touch_multitouch_on) else stringResource(R.string.touch_multitouch_off)) {
                 TouchControls.setFaceMultiTouch(!TouchControls.faceMultiTouch.value)
             }
         }
@@ -1099,7 +1101,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                "Touch Control Profiles",
+                stringResource(R.string.touch_profiles_title),
                 color = Color.White,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
@@ -1124,7 +1126,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                     )
                     if (TouchControls.profiles.size > 1) {
                         Text(
-                            "Delete",
+                            stringResource(R.string.touch_delete),
                             color = Color(0xFFFF6B6B),
                             fontSize = 11.sp,
                             modifier = Modifier
@@ -1135,7 +1137,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                 }
             }
             Spacer(Modifier.height(8.dp))
-            Text("Save current layout as new profile:", color = Color(0xFFAAAAAA), fontSize = 12.sp)
+            Text(stringResource(R.string.touch_save_as_hint), color = Color(0xFFAAAAAA), fontSize = 12.sp)
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1145,7 +1147,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                     value = newName,
                     onValueChange = { newName = it },
                     singleLine = true,
-                    placeholder = { Text("Profile name", color = Color(0xFF888888)) },
+                    placeholder = { Text(stringResource(R.string.touch_profile_name), color = Color(0xFF888888)) },
                     colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                         focusedTextColor = Color.White,
                         unfocusedTextColor = Color.White,
@@ -1164,7 +1166,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                         }
                         .padding(horizontal = 12.dp, vertical = 10.dp),
                 ) {
-                    Text("Save As", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                    Text(stringResource(R.string.touch_save_as), color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                 }
             }
             Spacer(Modifier.height(6.dp))
@@ -1176,7 +1178,7 @@ private fun ProfilePicker(onDismiss: () -> Unit) {
                     .clickable(onClick = onDismiss)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             ) {
-                Text("Close", color = Color.White, fontSize = 12.sp)
+                Text(stringResource(R.string.touch_close), color = Color.White, fontSize = 12.sp)
             }
         }
     }

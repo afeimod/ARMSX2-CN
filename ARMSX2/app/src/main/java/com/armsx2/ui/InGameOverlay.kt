@@ -1,7 +1,6 @@
 package com.armsx2.ui
 
 import androidx.compose.ui.res.stringResource
-import com.armsx2.R
 
 import android.content.Intent
 import androidx.activity.compose.BackHandler

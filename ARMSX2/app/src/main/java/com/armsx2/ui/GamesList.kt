@@ -3,7 +3,6 @@ package com.armsx2.ui
 import android.content.Context
 import android.net.Uri
 import android.widget.Toast
-import com.armsx2.R
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi

@@ -12,6 +12,8 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.material3.Text
@@ -42,7 +44,7 @@ fun RecompilerTab(state: MutableState<Settings>) {
             .verticalScroll(scroll),
     ) {
         Text(
-            "Disabling a recompiler drops to interpreter — debug only, expect a heavy slowdown.",
+            stringResource(R.string.recomp_section_help),
             color = Color(0xFFB0B0B0),
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
@@ -52,10 +54,10 @@ fun RecompilerTab(state: MutableState<Settings>) {
         // Row 2: Fastmem + spacers.
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             BubbleGridRow {
-                ToggleBubble("EE (R5900)", s.recEE, modifier = Modifier.weight(1f)) {
+                ToggleBubble(stringResource(R.string.recomp_ee), s.recEE, modifier = Modifier.weight(1f)) {
                     apply(s.copy(recEE = it))
                 }
-                ToggleBubble("IOP (R3000)", s.recIOP, modifier = Modifier.weight(1f)) {
+                ToggleBubble(stringResource(R.string.recomp_iop), s.recIOP, modifier = Modifier.weight(1f)) {
                     apply(s.copy(recIOP = it))
                 }
                 ToggleBubble("VU0", s.recVU0, modifier = Modifier.weight(1f)) {
@@ -66,7 +68,7 @@ fun RecompilerTab(state: MutableState<Settings>) {
                 }
             }
             BubbleGridRow {
-                ToggleBubble("Fastmem", s.enableFastmem, modifier = Modifier.weight(1f)) {
+                ToggleBubble(stringResource(R.string.recomp_fastmem), s.enableFastmem, modifier = Modifier.weight(1f)) {
                     apply(s.copy(enableFastmem = it))
                 }
                 Spacer(Modifier.weight(1f))

@@ -29,6 +29,8 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.nativeKeyCode
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -80,7 +82,7 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             .verticalScroll(scroll),
     ) {
         Text(
-            "Tap an action, then press a physical controller button.",
+            stringResource(R.string.pad_section_help),
             color = Color(0xFFBBBBBB),
             fontSize = 12.sp,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
@@ -119,19 +121,19 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 .padding(horizontal = 6.dp),
             contentAlignment = Alignment.CenterStart,
         ) {
-            Text("Reset Controller Mappings", color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Text(stringResource(R.string.pad_reset_mappings), color = Colors.pasx2_blue, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
 
         // Controller hotkeys now live in their own dedicated "Hotkeys" tab
         // (see HotkeysTab) so they're easier to find than buried under Pad.
         SettingsDivider()
         IntSliderRow(
-            label = "On-screen controls",
+            label = stringResource(R.string.pad_section_touch),
             value = TouchControls.visibilityMode.value,
             min = 0,
             max = 11,
-            description = "On-screen touch buttons. Never = always hidden (for physical-controls devices — also hides the settings cog so nothing overlaps R1). 1–10s = auto-hide after that long without a touch. Auto = show on touch, hide when you use a controller.",
-            valueFormatter = { when (it) { 0 -> "Never"; 11 -> "Auto"; else -> "${it}s" } },
+            description = stringResource(R.string.pad_touch_help),
+            valueFormatter = { when (it) { 0 -> stringResource(R.string.pad_touch_never); 11 -> stringResource(R.string.pad_touch_auto); else -> "${it}s" } },
             onChange = { TouchControls.setVisibilityMode(it) },
         )
     }
@@ -160,7 +162,7 @@ private fun PadBindingRow(
         Text(action.label, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.weight(1f))
         Text(
-            if (capturing) "Press a button..." else ControllerMappings.labelForKey(physical),
+            if (capturing) stringResource(R.string.pad_button_capture_hint) else ControllerMappings.labelForKey(physical),
             color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),
             fontSize = 12.sp,
             fontWeight = FontWeight.Bold,

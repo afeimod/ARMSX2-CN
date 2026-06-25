@@ -37,7 +37,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import com.armsx2.CustomDriver
+import com.armsx2.R
 import com.armsx2.Main
 import com.armsx2.ui.Colors
 import kotlinx.coroutines.Dispatchers
@@ -74,7 +76,7 @@ fun RendererBackendSection() {
     val selIdx = rendererIds.indexOf(currentRenderer).coerceAtLeast(0)
 
     SegmentedRow(
-        label = "Graphics API",
+        label = stringResource(R.string.renderer_graphics_api),
         options = rendererLabels,
         selectedIndex = selIdx,
         onChange = { idx ->
@@ -107,13 +109,13 @@ fun RendererBackendSection() {
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
             Text(
-                "Graphics API / driver changes apply on the next renderer start.",
+                stringResource(R.string.renderer_api_help),
                 color = Color(0xFFAAAAAA),
                 fontSize = 11.sp,
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(8.dp))
-            PillButton(text = "Apply & Restart", accent = true) { Main.restart() }
+            PillButton(text = stringResource(R.string.renderer_apply_restart), accent = true) { Main.restart() }
         }
     }
 }
@@ -152,17 +154,17 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
                 refresh()
                 setDriver(result.id)
             } else {
-                error = "Couldn't import that file. It needs an AdrenoToolsDrivers-style .zip (meta.json + libvulkan_freedreno.so at the root)."
+                error = context.getString(R.string.renderer_import_failed)
             }
         }
     }
 
     Spacer(Modifier.height(6.dp))
-    Text("GPU Driver", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+    Text(stringResource(R.string.renderer_gpu_driver), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
         modifier = Modifier.padding(horizontal = 6.dp))
     Spacer(Modifier.height(2.dp))
     Text(
-        "Replace the system Vulkan driver with Mesa Turnip or another Adreno driver. Recommended for Adreno-6XX devices on stale OEM drivers.",
+        stringResource(R.string.renderer_gpu_driver_help),
         color = Color(0xFFAAAAAA),
         fontSize = 11.sp,
         modifier = Modifier.padding(horizontal = 6.dp),
@@ -170,8 +172,8 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
     Spacer(Modifier.height(6.dp))
 
     DriverRow(
-        name = "Default",
-        sub = "System Vulkan driver",
+        name = stringResource(R.string.renderer_driver_default),
+        sub = stringResource(R.string.renderer_driver_system),
         selected = Main.customDriverId.value == null,
         busy = false,
         onSelect = { setDriver(null) },
@@ -185,7 +187,7 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
                 append(drv.version)
             }
             if (isEmpty() && drv.author.isNotEmpty()) append(drv.author)
-            if (isEmpty()) append("Installed")
+            if (isEmpty()) append(context.getString(R.string.renderer_driver_installed))
         }
         DriverRow(
             name = drv.name,
@@ -207,14 +209,14 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         PillButton(
-            text = if (installingId == "__import__") "Importing…" else "Import .zip",
+            text = if (installingId == "__import__") stringResource(R.string.renderer_driver_importing) else stringResource(R.string.renderer_driver_import_zip),
             accent = false,
         ) {
             if (installingId == null) {
                 importLauncher.launch(arrayOf("application/zip", "application/octet-stream", "*/*"))
             }
         }
-        PillButton(text = if (showBrowser) "Hide online" else "Browse online", accent = false) {
+        PillButton(text = if (showBrowser) stringResource(R.string.renderer_driver_hide_online) else stringResource(R.string.renderer_driver_browse_online), accent = false) {
             showBrowser = !showBrowser
         }
     }
@@ -231,14 +233,14 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
                 val fetched = withContext(Dispatchers.IO) { CustomDriver.fetchRemote() }
                 remote = fetched
                 if (fetched.isEmpty()) {
-                    error = "Couldn't reach github.com/K11MCH1/AdrenoToolsDrivers. Check your connection and try again."
+                    error = context.getString(R.string.renderer_driver_network_failed)
                 }
             }
         }
         val list = remote
         Spacer(Modifier.height(6.dp))
         if (list == null) {
-            Text("Loading driver list…", color = Color(0xFFAAAAAA), fontSize = 11.sp,
+            Text(stringResource(R.string.renderer_driver_loading), color = Color(0xFFAAAAAA), fontSize = 11.sp,
                 modifier = Modifier.padding(horizontal = 6.dp))
         } else {
             Column(
@@ -267,7 +269,7 @@ private fun GpuDriverSection(context: Context, scope: kotlinx.coroutines.Corouti
                                     setDriver(result.id)
                                     showBrowser = false
                                 } else {
-                                    error = "Install failed for ${rd.assetName}. The download or extract step errored — try again."
+                                    error = context.getString(R.string.renderer_driver_install_failed, rd.assetName)
                                 }
                             }
                         },
@@ -317,7 +319,7 @@ private fun DriverRow(
                     overflow = TextOverflow.Ellipsis)
             }
             if (selected) {
-                Text("Active", color = Colors.pasx2_blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                Text(stringResource(R.string.renderer_driver_active), color = Colors.pasx2_blue, fontSize = 11.sp, fontWeight = FontWeight.Bold)
             }
             if (onDelete != null) {
                 Spacer(Modifier.width(10.dp))
@@ -328,7 +330,7 @@ private fun DriverRow(
                         .clickable(onClick = onDelete)
                         .padding(horizontal = 8.dp, vertical = 3.dp),
                 ) {
-                    Text("Delete", color = Color(0xFFFF6B6B), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    Text(stringResource(R.string.renderer_driver_delete), color = Color(0xFFFF6B6B), fontSize = 11.sp, fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -362,10 +364,10 @@ private fun DriverBrowserRow(
             }
             Spacer(Modifier.width(10.dp))
             when {
-                installing -> Text("Installing…", color = Color(0xFFAACCFF), fontSize = 11.sp,
+                installing -> Text(stringResource(R.string.renderer_driver_installing), color = Color(0xFFAACCFF), fontSize = 11.sp,
                     fontWeight = FontWeight.Bold)
-                installed -> PillButton(text = "Use", accent = false, onClick = onSelect)
-                else -> PillButton(text = "Install", accent = true, onClick = onInstall)
+                installed -> PillButton(text = stringResource(R.string.renderer_driver_use), accent = false, onClick = onSelect)
+                else -> PillButton(text = stringResource(R.string.renderer_driver_install), accent = true, onClick = onInstall)
             }
         }
     }

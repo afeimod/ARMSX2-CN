@@ -16,6 +16,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.res.stringResource
+import com.armsx2.R
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -43,17 +45,14 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             .verticalScroll(scroll),
     ) {
         Text(
-            "Controller hotkeys",
+            stringResource(R.string.hotkeys_section_title),
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.Bold,
             modifier = Modifier.padding(horizontal = 6.dp, vertical = 8.dp),
         )
         HelpText(
-            "Bind physical buttons (back paddles work too) to in-game actions — " +
-                "no on-screen cog needed. Press one button for a single bind, or " +
-                "two together for a combo (e.g. Select + R1). Quick Save/Load use " +
-                "the active slot (change it with Cycle Save Slot).",
+            stringResource(R.string.hotkeys_section_help),
         )
         ControllerMappings.SysHotkey.values().forEach { hk ->
             @Suppress("UNUSED_EXPRESSION") ControllerMappings.hotkeyBindTick.value
@@ -77,7 +76,7 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 Spacer(Modifier.weight(1f))
                 if (!unset && !capturing) {
                     Text(
-                        "Clear",
+                        stringResource(R.string.hotkeys_clear),
                         color = Color(0xFFFF6B6B),
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
@@ -91,8 +90,8 @@ fun HotkeysTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
                 }
                 Text(
                     when {
-                        capturing -> "Press 1 button, or 2 together…"
-                        unset -> "Not set"
+                        capturing -> stringResource(R.string.hotkeys_capture_hint)
+                        unset -> stringResource(R.string.hotkeys_not_set)
                         else -> binding
                     },
                     color = if (capturing) Color(0xFFFFD33A) else Color(0xFFCCCCCC),

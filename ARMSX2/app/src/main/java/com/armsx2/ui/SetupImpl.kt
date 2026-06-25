@@ -1,7 +1,5 @@
 package com.armsx2.ui
 
-import com.armsx2.R
-
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
