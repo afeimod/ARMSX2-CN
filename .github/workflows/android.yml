@@ -138,6 +138,29 @@ jobs:
           find . -type f \( -name 'gradlew' -o -name 'gradlew.bat' \) -exec chmod +x {} +
           ls -l ./gradlew
 
+      - name: Sync shaderc third_party dependencies
+        # shaderc's CMakeLists.txt unconditionally adds its `third_party/`
+        # subdir, which hard-requires spirv-tools, spirv-headers, glslang,
+        # re2, effcee, abseil_cpp, and googletest source trees to exist at
+        # cmake-configure time. The repo ships a DEPS manifest with pinned
+        # commit hashes for each, but the top-level .gitmodules is empty
+        # in this fork, so `actions/checkout` with submodules: recursive
+        # does nothing for shaderc and configureCMakeRelease fails with:
+        #   "SPIRV-Tools was not found - required for compilation"
+        # Run shaderc's own git-sync-deps utility, which clones each
+        # dep to the right relative path under third_party/.
+        working-directory: ARMSX2/app/src/main/cpp/3rdparty/shaderc
+        run: |
+          set -e
+          chmod +x utils/git-sync-deps
+          # -s = silent, omit the per-clone progress chatter
+          python3 utils/git-sync-deps
+          echo "--- shaderc third_party contents ---"
+          ls -1 third_party
+          for d in third_party/*/; do
+            printf '%-30s %s\n' "$d" "$(git -C "$d" rev-parse --short HEAD 2>/dev/null || echo 'NO_GIT')"
+          done
+
       - name: Build APK
         working-directory: ARMSX2
         env:
