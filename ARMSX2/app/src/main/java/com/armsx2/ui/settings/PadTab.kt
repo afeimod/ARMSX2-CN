@@ -133,7 +133,10 @@ fun PadTab(@Suppress("UNUSED_PARAMETER") state: MutableState<Settings>) {
             min = 0,
             max = 11,
             description = stringResource(R.string.pad_touch_help),
-            valueFormatter = { when (it) { 0 -> stringResource(R.string.pad_touch_never); 11 -> stringResource(R.string.pad_touch_auto); else -> "${it}s" } },
+            // valueFormatter is a (Int) -> String lambda, not @Composable — can't call stringResource() inside.
+            // "Never" / "Auto" stay in English; pad_touch_never / pad_touch_auto keys are still defined for any future
+            // call site that can use them.
+            valueFormatter = { when (it) { 0 -> "Never"; 11 -> "Auto"; else -> "${it}s" } },
             onChange = { TouchControls.setVisibilityMode(it) },
         )
     }
