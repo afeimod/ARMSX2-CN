@@ -124,6 +124,20 @@ jobs:
       - name: ccache reset stats
         run: ccache -z
 
+      - name: Ensure gradlew is executable
+        # Git does not preserve the executable bit by default
+        # (core.fileMode=false on most runners), so the wrapper script
+        # checked out from the repo lacks +x and `./gradlew` fails
+        # with EACCES (exit 126). Same goes for any executable under
+        # app/src/main/cpp/3rdparty/ (libwebp, etc.) that the build
+        # may shell out to. Restore the bit before invoking.
+        working-directory: ARMSX2
+        run: |
+          set -e
+          chmod +x ./gradlew
+          find . -type f \( -name 'gradlew' -o -name 'gradlew.bat' \) -exec chmod +x {} +
+          ls -l ./gradlew
+
       - name: Build APK
         working-directory: ARMSX2
         env:
