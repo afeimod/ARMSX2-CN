@@ -182,11 +182,27 @@ jobs:
         run: |
           set -e
           set -o pipefail
+          # Sanity: shaderc expects ${SHADERC_THIRD_PARTY_ROOT_DIR}/
+          # {spirv-tools,spirv-headers,glslang,re2,effcee,abseil_cpp}/
+          # to exist. The Sync step puts them under
+          # src/main/cpp/3rdparty/shaderc/third_party/. Print absolute
+          # paths so the next line in the log is decisive when cmake
+          # later complains about missing dirs.
+          echo '--- shaderc third_party layout ---'
+          for d in spirv-tools spirv-headers glslang re2 effcee abseil_cpp googletest; do
+            p="src/main/cpp/3rdparty/shaderc/third_party/$d"
+            if [ -d "$p" ]; then
+              printf 'OK   %s  -> %s  (HEAD %s)\n' "$d" "$p" "$(git -C "$p" rev-parse --short HEAD 2>/dev/null || echo NO_GIT)"
+            else
+              printf 'MISS %s  -> %s\n' "$d" "$p"
+            fi
+          done
           rm -rf /tmp/cxx-diag
           mkdir -p /tmp/cxx-diag
           # Capture full stderr (cmake writes the real error to stderr,
           # AGP's logger only forwards a redacted subset) and surface it
           # in the GitHub Actions log.
+          set +e
           ${CMAKE} \
             -Hsrc/main/cpp \
             -B/tmp/cxx-diag \
@@ -207,7 +223,23 @@ jobs:
             "-DCMAKE_C_FLAGS=-O3 -g" \
             "-DCMAKE_CXX_FLAGS=-O3 -g" \
             2>&1 | tee /tmp/cxx-diag-configure.log
-          echo "--- cmake configure succeeded ---"
+          echo "--- cmake configure exit: ${PIPESTATUS[0]} ---"
+          # Always upload the cmake internals, even on failure — the
+          # real error message lives in CMakeError.log, not in stdout.
+          mkdir -p /tmp/diag-artifacts
+          cp -r /tmp/cxx-diag/CMakeFiles /tmp/diag-artifacts/ || true
+          cp /tmp/cxx-diag-configure.log /tmp/diag-artifacts/ || true
+          tar -C /tmp -czf /tmp/diag-artifacts.tar.gz diag-artifacts
+        continue-on-error: true
+
+      - name: Upload cmake diagnostic bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cxx-diag
+          path: /tmp/diag-artifacts.tar.gz
+          if-no-files-found: warn
+          retention-days: 3
 
       - name: Build APK
         working-directory: ARMSX2
