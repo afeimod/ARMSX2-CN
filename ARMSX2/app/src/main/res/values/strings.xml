@@ -417,7 +417,8 @@
     <string name="settings_scope_game">Game</string>
     <string name="settings_scope_game_with_serial">Game · %1$s</string>
     <string name="settings_no_disc">No disc</string>
-    <string name="settings_nav_help">Press L and R to navigate between sections, on controller\nFor touch, swipe to see all sections</string>
+    <string name="settings_nav_help">Press L and R to navigate between sections, on controller
+For touch, swipe to see all sections</string>
     <string name="settings_close_hint_b">Press B to exit on controller</string>
     <string name="settings_close_hint_y">Press Y to open RetroAchievements on controller</string>
     <string name="settings_nav_hint">Scroll up/down and left/right to navigate</string>
@@ -475,7 +476,13 @@
     <string name="perf_gamefix_extra_xgkick">Extra XGKICK</string>
     <string name="perf_gamefix_goemon_tlb">Goemon TLB</string>
     <string name="perf_gamefix_vu_sync">VU Sync</string>
-    <string name="perf_gamefix_help">Skip BIOS - bypasses the PS2 startup screen.\nGame Fixes - master switch for manual compatibility fixes.\nSkip MPEG - skips problematic video playback.\nFMV Software - switches FMVs to software rendering.\nEE Timing - adjusts CPU timing for sensitive games.\nInstant DMA - completes DMA transfers immediately.\nBlit FPS - uses PCSX2's internal FPS blit workaround.</string>
+    <string name="perf_gamefix_help">Skip BIOS - bypasses the PS2 startup screen.
+Game Fixes - master switch for manual compatibility fixes.
+Skip MPEG - skips problematic video playback.
+FMV Software - switches FMVs to software rendering.
+EE Timing - adjusts CPU timing for sensitive games.
+Instant DMA - completes DMA transfers immediately.
+Blit FPS - uses PCSX2's internal FPS blit workaround.</string>
     <string name="perf_speedhack_mtvu">MTVU</string>
     <string name="perf_speedhack_instant_vu1">Instant VU1</string>
     <string name="perf_speedhack_vu_flag_hack">VU Flag Hack</string>
