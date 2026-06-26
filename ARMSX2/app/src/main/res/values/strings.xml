@@ -92,8 +92,8 @@
     <!-- ============================================================
          settings/NetworkTab.kt
          ============================================================ -->
-    <string name="settings_network_help_main">Sockets + Auto is the normal Android setup. Advanced fields mirror PCSX2\'s DEV9 INI keys for games that need custom DHCP/DNS behavior.</string>
-    <string name="settings_network_help_hdd">A bare name (e.g. DEV9hdd.raw) lives in the data folder and is auto-created (8 GiB sparse) on first boot. Enter a full path to point at an existing image. This is saved here, so it won\'t reset on reboot.</string>
+    <string name="settings_network_help_main">Sockets + Auto is the normal Android setup. Advanced fields mirror PCSX2&apos;s DEV9 INI keys for games that need custom DHCP/DNS behavior.</string>
+    <string name="settings_network_help_hdd">A bare name (e.g. DEV9hdd.raw) lives in the data folder and is auto-created (8 GiB sparse) on first boot. Enter a full path to point at an existing image. This is saved here, so it won&apos;t reset on reboot.</string>
     <string name="settings_network_hdd_image_title">HDD Image</string>
     <string name="settings_network_hdd_image_label">HDD image</string>
 
@@ -103,7 +103,7 @@
     <string name="settings_patches_title">Patch codes</string>
     <string name="settings_patches_warning_yes">YES</string>
     <string name="settings_patches_warning_no">NO</string>
-    <string name="settings_patches_warning_dont_ask">DON\'T ASK AGAIN</string>
+    <string name="settings_patches_warning_dont_ask">DON&apos;T ASK AGAIN</string>
     <string name="settings_patches_select_all">Select all</string>
     <string name="settings_patches_none">None</string>
     <string name="settings_patches_apply">APPLY</string>
@@ -143,7 +143,7 @@
     <string name="fixes_section_display">Display Fixes</string>
     <string name="fixes_display_help">PCRTC / presentation fixes for the displayed image. Anti-Blur is on by default; the rest are off unless a game needs them.</string>
     <string name="fixes_anti_blur">Anti-Blur</string>
-    <string name="fixes_anti_blur_help">Reduces the blur PCSX2 adds to mimic the PS2\'s blend. On by default.</string>
+    <string name="fixes_anti_blur_help">Reduces the blur PCSX2 adds to mimic the PS2&apos;s blend. On by default.</string>
     <string name="fixes_screen_offsets">Screen Offsets</string>
     <string name="fixes_screen_offsets_help">Applies the PCRTC screen offsets (centres the image like real hardware).</string>
     <string name="fixes_show_overscan">Show Overscan</string>
@@ -151,11 +151,11 @@
     <string name="fixes_disable_interlace_offset">Disable Interlace Offset</string>
     <string name="fixes_disable_interlace_offset_help">Removes the interlace field offset; can stop shimmer but may add combing.</string>
     <string name="fixes_sync_to_host_refresh">Sync To Host Refresh</string>
-    <string name="fixes_sync_to_host_refresh_help">Paces emulation to your screen\'s refresh rate for smoother scrolling.</string>
+    <string name="fixes_sync_to_host_refresh_help">Paces emulation to your screen&apos;s refresh rate for smoother scrolling.</string>
     <string name="fixes_disable_framebuffer_fetch">Disable Framebuffer Fetch</string>
     <string name="fixes_disable_framebuffer_fetch_help">Disables the framebuffer-fetch blending path. Diagnostic / compatibility.</string>
     <string name="fixes_override_texture_barriers">Override Texture Barriers</string>
-    <string name="fixes_override_texture_barriers_help">Forces the renderer\'s texture-barrier support on/off. Auto is recommended.</string>
+    <string name="fixes_override_texture_barriers_help">Forces the renderer&apos;s texture-barrier support on/off. Auto is recommended.</string>
     <string name="fixes_hw_accurate_alpha_test">HW Accurate Alpha Test</string>
     <string name="fixes_hw_accurate_alpha_test_help">More accurate hardware alpha testing. Fixes some transparency artifacts; small speed cost.</string>
     <string name="fixes_disable_vertex_shader_expand">Disable Vertex Shader Expand</string>
@@ -163,7 +163,7 @@
     <string name="fixes_use_blit_swap_chain">Use Blit Swap Chain</string>
     <string name="fixes_use_blit_swap_chain_help">Uses a blit present model instead of flip. Renderer-init — restart the game to apply.</string>
     <string name="fixes_disable_shader_cache">Disable Shader Cache</string>
-    <string name="fixes_disable_shader_cache_help">Don\'t cache compiled shaders to disk (recompiles each launch). Renderer-init — restart the game to apply.</string>
+    <string name="fixes_disable_shader_cache_help">Don&apos;t cache compiled shaders to disk (recompiles each launch). Renderer-init — restart the game to apply.</string>
     <string name="fixes_integer_scaling">Integer Scaling</string>
     <string name="fixes_integer_scaling_help">Scales the image by whole-number factors for crisp, even pixels.</string>
     <string name="fixes_dithering">Dithering</string>
@@ -212,7 +212,7 @@
     <string name="fixes_flush_rt_after_draw">Flush RT After Draw</string>
     <string name="fixes_flush_rt_after_draw_help">Flushes render targets back to memory when closing them.</string>
     <string name="fixes_preload_frame_data">Preload Frame Data</string>
-    <string name="fixes_preload_frame_data_help">Uploads the previous frame\'s data before drawing. Fixes some effects.</string>
+    <string name="fixes_preload_frame_data_help">Uploads the previous frame&apos;s data before drawing. Fixes some effects.</string>
     <string name="fixes_texture_inside_rt">Texture Inside RT</string>
     <string name="fixes_texture_inside_rt_help">Estimates the used texture region. Helps games that read odd regions.</string>
     <string name="fixes_command_buffer">Command Buffer</string>
@@ -250,7 +250,7 @@
     <!-- ============================================================
          settings/OverlayTab.kt
          ============================================================ -->
-    <string name="overlay_section_help">Show or hide parts of the performance overlay. Turning GPU off also reduces the overlay\'s polling cost.</string>
+    <string name="overlay_section_help">Show or hide parts of the performance overlay. Turning GPU off also reduces the overlay&apos;s polling cost.</string>
     <string name="overlay_show_gpu">GPU usage (saves perf when off)</string>
     <string name="overlay_show_cpu">CPU usage</string>
     <string name="overlay_show_vps">VPS (vblanks/sec)</string>
@@ -289,7 +289,7 @@
     <string name="renderer_api_vulkan">Vulkan</string>
     <string name="renderer_api_software">Software</string>
     <string name="renderer_api_help">Graphics API / driver changes apply on the next renderer start.</string>
-    <string name="renderer_import_failed">Couldn\'t import that file. It needs an AdrenoToolsDrivers-style .zip (meta.json + libvulkan_freedreno.so).</string>
+    <string name="renderer_import_failed">Couldn&apos;t import that file. It needs an AdrenoToolsDrivers-style .zip (meta.json + libvulkan_freedreno.so).</string>
     <string name="renderer_gpu_driver">GPU Driver</string>
     <string name="renderer_gpu_driver_help">Replace the system Vulkan driver with Mesa Turnip or another Adreno driver. Recommended for Adreno-6xx/7xx GPUs.</string>
     <string name="renderer_driver_default">Default</string>
@@ -299,7 +299,7 @@
     <string name="renderer_driver_import_zip">Import .zip</string>
     <string name="renderer_driver_hide_online">Hide online</string>
     <string name="renderer_driver_browse_online">Browse online</string>
-    <string name="renderer_driver_network_failed">Couldn\'t reach github.com/K11MCH1/AdrenoToolsDrivers. Check your connection and try again.</string>
+    <string name="renderer_driver_network_failed">Couldn&apos;t reach github.com/K11MCH1/AdrenoToolsDrivers. Check your connection and try again.</string>
     <string name="renderer_driver_loading">Loading driver list…</string>
     <string name="renderer_driver_install_failed">Install failed for %1$s. The download or extract step errored — try again.</string>
     <string name="renderer_driver_active">Active</string>
@@ -357,7 +357,7 @@
     <string name="renderer_saturation">Saturation</string>
     <string name="renderer_gamma">Gamma</string>
     <string name="renderer_texture_replacements">Texture Replacements</string>
-    <string name="renderer_texture_replacements_load">Loads replacement textures from the active game\'s texture folder.</string>
+    <string name="renderer_texture_replacements_load">Loads replacement textures from the active game&apos;s texture folder.</string>
     <string name="renderer_texture_replacements_async">Loads replacements in the background to reduce stalls.</string>
     <string name="renderer_texture_replacements_scan">Scans replacements at boot. Slower startup, fewer in-game hitches.</string>
     <string name="renderer_texture_replacements_dump">Writes textures used by the game to disk for pack creation.</string>
@@ -445,7 +445,7 @@ For touch, swipe to see all sections</string>
     <string name="perf_vu1_round_mode">VU1 Round Mode</string>
     <string name="perf_vu1_round_mode_help">VU1 float rounding. Chop is the PS2 default. Restart the game to apply.</string>
     <string name="perf_fps_speed_limit">FPS / Speed Limit</string>
-    <string name="perf_fps_speed_limit_help">Caps emulation speed as a percent of the game's native rate.</string>
+    <string name="perf_fps_speed_limit_help">Caps emulation speed as a percent of the game&apos;s native rate.</string>
     <string name="perf_frame_skip">Frame Skip</string>
     <string name="perf_frame_skip_help">Low-end devices: draw 1 of every (N+1) frames to free up GPU. Emulation still runs full speed; higher = choppier but faster.</string>
     <string name="perf_round_nearest">Nearest</string>
@@ -482,7 +482,7 @@ Skip MPEG - skips problematic video playback.
 FMV Software - switches FMVs to software rendering.
 EE Timing - adjusts CPU timing for sensitive games.
 Instant DMA - completes DMA transfers immediately.
-Blit FPS - uses PCSX2's internal FPS blit workaround.</string>
+Blit FPS - uses PCSX2&apos;s internal FPS blit workaround.</string>
     <string name="perf_speedhack_mtvu">MTVU</string>
     <string name="perf_speedhack_instant_vu1">Instant VU1</string>
     <string name="perf_speedhack_vu_flag_hack">VU Flag Hack</string>
