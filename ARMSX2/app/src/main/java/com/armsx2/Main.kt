@@ -1242,6 +1242,20 @@ class Main: ComponentActivity() {
                 else -> return super.dispatchKeyEvent(event)
             }
         }
+        // In-game BACK key → quick menu (Resume / Save / Load / Swap Disc /
+        // Game Settings / Close Game …). The overlay already provides all of
+        // these on the PlayingNow tab — we just need to expose it. Only fires
+        // while a game is actually running and the overlay isn't already up
+        // (library/memory-card UIs further down have their own BACK handlers).
+        if (kc == KeyEvent.KEYCODE_BACK &&
+            event.action == KeyEvent.ACTION_DOWN &&
+            event.repeatCount == 0 &&
+            !WindowImpl.overlayVisible.value &&
+            eState.value == EmuState.RUNNING
+        ) {
+            InGameOverlay.toggle()
+            return true
+        }
         if (WindowImpl.overlayVisible.value) {
             val handled = when (kc) {
                 KeyEvent.KEYCODE_DPAD_LEFT -> when (event.action) {
