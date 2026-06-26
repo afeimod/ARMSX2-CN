@@ -528,4 +528,18 @@ Blit FPS - 用 PCSX2 内部 FPS Blit 兼容方案。</string>
     <string name="fixes_disable_safe_features_help">关闭内部的安全特性回退。仅供高级 / 诊断使用。</string>
     <string name="fixes_disable_render_fixes">禁用渲染修复</string>
     <string name="fixes_disable_render_fixes_help">关闭自动渲染修复。仅供高级 / 诊断使用。</string>
+    <!-- 游戏中快捷菜单（返回键）。 -->
+    <string name="quick_menu_title">快捷菜单</string>
+    <string name="quick_menu_resume">继续游戏</string>
+    <string name="quick_menu_save_state">保存进度</string>
+    <string name="quick_menu_load_state">读取进度</string>
+    <string name="quick_menu_swap_disc">切换光盘</string>
+    <string name="quick_menu_boot_disc">引导光盘</string>
+    <string name="quick_menu_library">游戏库</string>
+    <string name="quick_menu_renderer">渲染器</string>
+    <string name="quick_menu_frame_limit">帧率限制</string>
+    <string name="quick_menu_touch_layout">触控布局</string>
+    <string name="quick_menu_osd">屏幕信息</string>
+    <string name="quick_menu_reset">重置主机</string>
+    <string name="quick_menu_close_game">退出游戏</string>
 </resources>
