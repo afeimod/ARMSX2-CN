@@ -949,28 +949,28 @@ object SetupImpl {
                     item {
                         SetupStepCard(
                             step = "1.",
-                            title = "App Data Folder",
-                            description = "Where memory cards, save states, and configs are stored. Internal uses your main device storage; SD Card uses a memory card if one is present. (Game ROMs are added separately.)",
+                            title = stringResource(R.string.setup_app_data_title),
+                            description = stringResource(R.string.setup_app_data_help),
                             ready = appFolderReady(),
                             status = appFolderStatus(),
                             visual = SetupVisual.Folder,
                             onClick = onUseDefaultSystem,
-                            primaryLabel = "SD Card",
+                            primaryLabel = stringResource(R.string.setup_storage_sd_card),
                             onPrimary = onPickSystem,
-                            secondaryLabel = "Internal",
+                            secondaryLabel = stringResource(R.string.setup_storage_internal),
                             onSecondary = onUseDefaultSystem,
                         )
                     }
                     item {
                         SetupStepCard(
                             step = "2.",
-                            title = "BIOS Location",
-                            description = "Select a PS2 BIOS file to start playing your games.",
+                            title = stringResource(R.string.setup_bios_title),
+                            description = stringResource(R.string.setup_bios_help),
                             ready = biosReady(),
                             status = biosStatus(),
                             visual = SetupVisual.Bios,
                             onClick = onPickBiosFolder,
-                            primaryLabel = if (biosScanning.value) "Scanning..." else "Scan Folder",
+                            primaryLabel = if (biosScanning.value) stringResource(R.string.common_scanning) else stringResource(R.string.setup_bios_scan_folder),
                             onPrimary = onPickBiosFolder,
                             secondaryLabel = null,
                             onSecondary = null,
@@ -979,13 +979,13 @@ object SetupImpl {
                     item {
                         SetupStepCard(
                             step = "3.",
-                            title = "ROM Location",
-                            description = "Pick one or more folders where you keep your PS2 games. Supports ISO, CHD, BIN, IMG, MDF, and GZ.",
+                            title = stringResource(R.string.setup_rom_title),
+                            description = stringResource(R.string.setup_rom_help),
                             ready = romsReady(),
                             status = romsStatus(),
                             visual = SetupVisual.Disc,
                             onClick = onPickRoms,
-                            primaryLabel = if (romsDirsState.isEmpty()) "Select Folder" else "Add Folder",
+                            primaryLabel = if (romsDirsState.isEmpty()) stringResource(R.string.setup_rom_select_folder) else stringResource(R.string.setup_add_folder),
                             onPrimary = onPickRoms,
                             secondaryLabel = null,
                             onSecondary = null,

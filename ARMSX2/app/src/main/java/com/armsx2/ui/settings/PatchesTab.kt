@@ -465,27 +465,27 @@ fun PatchesTab(state: MutableState<Settings>) {
             .verticalScroll(scroll),
     ) {
         Text(
-            "Patches apply at boot — restart the game after changing these.",
+            stringResource(R.string.patches_boot_help),
             color = Color(0xFFB0B0B0),
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
-        ToggleRow("Enable Patches", s.enablePatches) { apply(s.copy(enablePatches = it)) }
+        ToggleRow(stringResource(R.string.patches_enable), s.enablePatches) { apply(s.copy(enablePatches = it)) }
         SettingsDivider()
-        ToggleRow("Widescreen (16:9) Patches", s.enableWideScreenPatches) {
+        ToggleRow(stringResource(R.string.patches_widescreen), s.enableWideScreenPatches) {
             apply(s.copy(enableWideScreenPatches = it))
         }
         SettingsDivider()
-        ToggleRow("No-Interlacing Patches", s.enableNoInterlacingPatches) {
+        ToggleRow(stringResource(R.string.patches_no_interlacing), s.enableNoInterlacingPatches) {
             apply(s.copy(enableNoInterlacingPatches = it))
         }
         SettingsDivider()
-        ToggleRow("Cheats (PNACH)", s.enableCheats) { apply(s.copy(enableCheats = it)) }
+        ToggleRow(stringResource(R.string.patches_cheats), s.enableCheats) { apply(s.copy(enableCheats = it)) }
         SettingsDivider()
 
         // ---- PNACH importer ----
         Text(
-            "Installed patches & cheats (.pnach)",
+            stringResource(R.string.patches_section_title),
             color = Color.White,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
@@ -493,16 +493,16 @@ fun PatchesTab(state: MutableState<Settings>) {
         )
         Text(
             when {
-                activeGameId != null -> "Active game: ${activeGameId.serial} / CRC ${activeGameId.crc}"
-                libraryGame?.serial?.isNotBlank() == true -> "Selected game: ${libraryGame.serial} — browse its patches below."
-                else -> "Start a game, or long-press one in your library, to browse its patches."
+                activeGameId != null -> stringResource(R.string.patches_active_game, activeGameId.serial, activeGameId.crc)
+                libraryGame?.serial?.isNotBlank() == true -> stringResource(R.string.patches_selected_game, libraryGame.serial!!)
+                else -> stringResource(R.string.patches_section_help1)
             },
             color = Color(0xFF8C8C8C),
             fontSize = 10.sp,
             modifier = Modifier.padding(bottom = 4.dp),
         )
         Text(
-            "Paste/import PCSX2 PNACH patch= lines. Hardcore achievements disables cheats.",
+            stringResource(R.string.patches_section_help2),
             color = Color(0xFF8C8C8C),
             fontSize = 10.sp,
             modifier = Modifier.padding(bottom = 4.dp),
@@ -523,7 +523,7 @@ fun PatchesTab(state: MutableState<Settings>) {
             contentAlignment = Alignment.CenterStart,
         ) {
             Text(
-                if (downloading) "Fetching…" else "⤓  Browse patches & cheats online",
+                if (downloading) stringResource(R.string.common_fetching) else "⤓  " + stringResource(R.string.patches_browse_online),
                 color = Colors.pasx2_blue,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,

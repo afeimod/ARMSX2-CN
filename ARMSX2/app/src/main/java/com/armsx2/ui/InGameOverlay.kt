@@ -1,5 +1,6 @@
 package com.armsx2.ui
 
+import androidx.annotation.StringRes
 import androidx.compose.ui.res.stringResource
 
 import android.content.Intent
@@ -154,18 +155,18 @@ object InGameOverlay {
     // PlayingNow holds the existing pause-menu options (Resume / Save
     // State / Swap Disc / Reset / Close / etc), Performance and
     // Renderer host the speedhack + GS toggles backed by ConfigStore.
-    private enum class Tab(val label: String) {
-        PlayingNow("Play"),
-        Performance("Perf"),
-        Renderer("Render"),
-        Fixes("Fixes"),
-        Audio("Audio"),
-        Patches("Patches"),
-        Network("Network"),
-        Overlay("Overlay"),
-        Pad("Pad"),
-        Hotkeys("Hotkeys"),
-        Recompiler("JIT"),
+    private enum class Tab(@StringRes val labelRes: Int) {
+        PlayingNow(R.string.settings_tab_play),
+        Performance(R.string.settings_tab_perf),
+        Renderer(R.string.settings_tab_render),
+        Fixes(R.string.settings_tab_fixes),
+        Audio(R.string.settings_tab_audio),
+        Patches(R.string.settings_tab_patches),
+        Network(R.string.settings_tab_network),
+        Overlay(R.string.settings_tab_overlay),
+        Pad(R.string.settings_tab_pad),
+        Hotkeys(R.string.settings_tab_hotkeys),
+        Recompiler(R.string.settings_tab_jit),
     }
     private val currentTab = mutableStateOf(Tab.PlayingNow)
 
@@ -1023,8 +1024,7 @@ object InGameOverlay {
                     Spacer(Modifier.height(12.dp))
                     TabStrip()
                     Text(
-                        "Press L and R to navigate between sections, on controller\n" +
-                            "For touch, swipe to see all sections",
+                        stringResource(R.string.settings_nav_help),
                         color = Color.White.copy(alpha = 0.45f),
                         fontSize = 10.sp,
                         lineHeight = 13.sp,
@@ -1103,14 +1103,14 @@ object InGameOverlay {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Press B to exit on controller",
+                    stringResource(R.string.settings_close_hint_b),
                     color = Color.White.copy(alpha = 0.45f),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.SemiBold,
                     textAlign = TextAlign.End,
                 )
                 Text(
-                    "Press Y to open RetroAchievements on controller",
+                    stringResource(R.string.settings_close_hint_y),
                     color = Color.White.copy(alpha = 0.45f),
                     fontSize = 9.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -1280,7 +1280,7 @@ object InGameOverlay {
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        if (globalSettingsView) "Global" else serial ?: "No disc",
+                        if (globalSettingsView) stringResource(R.string.settings_scope_global) else serial ?: stringResource(R.string.settings_no_disc),
                         color = if (serial != null || globalSettingsView) Color(0xFFAACCFF) else Color(0xFF808080),
                         fontSize = 13.sp,
                     )
@@ -1503,7 +1503,7 @@ object InGameOverlay {
     @Composable
     private fun SettingsScrollHint(modifier: Modifier = Modifier) {
         Text(
-            "Scroll up/down and left/right to navigate",
+            stringResource(R.string.settings_nav_hint),
             color = Color.White.copy(alpha = 0.58f),
             fontSize = 10.sp,
             fontWeight = FontWeight.SemiBold,
@@ -1579,7 +1579,7 @@ object InGameOverlay {
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Text(
-                        tab.label,
+                        stringResource(tab.labelRes),
                         color = if (active) Color.White else Color(0xFF888888),
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
@@ -1617,13 +1617,13 @@ object InGameOverlay {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ScopeHalf(
-                label = "Global",
+                label = stringResource(R.string.settings_scope_global),
                 active = settingsScope.value == SettingsScope.Global,
                 enabled = true,
                 modifier = Modifier.weight(1f),
             ) { settingsScope.value = SettingsScope.Global }
             ScopeHalf(
-                label = if (serial != null) "Game · $serial" else "Game",
+                label = if (serial != null) stringResource(R.string.settings_scope_game_with_serial, serial) else stringResource(R.string.settings_scope_game),
                 active = settingsScope.value == SettingsScope.Game,
                 enabled = gameEnabled,
                 modifier = Modifier.weight(1f),

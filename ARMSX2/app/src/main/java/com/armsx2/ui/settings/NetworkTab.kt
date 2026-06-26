@@ -51,7 +51,8 @@ fun NetworkTab(state: MutableState<Settings>) {
     ControllerAutoScroll(scroll)
     val adapters = remember { enumerateAdapters() }
     val apiValues = listOf("Unset", "PCAP Bridged", "PCAP Switched", "TAP", "Sockets")
-    val apiLabels = listOf("Unset", "PCAP Br.", "PCAP Sw.", "TAP", "Sockets")
+    // apiLabels is composed inside the Composable (SegmentedRow) below
+    // because stringResource() can't be called outside @Composable scope.
     val apiIndex = apiValues.indexOf(s.dev9EthApi).let { if (it >= 0) it else apiValues.lastIndex }
     val dnsModes = listOf("Manual", "Auto", "Internal")
     val dns1Index = dnsModes.indexOf(s.dev9ModeDns1).let { if (it >= 0) it else 1 }
@@ -65,14 +66,14 @@ fun NetworkTab(state: MutableState<Settings>) {
             .verticalScroll(scroll),
     ) {
         Text(
-            "PS2 network/HDD support. Restart the game or BIOS after changing DEV9.",
+            stringResource(R.string.network_section_help),
             color = Color(0xFFB0B0B0),
             fontSize = 11.sp,
             modifier = Modifier.padding(bottom = 8.dp),
         )
         HelpText(stringResource(R.string.settings_network_help_main))
 
-        ToggleRow("Enable DEV9 Ethernet", s.dev9EthEnable) {
+        ToggleRow(stringResource(R.string.network_enable_dev9), s.dev9EthEnable) {
             val currentDevice = s.dev9EthDevice.ifEmpty { "Auto" }
             apply(
                 s.copy(
@@ -84,8 +85,14 @@ fun NetworkTab(state: MutableState<Settings>) {
         }
         SettingsDivider()
         SegmentedRow(
-            label = "Ethernet API",
-            options = apiLabels,
+            label = stringResource(R.string.network_eth_api),
+            options = listOf(
+                stringResource(R.string.network_eth_api_unset),
+                stringResource(R.string.network_eth_api_pcap_br),
+                stringResource(R.string.network_eth_api_pcap_sw),
+                stringResource(R.string.network_eth_api_tap),
+                stringResource(R.string.network_eth_api_sockets),
+            ),
             selectedIndex = apiIndex,
             onChange = { apply(s.copy(dev9EthApi = apiValues[it])) },
         )
@@ -223,7 +230,7 @@ private fun DeviceChooser(
             .background(rowAura())
             .padding(horizontal = 6.dp, vertical = 4.dp),
     ) {
-        Text("Ethernet Device", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        Text(stringResource(R.string.network_eth_device), color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(4.dp))
         adapters.forEach { adapter ->
             val active = adapter == selected

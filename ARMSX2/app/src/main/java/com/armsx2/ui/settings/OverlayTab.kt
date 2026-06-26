@@ -59,7 +59,7 @@ fun OverlayTab(state: MutableState<Settings>) {
         SettingsDivider()
         ToggleRow(stringResource(R.string.overlay_show_vps), s.osdShowVps) { apply(s.copy(osdShowVps = it)) }
         SettingsDivider()
-        ToggleRow("Emulation speed %", s.osdShowSpeed) { apply(s.copy(osdShowSpeed = it)) }
+        ToggleRow(stringResource(R.string.overlay_show_speed), s.osdShowSpeed) { apply(s.copy(osdShowSpeed = it)) }
         SettingsDivider()
         ToggleRow(stringResource(R.string.overlay_show_internal_res), s.osdShowResolution) { apply(s.copy(osdShowResolution = it)) }
         SettingsDivider()
