@@ -417,7 +417,8 @@
     <string name="settings_scope_game">游戏</string>
     <string name="settings_scope_game_with_serial">游戏 · %1$s</string>
     <string name="settings_no_disc">无光盘</string>
-    <string name="settings_nav_help">按 L / R 在各部分间切换（手柄）\n触屏上请左右滑动查看所有部分</string>
+    <string name="settings_nav_help">按 L / R 在各部分间切换（手柄）
+触屏上请左右滑动查看所有部分</string>
     <string name="settings_close_hint_b">按 B 退出手柄设置</string>
     <string name="settings_close_hint_y">按 Y 打开 RetroAchievements（手柄）</string>
     <string name="settings_nav_hint">上下 / 左右方向键导航</string>
@@ -475,7 +476,13 @@
     <string name="perf_gamefix_extra_xgkick">额外 XGKICK</string>
     <string name="perf_gamefix_goemon_tlb">Goemon TLB</string>
     <string name="perf_gamefix_vu_sync">VU 同步</string>
-    <string name="perf_gamefix_help">跳过 BIOS - 跳过 PS2 开机画面。\n游戏修复 - 手动兼容修复的总开关。\n跳过 MPEG - 跳过有问题的视频播放。\nFMV 软件渲染 - 用软件渲染过场动画。\nEE 时序 - 调整敏感游戏的 CPU 时序。\n立即 DMA - 立即完成 DMA 传输。\nBlit FPS - 用 PCSX2 内部 FPS Blit 兼容方案。</string>
+    <string name="perf_gamefix_help">跳过 BIOS - 跳过 PS2 开机画面。
+游戏修复 - 手动兼容修复的总开关。
+跳过 MPEG - 跳过有问题的视频播放。
+FMV 软件渲染 - 用软件渲染过场动画。
+EE 时序 - 调整敏感游戏的 CPU 时序。
+立即 DMA - 立即完成 DMA 传输。
+Blit FPS - 用 PCSX2 内部 FPS Blit 兼容方案。</string>
     <string name="perf_speedhack_mtvu">MTVU</string>
     <string name="perf_speedhack_instant_vu1">立即 VU1</string>
     <string name="perf_speedhack_vu_flag_hack">VU 标志 Hack</string>
