@@ -1694,29 +1694,29 @@ object InGameOverlay {
             // Row 1: primary + save/load + swap disc.
 	            BubbleRow(cellH) {
 	                BubbleButton(
-	                    "Resume",
-	                    LineAwesomeIcons.PlaySolid,
+	                    stringResource(R.string.quick_menu_resume),
+                    LineAwesomeIcons.PlaySolid,
 	                    accent = BubbleAccent.Primary,
 	                    selected = playSelection.value == 0,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(0) }
 	                BubbleButton(
-	                    "Save State",
-	                    LineAwesomeIcons.SaveSolid,
+	                    stringResource(R.string.quick_menu_save_state),
+                    LineAwesomeIcons.SaveSolid,
 	                    dim = hardcoreOn.value,
 	                    selected = playSelection.value == 1,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(1) }
 	                BubbleButton(
-	                    "Load State",
-	                    LineAwesomeIcons.FolderOpenSolid,
+	                    stringResource(R.string.quick_menu_load_state),
+                    LineAwesomeIcons.FolderOpenSolid,
 	                    dim = hardcoreOn.value,
 	                    selected = playSelection.value == 2,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(2) }
 	                BubbleButton(
-	                    "Swap Disc",
-	                    LineAwesomeIcons.CompactDiscSolid,
+	                    stringResource(R.string.quick_menu_swap_disc),
+                    LineAwesomeIcons.CompactDiscSolid,
 	                    selected = playSelection.value == 3,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(3) }
@@ -1724,20 +1724,20 @@ object InGameOverlay {
             // Row 2: boot disc + library + renderer + frame limit.
             BubbleRow(cellH) {
 	                BubbleButton(
-	                    "Boot Disc",
-	                    LineAwesomeIcons.CompactDiscSolid,
+	                    stringResource(R.string.quick_menu_boot_disc),
+                    LineAwesomeIcons.CompactDiscSolid,
 	                    selected = playSelection.value == 4,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(4) }
 	                BubbleButton(
-	                    "Library",
-	                    LineAwesomeIcons.ThLargeSolid,
+	                    stringResource(R.string.quick_menu_library),
+                    LineAwesomeIcons.ThLargeSolid,
 	                    selected = playSelection.value == 5,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(5) }
 	                BubbleButton(
-	                    "Renderer",
-	                    LineAwesomeIcons.CubeSolid,
+	                    stringResource(R.string.quick_menu_renderer),
+                    LineAwesomeIcons.CubeSolid,
                     stateLine = when (rendererMode.value) {
                         RendererMode.Auto -> "Auto"
                         RendererMode.Hardware -> "Hardware"
@@ -1748,8 +1748,8 @@ object InGameOverlay {
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(6) }
 	                BubbleButton(
-	                    "Frame Limit",
-	                    LineAwesomeIcons.TachometerAltSolid,
+	                    stringResource(R.string.quick_menu_frame_limit),
+                    LineAwesomeIcons.TachometerAltSolid,
                     stateLine = if (frameLimitOn.value) "On" else "Off",
 	                    accent = if (frameLimitOn.value)
 	                        BubbleAccent.Active else BubbleAccent.Normal,
@@ -1760,13 +1760,13 @@ object InGameOverlay {
             // Row 3: touch layout, OSD master toggle, reset, close.
             BubbleRow(cellH) {
 	                BubbleButton(
-	                    "Touch Layout",
-	                    LineAwesomeIcons.ThLargeSolid,
+	                    stringResource(R.string.quick_menu_touch_layout),
+                    LineAwesomeIcons.ThLargeSolid,
 	                    selected = playSelection.value == 8,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(8) }
 	                BubbleButton(
-	                    "OSD",
+	                    stringResource(R.string.quick_menu_osd),
 	                    if (osdShown.value) LineAwesomeIcons.EyeSolid
                     else LineAwesomeIcons.EyeSlashSolid,
                     stateLine = if (osdShown.value) "On" else "Off",
@@ -1776,14 +1776,14 @@ object InGameOverlay {
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(9) }
 	                BubbleButton(
-	                    "Reset",
-	                    LineAwesomeIcons.RedoAltSolid,
+	                    stringResource(R.string.quick_menu_reset),
+                    LineAwesomeIcons.RedoAltSolid,
 	                    selected = playSelection.value == 10,
 	                    modifier = Modifier.weight(1f),
 	                ) { activatePlaySelection(10) }
 	                BubbleButton(
-	                    "Close Game",
-	                    LineAwesomeIcons.PowerOffSolid,
+	                    stringResource(R.string.quick_menu_close_game),
+                    LineAwesomeIcons.PowerOffSolid,
 	                    accent = BubbleAccent.Danger,
 	                    selected = playSelection.value == 11,
 	                    modifier = Modifier.weight(1f),
